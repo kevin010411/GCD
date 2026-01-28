@@ -1,10 +1,5 @@
-# -*- coding: utf-8 -*-
-if __name__ == "__main__":
-    print("Loading program, please wait. ", end="", flush=True)
-
-
 import os, sys
-import torch, torch.nn.functional as F
+import torch.nn.functional as F
 import numpy as np
 from PyQt6.QtWidgets import (
     QApplication,
@@ -35,8 +30,9 @@ from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 import vtk
 from io import StringIO
 
-from gcd_render import VTKRenderer
-from gcd_core import gcd_core
+from .gcd_render import VTKRenderer
+from .gcd_core import gcd_core
+from src.utils import timer
 
 
 # Custom output redirection class
@@ -88,6 +84,7 @@ class ValueAxis(QWidget):
         if vmin == vmax:
             vmax = vmin + 1e-6
         self.vmin, self.vmax = float(vmin), float(vmax)
+        # print(f"max:{vmax},min:{vmin}")
         self.update()
 
     def _ticks(self):
@@ -138,14 +135,20 @@ class ValueAxis(QWidget):
 # ---- 內層：只負責畫與互動，不含控制列 ----
 class TransferFunctionEditorCanvas(QWidget):
     DEFAULT_CONTROL_POINTS = [
-        (QPointF(0, 200), QColor("#606060"), 0.0),
-        (QPointF(68, 194), QColor("#CBCBCB"), 0.026),
-        (QPointF(175, 169), QColor("#000000"), 0.154),
-        (QPointF(191, 80), QColor("#B8A0FF"), 0.602),
-        (QPointF(214, 69), QColor("#0099FF"), 0.654),
-        (QPointF(245, 48), QColor("#FFB700"), 0.762),
-        (QPointF(300, 16), QColor("#FF0000"), 0.918),
-        (QPointF(400, 0), QColor("#570000"), 1.0),
+        (QPointF(0, 200), QColor("#9d5b2f"), 0.0),
+        (QPointF(50, 200), QColor("#9d5b2f"), 0.0),
+        (QPointF(65, 70), QColor("#e19a4a"), 0.65),
+        (QPointF(80, 60), QColor("#FFFFFF"), 0.7),
+        (QPointF(130, 40), QColor("#FFFFFF"), 0.8),
+        (QPointF(149, 40), QColor("#FFFFFF"), 0.8),
+        (QPointF(150, 200), QColor("#ffeff4"), 0.0),
+        (QPointF(200, 200), QColor("#CBCBCB"), 0.0),
+        (QPointF(210, 200), QColor("#00008f"), 0.0),
+        (QPointF(215, 190), QColor("#00008f"), 0.602),
+        (QPointF(220, 69), QColor("#00c3ff"), 0.654),
+        (QPointF(280, 48), QColor("#fcff03"), 0.762),
+        (QPointF(330, 16), QColor("#ff7f00"), 0.918),
+        (QPointF(400, 0), QColor("#ff2800"), 1.0),
     ]
     DEFAULT_CONTROL_POINTS_2 = [
         (QPointF(0, 200), QColor("#FFFFFF"), 0.0),
@@ -374,11 +377,9 @@ class TransferFunctionEditor(QWidget):
 
         self.canvas = TransferFunctionEditorCanvas(main_window)
 
-        self.minLabel = QLabel(self._fmt(self.canvas.data_min))
-        self.maxLabel = QLabel(self._fmt(self.canvas.data_max))
-
-        self.axis = ValueAxis(formatter=self._fmt, tick_count=6)
-        self._on_range_changed(self.canvas.data_min, self.canvas.data_max)
+        self.axis = ValueAxis(formatter=self._fmt, tick_count=9)
+        self._on_range_changed(-1, 1)
+        # self._on_range_changed(self.canvas.data_min, self.canvas.data_max)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -611,6 +612,8 @@ class MainWindow(QMainWindow):
         self.left_layout = QVBoxLayout(self.left_widget)
         self.left_layout.setSpacing(10)
 
+        self.setup_model_selection()
+
         # file selector
         self.setup_file_selection()
 
@@ -635,6 +638,51 @@ class MainWindow(QMainWindow):
 
         self.left_layout.addStretch()
         left_container_layout.addWidget(self.left_widget, 3)
+
+    def setup_model_selection(self):
+        from pathlib import Path
+
+        root = Path("src\config\model")
+
+        self.model_combo = QComboBox(self)
+        self.model_combo.currentIndexChanged.connect(self._on_combo_changed)
+
+        model_select_layout = QVBoxLayout(self)
+        model_select_layout.addWidget(self.model_combo)
+
+        self.left_layout.addLayout(model_select_layout)
+
+        self._load_model_combo_box(root)
+
+    def _load_model_combo_box(self, root):
+        if not root.exists() or not root.is_dir():
+            self.model_combo.setEnabled(False)
+            self.info.setText(f"❌ 目錄不存在：{self._dir}")
+            return
+
+        files = sorted(
+            p for p in root.glob("*.py") if p.is_file() and p.name != "__init__.py"
+        )
+
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        for p in files:
+            self.model_combo.addItem(
+                p.stem, str(p)
+            )  # 顯示檔名（不含副檔名），userData 放完整路徑
+        self.model_combo.blockSignals(False)
+
+        self.model_combo.setEnabled(bool(files))
+        if not files:
+            return
+
+        default_idx = 0
+        self.model_combo.setCurrentIndex(default_idx)
+        self._on_combo_changed(default_idx)
+
+    def _on_combo_changed(self, idx):
+        path = self.model_combo.currentData()
+        self.core.set_config(path)
 
     # setup file selection
     def setup_file_selection(self):
@@ -704,6 +752,13 @@ class MainWindow(QMainWindow):
         reset_buttons_layout.addWidget(self.reset_button2)
         self.left_layout.addLayout(reset_buttons_layout)
 
+        # replace camera button
+        replace_buttons_layout = QHBoxLayout()
+        self.replace_button = QPushButton("Replace Camera")
+        self.replace_button.clicked.connect(self.replace_camera)
+        replace_buttons_layout.addWidget(self.replace_button)
+        self.left_layout.addLayout(replace_buttons_layout)
+
     # setup action buttons
     def setup_action_buttons(self):
         screenshot_button = QPushButton("Save Screenshot")
@@ -725,7 +780,7 @@ class MainWindow(QMainWindow):
         self.console.setReadOnly(True)
         self.console.setMinimumHeight(100)
         print("\r" + " " * 50 + "\r", end="", flush=True)
-        sys.stdout = ConsoleOutput(self.console)
+        # sys.stdout = ConsoleOutput(self.console)
         self.left_container.layout().addWidget(self.console, 1)
 
     def apply_transfer_functions(self, redraw=True):
@@ -765,7 +820,7 @@ class MainWindow(QMainWindow):
             [self.core.img1_spacing, self.core.img1_spacing],
         )
         self.apply_transfer_functions()
-        self.vtk_renderer.start_rotation()
+        # self.vtk_renderer.start_rotation()
 
     def update_rotation_speed(self, value):
         print(f"Slider value changed to: {value}", flush=True)
@@ -816,9 +871,9 @@ class MainWindow(QMainWindow):
         self.speed_slider.setValue(5)
         self.speed_slider.valueChanged.connect(self.update_rotation_speed)
 
-        self.vtk_renderer.stop_rotation()
-        self.vtk_renderer.reset_camera()
-        self.vtk_renderer.start_rotation()
+        # self.vtk_renderer.stop_rotation()
+        # self.vtk_renderer.reset_camera()
+        # self.vtk_renderer.start_rotation()
 
         current_layer = self.layer_combo.currentText()
         layer_size = self.core.layers.get(current_layer, 0)
@@ -831,16 +886,13 @@ class MainWindow(QMainWindow):
     def reset_to_overlay(self):
         self.use_overlay = True
         self.reset_to_default(1)
-        # self.process_layer_selection()
-        # self.reset_button.setEnabled(False)
-        # self.reset_button2.setEnabled(True)
 
     def reset_to_heatmap(self):
         self.use_overlay = False
         self.reset_to_default(2)
-        # self.process_layer_selection()
-        # self.reset_button2.setEnabled(False)
-        # self.reset_button.setEnabled(True)
+
+    def replace_camera(self):
+        self.vtk_renderer.replace_camera()
 
     def save_screenshot(self):
         file_name, _ = QFileDialog.getSaveFileName(
@@ -888,7 +940,6 @@ class MainWindow(QMainWindow):
                 self.vtk_renderer.stop_rotation()
                 self.vtk_renderer.clear_volumes()
                 self.vtk_renderer.render()
-
                 self.file_name_label.setText(f"{file_name.split('/')[-1]}")
                 self.current_input = file_name
 
@@ -911,7 +962,7 @@ class MainWindow(QMainWindow):
         self.feature.setSize(list(self.core.layers.values())[0])
         self.core.compute_cam()
         self.transfer_editor.auto_set_range_from_data(
-            [self.core.cam, self.core.volume_data]
+            [self.core.cam, self.core.volume_data], "minmax"
         )
         self.vtk_renderer.setup_volume_data(
             [self.core.cam, self.core.volume_data],
@@ -923,7 +974,7 @@ class MainWindow(QMainWindow):
         # self.reset_button2.setEnabled(True)
         self.apply_transfer_functions()
         self.vtk_renderer.render()
-        self.vtk_renderer.start_rotation()
+        # self.vtk_renderer.start_rotation()
         self.vtk_renderer.store_initial_camera()
 
 
@@ -981,7 +1032,7 @@ stylesheet = """
 """
 
 
-def main(argv, core=gcd_core(cfg_name="unet")):
+def main(argv=None, core=gcd_core(cfg_path="src/config/model/unet_3d.py")):
     app = QApplication(argv)
     app.setStyleSheet(stylesheet)
     window = MainWindow(core)

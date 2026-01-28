@@ -21,6 +21,7 @@ from torch.utils.checkpoint import checkpoint
 from monai.networks.blocks.convolutions import Convolution, ResidualUnit
 from monai.networks.layers.factories import Act, Norm
 from monai.networks.layers.simplelayers import SkipConnection
+from ..utils import MODEL
 
 __all__ = ["UNet", "Unet"]
 
@@ -58,6 +59,7 @@ def _strip_in_running_stats(sd, model):
     return sd
 
 
+@MODEL.register_module()
 class UNet(nn.Module):
     """
     Enhanced version of UNet which has residual units implemented with the ResidualUnit class.

@@ -1,2 +1,5 @@
 **/checkpoint/*
 **/data/*
+**/output
+**/__pycache__
+**/.venv

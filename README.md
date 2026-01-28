@@ -7,14 +7,15 @@
 Grad-CAM Discoverer is a Python application for visualizing 3D medical imaging data (e.g., CT scans) using Grad-CAM (Gradient-weighted Class Activation Mapping) with a PyQt6-based GUI and VTK for volume rendering. It allows users to load NIfTI files, process them with a pre-trained model, visualize the results with customizable transfer functions, and interact with the visualization through rotation controls and feature selection.
 
 ## Table of Contents
-- [Features](#features)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Files](#files)
-- [Notes](#notes)
-- [Troubleshooting](#troubleshooting)
-- [License](#license)
+- [Grad-CAM Discoverer](#grad-cam-discoverer)
+  - [Table of Contents](#table-of-contents)
+  - [Features](#features)
+  - [Prerequisites](#prerequisites)
+  - [Quick Start](#quick-start)
+  - [Usage](#usage)
+  - [Notes](#notes)
+  - [Troubleshooting](#troubleshooting)
+  - [License](#license)
 
 ## Features
 
@@ -35,49 +36,40 @@ Grad-CAM Discoverer is a Python application for visualizing 3D medical imaging d
 - NIfTI files (`.nii` or `.nii.gz`) for input data.
 - Pre-trained model checkpoint file (`unetcnx.pth`).
 
-## Installation
+## Quick Start
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/JoyceHsu0/GCD.git
-   cd GCD
-   ```
-2. Create a `dat` directory in the project root and place the required files:
-   - **Pre-trained model weights**: Place the `unetcnx.pth` file in the `dat` directory.
-   - **CT scan data**: Place your NIfTI files (e.g., `demo.1.nii.gz`) in the `dat` directory.
+This project uses uv for dependency management.Make sure uv is installed before proceeding:https://docs.astral.sh/uv/
 
-   Example directory structure:
-   ```
-   GCD/
-   ├── dat/
-   │ ├── unetcnx.pth
-   │ └── demo.1.nii.gz
-   ├── gcd_core.py
-   ├── gcd.py
-   ├── gcd_render.py
-   ├── requirements.txt
-   └── README.md
-   ```
-3. Create and activate a Conda virtual environment with Python 3.10, then install the required packages:
-   ```bash
-   conda create -n GCD python=3.10
-   conda activate GCD
-   ```
-4. Install PyTorch with CUDA 11.3 support:
-   ```
-   pip install torch==1.12.1+cu113 torchvision==0.13.1+cu113 torchaudio==0.12.1 --extra-index-url https://download.pytorch.org/whl/cu113
-   ```
+1. Sync project
+```bash
+uv sync
+```
+2. Load checkpoint by adjust config
+all config is under the ./src/config/model，for example unet_3d,can easily edit ckpt to change your checkpoint dir
+```python
+_base_ = ["../base.py"]
 
-5. Install the remaining dependencies from requirements.txt:
-   ```
-   pip install -r requirements.txt
-   ```
+model = dict(
+    type="UNet",
+    act="RELU",
+    norm="BATCH",
+    out_channels=4,
+)  # 模型
+# ckpt = "checkpoint/3d_unet_2025.pth"  # checkpoint
+ckpt = "checkpoint/3d_unet_60_20_20.pth"  # checkpoint
+default_layer = "decoder 1"  # default layer of CAM 
+```
+3. Start 
+```bash
+uv run main.py
+```
+
 
 ## Usage
 
 1. Run the application:
    ```bash
-   python gcd.py
+   uv run main.py
    ```
 
 2. The GUI will open with the following controls:
@@ -90,24 +82,14 @@ Grad-CAM Discoverer is a Python application for visualizing 3D medical imaging d
    - **Save Screenshot**: Save the current view as a PNG file.
    - **Record Video**: Record a video of the visualization as an MP4 file.
 
-## Files
-
-- `gcd.py`: Main application script with the PyQt6 GUI.
-- `gcd_core.py`: Core logic for loading, processing, and computing Grad-CAM.
-- `gcd_render.py`: VTK-based rendering for 3D visualization.
-- `dat/unetcnx.pth`: Pre-trained model weights (must be provided by the user).
-- `dat/*.nii.gz`: Input NIfTI files (e.g., CT scans).
-
 ## Notes
 
-- Ensure the `dat` directory contains the `unetcnx.pth` file and your NIfTI files before running the application.
 - The application assumes a model input size of 128x128x128 and specific spacing (`(0.7, 0.7, 1.0)`). Adjust these in `gcd_core.py` if needed.
 - Video recording requires sufficient disk space and may take time depending on the rotation speed and number of frames.
 - Public datasets are available to test run. For example, https://www.kaggle.com/datasets/rajendrakpandey/mm-whs-2017-dataset-5-62-gb-158-files-ct-and-mr
 
 ## Troubleshooting
 
-- **Missing `unetcnx.pth`**: Ensure the pre-trained model weights are placed in the `dat` directory.
 - **NIfTI file errors**: Verify that input files are valid NIfTI files and not corrupted.
 - **Performance issues**: Use a CUDA-enabled GPU for faster processing. Check console output for errors.
 - **GUI rendering issues**: Ensure VTK and PyQt6 are correctly installed and compatible with your Python version.

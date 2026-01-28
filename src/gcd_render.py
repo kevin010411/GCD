@@ -2,6 +2,7 @@ import sys
 import vtk, vtk.util.numpy_support
 import numpy as np
 import imageio
+from .utils import timer
 
 
 class VTKRenderer:
@@ -154,7 +155,6 @@ class VTKRenderer:
 
         # 背景色與相機
         self.renderer.SetBackground(0.1, 0.1, 0.1)
-        self._maybe_place_camera()
         self.renderer.ResetCameraClippingRange()
         self.store_initial_camera()
         self.render()
@@ -187,12 +187,15 @@ class VTKRenderer:
 
     def setup_volume_data(self, data, spacing):
         """為相容舊程式：等同於清空後加入單一 volume"""
-        self.clear_volumes()
-        if isinstance(data, list) and isinstance(spacing, list):
-            for d, space in zip(data, spacing):
-                self.add_volume_data(d, space)
-        else:
-            self.add_volume_data(data, spacing)
+
+        with timer("渲染"):
+            self.clear_volumes()
+            if isinstance(data, list) and isinstance(spacing, list):
+                for d, space in zip(data, spacing):
+                    if d is not None and space is not None:
+                        self.add_volume_data(d, space)
+            elif data is not None and spacing is not None:
+                self.add_volume_data(data, spacing)
 
         # 針對單一 volume 設定 transfer function
 
@@ -231,7 +234,7 @@ class VTKRenderer:
         else:
             print("Warning: Render window not available")
 
-    def _maybe_place_camera(self):
+    def replace_camera(self):
         """依所有 volume 的總 bounds 擺相機"""
         if not self.volumes:
             return
@@ -260,6 +263,8 @@ class VTKRenderer:
         cam.SetPosition(center[0], center[1], center[2] + distance)
         cam.SetFocalPoint(*center)
         cam.SetViewUp(0, 1, 0)
+        self.renderer.ResetCameraClippingRange()
+        self.render_window.Render()
 
     def reset_camera(self):
         """Reset the camera to its initial angle with Y-axis upward"""
