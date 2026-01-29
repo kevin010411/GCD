@@ -1,4 +1,6 @@
+import json
 import os, sys
+from typing import Any
 import torch.nn.functional as F
 import numpy as np
 from PyQt6.QtWidgets import (
@@ -368,6 +370,161 @@ class TransferFunctionEditorCanvas(QWidget):
             vals.append((v, QColor(c), float(a)))
         return vals
 
+    # ---------- 小工具：QColor <-> hex ----------
+    @staticmethod
+    def _qcolor_to_hex(c: QColor, with_alpha: bool = False) -> str:
+        """回傳 #RRGGBB 或 #RRGGBBAA"""
+        if with_alpha:
+            return "#{:02X}{:02X}{:02X}{:02X}".format(
+                c.red(), c.green(), c.blue(), c.alpha()
+            )
+        return "#{:02X}{:02X}{:02X}".format(c.red(), c.green(), c.blue())
+
+    @staticmethod
+    def _hex_to_qcolor(s: str) -> QColor:
+        """
+        支援：
+          #RRGGBB
+          #RRGGBBAA
+        """
+        s = (s or "").strip()
+        if not s.startswith("#"):
+            s = "#" + s
+        if len(s) == 7:
+            return QColor(s)
+        if len(s) == 9:
+            r = int(s[1:3], 16)
+            g = int(s[3:5], 16)
+            b = int(s[5:7], 16)
+            a = int(s[7:9], 16)
+            c = QColor(r, g, b, a)
+            return c
+        # fallback：讓 QColor 自己嘗試解析
+        return QColor(s)
+
+    # ---------- 核心：序列化 ----------
+    def to_json_dict(self, include_alpha: bool = False) -> dict[str, Any]:
+        """
+        匯出目前 transfer function 成 JSON dict
+        include_alpha：是否輸出 #RRGGBBAA
+        """
+        cps = []
+        for p, c, a in sorted(self.control_points, key=lambda pp: pp[0].x()):
+            cps.append(
+                {
+                    "x": float(p.x()),
+                    "y": float(p.y()),
+                    "color": self._qcolor_to_hex(QColor(c), with_alpha=include_alpha),
+                    "opacity": float(a),
+                }
+            )
+
+        return {
+            "canvas": {
+                "width": float(max(self.width(), 1)),
+                "height": float(max(self.height(), 1)),
+            },
+            "data_range": {"min": float(self.data_min), "max": float(self.data_max)},
+            "control_points": cps,
+        }
+
+    def from_json_dict(
+        self,
+        obj: dict[str, Any],
+        *,
+        rescale_to_current_size: bool = True,
+        apply: bool = True,
+    ) -> None:
+        """
+        從 JSON dict 載入 transfer function
+        rescale_to_current_size：
+          - True：依據 JSON 內 canvas.width/height 與目前 widget 寬高做等比縮放
+          - False：直接用 JSON 的 x,y 當像素座標塞進來
+        apply：
+          - True：呼叫 apply_transfer_functions() 與 update()
+        """
+        if not isinstance(obj, dict):
+            raise ValueError("Invalid JSON object: root must be a dict")
+
+        ver = int(obj.get("version", 1))
+        if ver != 1:
+            raise ValueError(f"Unsupported JSON version: {ver}")
+
+        # 讀 data range（可選）
+        dr = obj.get("data_range", None)
+        if isinstance(dr, dict) and "min" in dr and "max" in dr:
+            vmin = float(dr["min"])
+            vmax = float(dr["max"])
+            if vmin == vmax:
+                vmax = vmin + 1e-6
+            self.data_min, self.data_max = vmin, vmax
+
+        # 縮放基準（可選）
+        src_canvas = (
+            obj.get("canvas", {}) if isinstance(obj.get("canvas", {}), dict) else {}
+        )
+        src_w = float(src_canvas.get("width", 400.0))
+        src_h = float(src_canvas.get("height", 200.0))
+        if src_w <= 0:
+            src_w = 400.0
+        if src_h <= 0:
+            src_h = 200.0
+
+        dst_w = float(max(self.width(), 1))
+        dst_h = float(max(self.height(), 1))
+
+        sx = (dst_w / src_w) if rescale_to_current_size else 1.0
+        sy = (dst_h / src_h) if rescale_to_current_size else 1.0
+
+        cps_in = obj.get("control_points", [])
+        if not isinstance(cps_in, list) or len(cps_in) == 0:
+            raise ValueError(
+                "Invalid JSON object: control_points must be a non-empty list"
+            )
+
+        new_points: list[tuple[QPointF, QColor, float]] = []
+        for item in cps_in:
+            if not isinstance(item, dict):
+                continue
+            x = float(item.get("x", 0.0)) * sx
+            y = float(item.get("y", dst_h)) * sy
+            color = self._hex_to_qcolor(str(item.get("color", "#808080")))
+            opacity = float(item.get("opacity", 1.0 - (y / max(dst_h, 1))))
+
+            # 夾在範圍內（避免壞資料）
+            x = max(0.0, min(x, dst_w))
+            y = max(0.0, min(y, dst_h))
+            opacity = max(0.0, min(opacity, 1.0))
+
+            new_points.append((QPointF(x, y), color, opacity))
+
+        # 依 x 排序（維持你原本假設）
+        new_points.sort(key=lambda t: t[0].x())
+        self.control_points = new_points
+        self.selected_point = None
+
+        if apply:
+            self.main_window.apply_transfer_functions(False)
+            self.update()
+            self.dataRangeChanged.emit(self.data_min, self.data_max)
+
+    # ---------- 檔案 I/O ----------
+    def save_json(
+        self, path: str, *, indent: int = 2, include_alpha: bool = False
+    ) -> None:
+        obj = self.to_json_dict(include_alpha=include_alpha)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=indent)
+
+    def load_json(
+        self, path: str, *, rescale_to_current_size: bool = True, apply: bool = True
+    ) -> None:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        self.from_json_dict(
+            obj, rescale_to_current_size=rescale_to_current_size, apply=apply
+        )
+
 
 # ---- 外層：含底部最小/最大值控制列 + 自動帶入 ----
 class TransferFunctionEditor(QWidget):
@@ -381,11 +538,20 @@ class TransferFunctionEditor(QWidget):
         self._on_range_changed(-1, 1)
         # self._on_range_changed(self.canvas.data_min, self.canvas.data_max)
 
+        button_layout = QHBoxLayout()
+        load_button = QPushButton("Load")
+        load_button.clicked.connect(self.load_transfer)
+        save_button = QPushButton("Save")
+        save_button.clicked.connect(self.save_transfer)
+        button_layout.addWidget(load_button)
+        button_layout.addWidget(save_button)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         layout.addWidget(self.canvas, 1)
         layout.addWidget(self.axis)
+        layout.addLayout(button_layout)
 
         self.canvas.dataRangeChanged.connect(self._on_range_changed)
 
@@ -423,6 +589,24 @@ class TransferFunctionEditor(QWidget):
         if abs(v - round(v)) < 1e-9:
             return f"{int(round(v))}"
         return f"{v:.6f}".rstrip("0").rstrip(".")
+
+    def load_transfer(self):
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Load Transfer Function", "trasfer.json", "JSON Files (*.json)"
+        )
+        if file_name:
+            if file_name.lower().endswith(".json"):
+                file_name = file_name
+            self.canvas.load_json(file_name)
+
+    def save_transfer(self):
+        file_name, _ = QFileDialog.getSaveFileName(
+            self, "Save Transfer Function", "trasfer.json", "JSON Files (*.json)"
+        )
+        if file_name:
+            if file_name.lower().endswith(".json"):
+                file_name = file_name
+            self.canvas.save_json(file_name)
 
 
 class Feature(QWidget):

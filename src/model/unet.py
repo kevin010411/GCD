@@ -9,6 +9,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# 由於設計問題，我們沒辦法使用hook來訪問模型的不同層，因此在gradCAM只能被限制在訪問最上面的encoder與decoder
+
 from __future__ import annotations
 
 import warnings
@@ -357,76 +359,76 @@ class UNet(nn.Module):
         return conv
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Keep original design:
+        - UNet is nested Sequential(down, SkipConnection(subblock), up)
+        - Use checkpoint on down/skip/up
+        Collect all stage features:
+        - encoder k: output of down at depth k (top=1)
+        - decoder k: output of up at depth k (top=1)
+        """
 
-        # default fallback if structure is unexpected
-        def _fallback():
-            return self.model(x)
-
-        # expect top-level structure: Sequential(down, SkipConnection(subblock), up)
-        try:
-            seq = self.model
-            down, skip, up = seq[0], seq[1], seq[2]
-        except Exception:
-            return _fallback()
-
-        # containers for top-level unit features
-        down_feats: list[torch.Tensor] = []
-        up_feats: list[torch.Tensor] = []
-
-        # how many units to keep (user expects num_res_units granularity)
-        num_units = getattr(self, "num_res_units", 0) + 1
-        if isinstance(num_units, int) and num_units >= 0:
-
-            # helper: register hooks on inner modules to capture intermediate outputs
-            def _collect_first_n_units(mod: nn.Module, bucket: list, n: int):
-                hooks = []
-
-                def make_hook():
-                    def _hook(m, inp, out):
-                        if len(bucket) < n:
-                            bucket.append(out)
-
-                    return _hook
-
-                # prioritize MONAI's internal sequential container if present
-                for name, child in mod.named_modules():
-                    cls = child.__class__.__name__.lower()
-                    if "residualunit" in cls or "convolution" in cls:
-                        hooks.append(child.register_forward_hook(make_hook()))
-                return hooks
-
-            # attach hooks
-            down_hooks = _collect_first_n_units(down, down_feats, num_units)
-            up_hooks = _collect_first_n_units(up, up_feats, num_units)
-
-        # run with checkpointing
-        xd = checkpoint(down, x, use_reentrant=False)
-        xs = checkpoint(skip, xd, use_reentrant=False)
-        xu = checkpoint(up, xs, use_reentrant=False)
-
-        # remove hooks
-        for h in down_hooks + up_hooks:
-            try:
-                h.remove()
-            except Exception:
-                pass
-
-        # build self.layers when gradients are needed
-        if x.requires_grad:
+        need_cam = x.requires_grad
+        if need_cam:
             self.layers = {}
-            # ensure exactly num_units entries per side where possible
-            for i in range(min(len(down_feats), num_units)):
-                self.layers[f"encoder {i+1}"] = down_feats[i]
-            for i in range(min(len(up_feats), num_units)):
-                self.layers[f"decoder {i+1}"] = up_feats[i]
-            # always retain grads for CAM
+            enc_feats: list[torch.Tensor] = []
+            dec_feats: list[torch.Tensor] = []
+
+        def _is_unet_block(m: nn.Module) -> bool:
+            # expect a layer block: Sequential(down, SkipConnection(subblock), up)
+            if not isinstance(m, nn.Sequential) or len(m) != 3:
+                return False
+            return isinstance(m[1], SkipConnection)
+
+        def _run_block(block: nn.Module, inp: torch.Tensor) -> torch.Tensor:
+            # if the structure is unexpected, fallback
+            if not _is_unet_block(block):
+                return block(inp)
+
+            down, skip, up = block[0], block[1], block[2]
+
+            # 1) down
+            xd = checkpoint(down, inp, use_reentrant=False)
+            if need_cam:
+                enc_feats.append(xd)
+
+            # 2) skip (this will run subblock inside SkipConnection)
+            if need_cam and isinstance(skip.submodule, nn.Sequential):
+                xs = _run_block(skip, xd)
+            else:
+                xs = checkpoint(skip, xd, use_reentrant=False)
+
+            # 3) up
+            xu = checkpoint(up, xs, use_reentrant=False)
+            if need_cam:
+                dec_feats.append(xu)
+
+            return xu
+
+        out = _run_block(self.model, x)
+
+        # Save features for CAM (top=1, deeper increases)
+        if need_cam:
+            # enc_feats / dec_feats were appended in forward order:
+            # encoder: top -> deeper (good)
+            # decoder: top -> deeper? actually appended as we unwind recursion depends on SkipConnection internals;
+            # BUT in this design (calling down/skip/up at each visited block), this list is top -> deeper for stages we execute.
+            # To be safe and consistent with "top=1", we keep as collected.
+            self.layers = {}
+
+            for i, t in enumerate(enc_feats, 1):
+                self.layers[f"encoder {i}"] = t
+            for i, t in enumerate(dec_feats, 1):
+                self.layers[f"decoder {i}"] = t
+
+            # retain grads for CAM
             for v in self.layers.values():
                 try:
                     v.retain_grad()
                 except Exception:
                     pass
 
-        return xu
+        return out
 
 
 Unet = UNet
