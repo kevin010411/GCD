@@ -8,6 +8,6 @@ model = dict(
     feature_size=48,
     use_checkpoint=True,
 )  # 模型
-ckpt = "checkpoint/swin_unetr_2025.pth"  # 權重檔
+ckpt = "checkpoint/60_20_20_fold3/swin_unetr.pth"  # 權重檔
 # ckpt = "checkpoint/swim_unetr_60_20_20.pth"  # 權重檔
 default_layer = "dec4"  # 預設 CAM 層

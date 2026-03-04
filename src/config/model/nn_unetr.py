@@ -11,5 +11,5 @@ model = dict(
     filters=[16, 32, 64, 128, 256],
     use_ckpt=True,
 )  # 模型
-ckpt = "checkpoint/nnUNet_2025.pth"  # 權重檔
+ckpt = "checkpoint/60_20_20_fold3/nnunet.pth"  # 權重檔
 default_layer = "dec0"  # 預設 CAM 層

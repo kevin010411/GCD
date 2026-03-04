@@ -13,5 +13,5 @@ model = dict(
     res_block=True,
     dropout_rate=0.0,
 )  # 模型
-ckpt = "checkpoint/unetr_2025.pth"  # 權重檔
+ckpt = "checkpoint/60_20_20_fold3/unetr.pth"  # 權重檔
 default_layer = "dec1"  # 預設 CAM 層
