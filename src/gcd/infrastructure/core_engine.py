@@ -1,0 +1,429 @@
+from __future__ import annotations
+
+import os
+from collections.abc import Callable
+
+import monai.transforms as mt
+import torch
+import torch.nn.functional as F
+from mmengine import Config
+
+from src import model as _model_registry  # noqa: F401
+from src.utils import build_model, timer
+
+
+class ModelLoadStateDictError(RuntimeError):
+    def __init__(self, message: str, *, error_file: str) -> None:
+        super().__init__(message)
+        self.error_file = error_file
+        self.skip_error_store = True
+
+
+class GradCamEngine:
+    def __init__(
+        self,
+        cfg_path: str,
+        save_dir: str | None = None,
+        logger: Callable[[str], None] | None = None,
+        error_store=None,
+    ) -> None:
+        self._logger = logger or (lambda message: None)
+        self.error_store = error_store
+        self.cfg = Config.fromfile(cfg_path)
+        self._apply_config()
+
+        self.cam = torch.zeros([256, 256, 150], dtype=torch.float32)
+        self.volume_data = torch.zeros([256, 256, 150], dtype=torch.float32)
+        self.img0 = None
+        self.img1 = None
+        self.origin_img = None
+        self.origin_meta = {}
+        self.origin_shape = None
+        self.img1_spacing = self.SPACING
+        self.layers = {"layer1": 1}
+        self.file_name = ""
+        self.patch: list[dict[str, torch.Tensor]] = []
+        self.target_class = 1
+
+        self.save_dir = save_dir
+        if self.save_dir:
+            os.makedirs(self.save_dir, exist_ok=True)
+
+    def _apply_config(self) -> None:
+        self.SIZE = self.cfg["size"]
+        self.STRIDE = self.cfg["stride"]
+        self.SPACING = self.cfg["spacing"]
+        self.PERMUTE = self.cfg["permute"]
+
+    def _log(self, message: str) -> None:
+        self._logger(message)
+
+    def set_config(self, config_path: str) -> None:
+        self.cfg = Config.fromfile(config_path)
+        self._apply_config()
+        self._log(f"已設定 Config 為: {config_path}")
+
+    def set_target_class(self, target_class: int) -> None:
+        self.target_class = int(target_class)
+
+    def default_feature_size(self) -> int:
+        return list(self.layers.values())[0]
+
+    @staticmethod
+    def _gradcam_objective(logits: torch.Tensor, target_class: int) -> torch.Tensor:
+        if not (0 <= target_class < logits.size(1)):
+            raise ValueError(
+                f"target_class={target_class} 超出模型輸出範圍 0..{logits.size(1) - 1}"
+            )
+        index = torch.argmax(logits[0], dim=0)
+        loss = (logits[0, target_class] * (index == target_class)).sum()
+        return loss
+
+    def load_and_process_input(self, input_file: str | None = None) -> list[str]:
+        messages: list[str] = []
+        if input_file is not None:
+            self.file_name = input_file
+        if not self.file_name:
+            raise ValueError("尚未指定輸入檔案，無法載入與處理資料。")
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.origin_img, self.origin_meta = mt.LoadImage(image_only=False)(
+            self.file_name
+        )
+        self.img0 = mt.EnsureChannelFirst()(self.origin_img, self.origin_meta)
+
+        with timer("資料前處理"):
+            try:
+                self.origin_meta = dict(self.img0.meta)
+            except Exception:
+                self.origin_meta = {}
+            self.origin_shape = tuple(self.img0.shape)
+
+            self.img1 = mt.Spacing(mode="bilinear", pixdim=self.SPACING)(self.img0)
+            width, depth = self.SIZE + self.STRIDE, self.SIZE
+            self.img1 = mt.SpatialPad(
+                spatial_size=(width, width, depth), mode="constant", value=0
+            )(self.img1)
+
+            width, depth = self.SIZE + self.STRIDE, self.SIZE
+            shape = list(self.img1.shape)
+            slices = [slice(None), slice(None), slice(None), slice(None)]
+            if shape[1] < width:
+                x = (width - shape[1]) // 2
+                slices[1] = slice(x, x + shape[1])
+                shape[1] = width
+            if shape[2] < width:
+                x = (width - shape[2]) // 2
+                slices[2] = slice(x, x + shape[2])
+                shape[2] = width
+            if shape[3] < depth:
+                x = (depth - shape[3]) // 2
+                slices[3] = slice(x, x + shape[3])
+                shape[3] = depth
+            if any(current.start is not None for current in slices):
+                image = torch.zeros(shape)
+                image[tuple(slices)] = self.img1
+                self.img1 = image
+                messages.append("info: image is zero padded")
+
+            self.img1 = mt.ScaleIntensityRange(
+                a_min=-42, a_max=423, b_min=0, b_max=1, clip=True
+            )(self.img1)
+            self.img1_spacing = (
+                self.SPACING[self.PERMUTE[0]],
+                self.SPACING[self.PERMUTE[1]],
+                self.SPACING[self.PERMUTE[2]],
+            )
+
+        with timer("載入模型"):
+            model = build_model(self.cfg.model).to(device)
+            ckpt_path = self.cfg.ckpt
+            if not os.path.exists(ckpt_path):
+                raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+            pth = torch.load(ckpt_path, map_location="cpu")
+            sd = pth["state_dict"].copy() if "state_dict" in pth else pth.copy()
+
+            missing, unexpected = model.load_state_dict(sd, strict=False)
+            if missing or unexpected:
+                error_path = None
+                if self.error_store is not None:
+                    error_path = self.error_store.save_json(
+                        {
+                            "error_type": "model_load_error",
+                            "config_path": getattr(self.cfg, "filename", None),
+                            "checkpoint_path": ckpt_path,
+                            "missing_count": len(missing),
+                            "missing_keys": list(missing),
+                            "unexpected_count": len(unexpected),
+                            "unexpected_keys": list(unexpected),
+                        },
+                        suffix="model_load_error",
+                    )
+                raise ModelLoadStateDictError(
+                    (
+                        "Model load failed because checkpoint keys do not match the model."
+                        + (
+                            f" Error details saved to: {error_path}"
+                            if error_path
+                            else ""
+                        )
+                    ),
+                    error_file=str(error_path) if error_path else "",
+                )
+            model.eval()
+
+        img2 = self.img1.unsqueeze(0).to(device)
+        img2.requires_grad_()
+
+        with timer("模型推論", track_gpu=True):
+            x0, y0, z0 = list(
+                (
+                    torch.tensor(self.img1[0].shape)
+                    - torch.tensor(
+                        [self.STRIDE + self.SIZE, self.STRIDE + self.SIZE, self.SIZE]
+                    )
+                )
+                // 2
+            )
+
+            self.patch = []
+            tiles = [
+                (0, 0),
+                (0, self.STRIDE),
+                (self.STRIDE, 0),
+                (self.STRIDE, self.STRIDE),
+            ]
+            for x, y in tiles:
+                model.zero_grad(set_to_none=True)
+                logits = model(
+                    img2[
+                        ...,
+                        x0 + x : x0 + x + self.SIZE,
+                        y0 + y : y0 + y + self.SIZE,
+                        z0 : z0 + self.SIZE,
+                    ]
+                )
+
+                loss = self._gradcam_objective(logits, self.target_class)
+                loss.backward()
+
+                if not hasattr(model, "layers") or not model.layers:
+                    raise RuntimeError(
+                        "model.layers 未填入。請確認模型 forward 在 requires_grad=True 時"
+                        "會保留中間層與梯度。"
+                    )
+
+                self.patch.append(
+                    {
+                        key: (value.detach() * value.grad.detach()).cpu()
+                        for key, value in model.layers.items()
+                    }
+                )
+                self.patch[-1]["pred"] = logits.to("cpu")
+
+            self.layers = {key: value.size(1) for key, value in model.layers.items()}
+
+            del model, img2, pth, sd
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        for message in messages:
+            self._log(message)
+        return messages
+
+    def compute_cam(
+        self,
+        layer: str | None = None,
+        n1: int = 0,
+        n2: int = 999,
+        use_overlay: bool = True,
+    ) -> str:
+        if not self.file_name:
+            raise ValueError("尚未載入檔案，無法計算 CAM。")
+
+        selected_layer = layer or self.cfg["default_layer"]
+        if selected_layer not in self.layers:
+            selected_layer = self.cfg["default_layer"]
+            self._log(f"指定 layer 不存在，改用預設 layer: {selected_layer}")
+
+        with timer(f"layer={selected_layer} 計算 GradCAM"):
+            n2 = min(n2, self.layers[selected_layer])
+            shape = list(self.img1[0].shape)
+            cam = torch.zeros(shape, dtype=torch.float32)
+            pred_shape = list(self.patch[0]["pred"].shape)[:2] + shape
+            model_out = torch.zeros(pred_shape, dtype=torch.float32)
+
+            x0, y0, z0 = list(
+                (
+                    torch.tensor(self.img1[0].shape)
+                    - torch.tensor(
+                        [self.STRIDE + self.SIZE, self.STRIDE + self.SIZE, self.SIZE]
+                    )
+                )
+                // 2
+            )
+
+            tiles = [
+                (0, 0),
+                (0, self.STRIDE),
+                (self.STRIDE, 0),
+                (self.STRIDE, self.STRIDE),
+            ]
+            for index, (x, y) in enumerate(tiles):
+                q = torch.sum(
+                    self.patch[index][selected_layer][:, n1:n2, ...], dim=1
+                ).unsqueeze(0)
+                q = F.interpolate(
+                    q, size=(self.SIZE, self.SIZE, self.SIZE), mode="trilinear"
+                )
+
+                p1 = self.patch[index]["pred"]
+                p1 = F.interpolate(
+                    p1, size=(self.SIZE, self.SIZE, self.SIZE), mode="trilinear"
+                )
+
+                overlap = self.SIZE - self.STRIDE
+                if index in (0, 1):
+                    for i in range(overlap):
+                        weight = (overlap - i) / overlap
+                        q[0, 0, self.STRIDE + i, :, :] *= weight
+                        p1[0, 0, self.STRIDE + i, :, :] *= weight
+                if index in (2, 3):
+                    for i in range(overlap):
+                        weight = i / overlap
+                        q[0, 0, i, :, :] *= weight
+                        p1[0, 0, i, :, :] *= weight
+                if index in (0, 2):
+                    for i in range(overlap):
+                        weight = (overlap - i) / overlap
+                        q[0, 0, :, self.STRIDE + i, :] *= weight
+                        p1[0, 0, :, self.STRIDE + i, :] *= weight
+                if index in (1, 3):
+                    for i in range(overlap):
+                        weight = i / overlap
+                        q[0, 0, :, i, :] *= weight
+                        p1[0, 0, :, i, :] *= weight
+
+                xs = slice(x0 + x, x0 + x + self.SIZE)
+                ys = slice(y0 + y, y0 + y + self.SIZE)
+                zs = slice(z0, z0 + self.SIZE)
+
+                cam[xs, ys, zs] += q[0, 0]
+                model_out[:, :, xs, ys, zs] += p1
+
+            cam = torch.maximum(cam, torch.tensor(0))
+            cam -= torch.min(cam)
+            maximum = torch.max(cam)
+            if maximum > 0:
+                cam /= maximum
+
+            self.cam = ((cam + 1) * 400).permute(*self.PERMUTE)
+            self.volume_data = (
+                (self.img1[0] * 300).permute(*self.PERMUTE) if use_overlay else None
+            )
+            self.model_output = torch.argmax(model_out, dim=1)[0].permute(*self.PERMUTE)
+
+        if self.save_dir:
+            os.makedirs(self.save_dir, exist_ok=True)
+            base = os.path.splitext(os.path.basename(self.file_name))[0]
+            self._save_volume(
+                cam.permute(*self.PERMUTE),
+                os.path.join(
+                    self.save_dir, f"{base}_{self.cfg.model.type}_{selected_layer}_cam"
+                ),
+            )
+            self._save_volume(
+                self.model_output,
+                os.path.join(self.save_dir, f"{base}_{self.cfg.model.type}_pred"),
+            )
+            self._save_volume(
+                self.volume_data, os.path.join(self.save_dir, f"{base}_img")
+            )
+        return selected_layer
+
+    def _inv_permute(self, tensor: torch.Tensor) -> torch.Tensor:
+        if tensor is None:
+            return tensor
+        inverse = [0, 0, 0]
+        for index, permute_index in enumerate(self.PERMUTE):
+            inverse[permute_index] = index
+        return tensor.permute(*inverse)
+
+    def _resize(self, volume: torch.Tensor, size) -> torch.Tensor:
+        mode = (
+            "trilinear"
+            if volume.dtype in (torch.float32, torch.float16, torch.float64)
+            else "nearest"
+        )
+        volume = volume.to(torch.float32)
+        data = volume.unsqueeze(0).unsqueeze(0)
+        if mode == "trilinear":
+            data = F.interpolate(data, size=size, mode=mode, align_corners=False)
+        else:
+            data = F.interpolate(data, size=size, mode=mode)
+        return data[0, 0]
+
+    def _to_origin_space(self, tensor: torch.Tensor) -> torch.Tensor:
+        if tensor is None:
+            return tensor
+        volume = self._inv_permute(tensor)
+        want = (
+            list(self.origin_shape[1:])
+            if self.origin_shape is not None
+            else list(volume.shape)
+        )
+        return (
+            self._resize(volume, want)
+            if tuple(volume.shape) != tuple(want)
+            else volume.to(torch.float32)
+        )
+
+    def _safe_affine(self):
+        import numpy as np
+
+        spacing = None
+        if (
+            self.origin_meta
+            and "pixdim" in self.origin_meta
+            and len(self.origin_meta["pixdim"]) >= 4
+        ):
+            try:
+                spacing = tuple(map(float, self.origin_meta["pixdim"][1:4]))
+            except Exception:
+                spacing = None
+        if spacing is None:
+            spacing = tuple(
+                float(value) for value in (self.img1_spacing or (1.0, 1.0, 1.0))
+            )
+
+        affine = (
+            self.origin_meta["affine"]
+            if self.origin_meta and "affine" in self.origin_meta
+            else None
+        )
+        if affine is None:
+            affine = np.diag([spacing[0], spacing[1], spacing[2], 1.0]).astype(
+                "float32"
+            )
+        return affine
+
+    def _save_volume(
+        self, tensor: torch.Tensor, stem: str, exist_ok: bool = True
+    ) -> None:
+        if tensor is None:
+            return
+        try:
+            import nibabel as nib
+
+            array = (
+                self._to_origin_space(tensor).detach().cpu().numpy().astype("float32")
+            )
+            affine = self._safe_affine()
+            nii = nib.Nifti1Image(array, affine=affine)
+            if exist_ok:
+                nib.save(nii, f"{stem}.nii.gz")
+            elif os.path.exists(f"{stem}.nii.gz"):
+                raise FileExistsError(f"File({stem}.nii.gz) already exists.")
+        except Exception as exc:
+            self._log(f"note: nibabel not available or failed ({exc})")
