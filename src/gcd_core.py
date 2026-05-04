@@ -27,6 +27,7 @@ class gcd_core:
         self.layers = {"layer1": 1}
         self.file_name = ""
         self.patch = []
+        self.target_class = 1
 
         self.save_dir = save_dir
         if self.save_dir:
@@ -36,12 +37,19 @@ class gcd_core:
         self.cfg = Config.fromfile(config_path)
         print(f"已設定Config為:{self.cfg}")
 
-    def load_and_process_input(self, input_file):
-        self.file_name = input_file
+    def load_and_process_input(self, input_file=None):
+        if input_file is not None:
+            self.file_name = input_file
+        if self.file_name == "":
+            raise Exception("尚未指定輸入檔案，無法載入與處理資料。")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.origin_img = mt.LoadImage()(input_file)
-        self.img0 = mt.EnsureChannelFirst()(self.origin_img)
+        # self.origin_img = mt.LoadImage()(self.file_name)
+        # self.img0 = mt.EnsureChannelFirst()(self.origin_img)
+        self.origin_img, self.origin_meta = mt.LoadImage(image_only=False)(
+            self.file_name
+        )
+        self.img0 = mt.EnsureChannelFirst()(self.origin_img, self.origin_meta)
 
         with timer("資料前處理"):
             # --- 記錄原始 metadata 與 shape 以供存檔還原 ---
@@ -108,16 +116,26 @@ class gcd_core:
             #     if "ds" in key:
             #         sd.pop(key)
             # if self.cfg.model.type == "UNETR":
-            #     sd.pop("vit.patch_embedding.position_embeddings", None)
+            #     out = {}
+            #     for k, v in sd.items():
+            #         k2 = k
+            #         k2 = k2.replace(
+            #             "vit.patch_embedding.patch_embeddings.1.weight",
+            #             "vit.patch_embedding.patch_embeddings.weight",
+            #         )
+            #         k2 = k2.replace(
+            #             "vit.patch_embedding.patch_embeddings.1.bias",
+            #             "vit.patch_embedding.patch_embeddings.bias",
+            #         )
+            #         out[k2] = v
+            #     sd = out
 
             missing, unexpected = model.load_state_dict(sd, strict=False)
             if missing:
-                print(
-                    f"warn: missing keys: {len(missing)} (showing first 5) {missing[:5]}"
-                )
+                print(f"warn: missing keys: {len(missing)} (showing first 5) {missing}")
             if unexpected:
                 print(
-                    f"warn: unexpected keys: {len(unexpected)} (showing first 5) {unexpected[:5]}"
+                    f"warn: unexpected keys: {len(unexpected)} (showing first 5) {unexpected}"
                 )
             model.eval()
 
@@ -155,7 +173,10 @@ class gcd_core:
                 )
 
                 index = torch.argmax(logits[0], dim=0)
-                loss = (logits[0, 1] * (index == 1)).sum()
+                print(f"{self.target_class=}")
+                loss = (
+                    logits[0, self.target_class] * (index == self.target_class)
+                ).sum()
                 loss.backward()
 
                 if not hasattr(model, "layers") or not model.layers:
@@ -186,11 +207,14 @@ class gcd_core:
                 torch.cuda.empty_cache()
 
     def compute_cam(self, layer=None, n1=0, n2=999, use_overlay=True):
+        if self.file_name == "":
+            return False
         if not layer:
             # 若未指定，就依當前 config 的預設層
             layer = self.cfg["default_layer"]
         if layer not in self.layers:
-            raise KeyError(f"layer '{layer}' 不存在，可選：{list(self.layers.keys())}")
+            print(f"layer '{layer}' 不存在，可選：{list(self.layers.keys())}")
+            layer = self.cfg["default_layer"]
         with timer(f"{layer=}計算GradCAM"):
 
             n2 = min(n2, self.layers[layer])
@@ -293,6 +317,7 @@ class gcd_core:
                 )
                 self._save_volume(self.volume_data, os.path.join(_dir, f"{base}_img"))
                 print(f"\nsaved to: {_dir}")
+            return True
 
     def _inv_permute(self, t: torch.Tensor) -> torch.Tensor:
         """將 (X, Y, Z) with self.PERMUTE 還原回與 self.img0 相同的空間軸順序。"""

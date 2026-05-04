@@ -6,6 +6,7 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
+    QSpinBox,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -721,7 +722,7 @@ class Feature(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, core):
+    def __init__(self, core: gcd_core):
         super().__init__()
         self.setWindowTitle("Grad-CAM Discoverer")
         self.setGeometry(QMainWindow().screen().geometry())
@@ -819,6 +820,9 @@ class MainWindow(QMainWindow):
 
         # screenshot, and record buttons
         self.setup_action_buttons()
+
+        # class_selection
+        self.setup_class_selection()
 
         self.left_layout.addStretch()
         left_container_layout.addWidget(self.left_widget, 3)
@@ -924,6 +928,23 @@ class MainWindow(QMainWindow):
         self.layer_combo.addItems(layers)
         self.layer_combo.setCurrentText(layers[0])
 
+    def setup_class_selection(self):
+        self.spin_class_num = QSpinBox()
+        self.spin_class_num.setRange(0, 100)  # 設定範圍
+        self.spin_class_num.setSingleStep(1)  # 每次滾動增加/減少多少
+        self.spin_class_num.valueChanged.connect(self.process_class_selection)
+
+        layout = QHBoxLayout()
+
+        layout.addWidget(QLabel("Class Selection: "))
+        layout.addWidget(self.spin_class_num, 1)
+        self.left_layout.addLayout(layout)
+
+    def process_class_selection(self):
+        class_num = self.spin_class_num.value()
+        self.core.target_class = class_num
+        self.proecess_input()
+
     # reset buttons
     def reset_buttons(self):
         reset_buttons_layout = QHBoxLayout()
@@ -952,11 +973,6 @@ class MainWindow(QMainWindow):
         record_button = QPushButton("Record Video")
         record_button.clicked.connect(self.record_video)
         self.left_layout.addWidget(record_button)
-
-        #
-        # self.toggle_overlay_button = QPushButton("Switch to Heatmap Only")
-        # self.toggle_overlay_button.clicked.connect(self.toggle_overlay)
-        # self.left_layout.addWidget(self.toggle_overlay_button)
 
     # setup console
     def setup_console(self):
@@ -994,7 +1010,10 @@ class MainWindow(QMainWindow):
             self.feature.setSize(self.core.layers[layer])
         else:
             layer = self.selected_layer
-        self.core.compute_cam(layer, *self.feature.get(), use_overlay=self.use_overlay)
+        if not self.core.compute_cam(
+            layer, *self.feature.get(), use_overlay=self.use_overlay
+        ):
+            return False
         self.transfer_editor.auto_set_range_from_data(
             [self.core.cam, self.core.volume_data], "minmax"
         )
@@ -1115,26 +1134,30 @@ class MainWindow(QMainWindow):
                 self.stop_button.setEnabled(False)
 
     def open_file(self):
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Open NIfTI File", "", "NIfTI Files (*.nii.gz *.nii)"
+        )
+        if file_name:
+            self.proecess_input(file_name)
+
+    def proecess_input(self, file_name=None):
         try:
-            file_name, _ = QFileDialog.getOpenFileName(
-                self, "Open NIfTI File", "", "NIfTI Files (*.nii.gz *.nii)"
-            )
-            if file_name:
-                print("info: clear previous VTK data", end="", flush=True)
-                self.vtk_renderer.stop_rotation()
-                self.vtk_renderer.clear_volumes()
-                self.vtk_renderer.render()
+            print("info: clear previous VTK data", end="", flush=True)
+            self.vtk_renderer.stop_rotation()
+            self.vtk_renderer.clear_volumes()
+            self.vtk_renderer.render()
+            if file_name is not None:
                 self.file_name_label.setText(f"{file_name.split('/')[-1]}")
                 self.current_input = file_name
 
-                self.processor = FileProcessor(file_name, self.core)
-                self.processor.update_console.connect(
-                    self.update_console_output, Qt.ConnectionType.QueuedConnection
-                )
-                self.processor.finished.connect(
-                    self.on_file_processed, Qt.ConnectionType.QueuedConnection
-                )
-                self.processor.start()
+            self.processor = FileProcessor(file_name, self.core)
+            self.processor.update_console.connect(
+                self.update_console_output, Qt.ConnectionType.QueuedConnection
+            )
+            self.processor.finished.connect(
+                self.on_file_processed, Qt.ConnectionType.QueuedConnection
+            )
+            self.processor.start()
         except Exception as e:
             print(f"Error in open_file: {str(e)}")
             self.console.append(f"Error: {str(e)}")
@@ -1216,7 +1239,10 @@ stylesheet = """
 """
 
 
-def main(argv=None, core=gcd_core(cfg_path="src/config/model/unet_3d.py")):
+def main(
+    argv=None,
+    core=gcd_core(cfg_path="src/config/model/unet_3d.py"),
+):
     app = QApplication(argv)
     app.setStyleSheet(stylesheet)
     window = MainWindow(core)

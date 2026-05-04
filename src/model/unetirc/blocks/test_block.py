@@ -40,6 +40,7 @@ class UnetrUpBlock(nn.Module):
         upsample_kernel_size: Sequence[int] | int,
         norm_name: tuple | str,
         res_block: bool = False,
+        use_cbam: bool = True,
     ) -> None:
         """
         Args:
@@ -73,6 +74,7 @@ class UnetrUpBlock(nn.Module):
                 kernel_size=kernel_size,
                 stride=1,
                 norm_name=norm_name,
+                use_cbam=use_cbam,
             )
         else:
             self.conv_block = UnetBasicBlock(  # type: ignore
@@ -113,6 +115,7 @@ class UnetrPrUpBlock(nn.Module):
         norm_name: tuple | str,
         conv_block: bool = False,
         res_block: bool = False,
+        use_cbam: bool = True,
     ) -> None:
         """
         Args:
@@ -162,6 +165,7 @@ class UnetrPrUpBlock(nn.Module):
                                 kernel_size=kernel_size,
                                 stride=stride,
                                 norm_name=norm_name,
+                                use_cbam=use_cbam,
                             ),
                         )
                         for i in range(num_layer)
@@ -266,8 +270,8 @@ class UnetrBasicBlock(nn.Module):
 
     def forward(self, inp):
         return self.layer(inp)
-    
-    
+
+
 class UnetResBlock(nn.Module):
     """
     A skip-connection based module that can be used for DynUNet, based on:
@@ -294,8 +298,12 @@ class UnetResBlock(nn.Module):
         kernel_size: Sequence[int] | int,
         stride: Sequence[int] | int,
         norm_name: tuple | str,
-        act_name: tuple | str = ("leakyrelu", {"inplace": True, "negative_slope": 0.01}),
+        act_name: tuple | str = (
+            "leakyrelu",
+            {"inplace": True, "negative_slope": 0.01},
+        ),
         dropout: tuple | str | float | None = None,
+        use_cbam: bool = True,
     ):
         super().__init__()
         self.conv1 = get_conv_layer(
@@ -321,11 +329,17 @@ class UnetResBlock(nn.Module):
             conv_only=False,
         )
         self.lrelu = get_act_layer(name=act_name)
-        self.norm1 = get_norm_layer(name=norm_name, spatial_dims=spatial_dims, channels=out_channels)
-        self.norm2 = get_norm_layer(name=norm_name, spatial_dims=spatial_dims, channels=out_channels)
+        self.norm1 = get_norm_layer(
+            name=norm_name, spatial_dims=spatial_dims, channels=out_channels
+        )
+        self.norm2 = get_norm_layer(
+            name=norm_name, spatial_dims=spatial_dims, channels=out_channels
+        )
         self.downsample = in_channels != out_channels
-        self.cbam = CBAM(out_channels, reduction=16, kernel_size=7)
-        
+        self.cbam = nn.Identity()
+        if use_cbam:
+            self.cbam = CBAM(out_channels, reduction=16, kernel_size=7)
+
         stride_np = np.atleast_1d(stride)
         if not np.all(stride_np == 1):
             self.downsample = True
@@ -341,7 +355,9 @@ class UnetResBlock(nn.Module):
                 norm=None,
                 conv_only=False,
             )
-            self.norm3 = get_norm_layer(name=norm_name, spatial_dims=spatial_dims, channels=out_channels)
+            self.norm3 = get_norm_layer(
+                name=norm_name, spatial_dims=spatial_dims, channels=out_channels
+            )
 
     def forward(self, inp):
         residual = inp

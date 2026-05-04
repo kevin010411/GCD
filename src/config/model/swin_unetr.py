@@ -4,7 +4,7 @@ model = dict(
     type="SwinUNETR",
     img_size=(128, 128, 128),
     in_channels=1,
-    out_channels=2,
+    out_channels=4,
     feature_size=48,
     use_checkpoint=True,
 )  # 模型

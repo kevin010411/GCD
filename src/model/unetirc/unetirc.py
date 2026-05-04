@@ -22,12 +22,14 @@ from .blocks.cst import WideFocusBlock, ConvAttnWideFocusBlock
 
 @MODEL.register_module()
 class UNetIRC(nn.Module):
+
     def __init__(
         self,
         in_channels=1,
         out_channels=2,
         patch_size=4,
-        kernel_size=7,
+        hwd_kernel_size=5,
+        split_kernel_size=11,
         exp_rate=4,
         feature_size=48,
         depths=[3, 3, 9, 3],
@@ -37,6 +39,7 @@ class UNetIRC(nn.Module):
         skip_encoder_name=None,
         deep_sup=False,
         first_feature_size_half=False,
+        use_cbam=True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -66,7 +69,8 @@ class UNetIRC(nn.Module):
         self.backbone = Backbone(
             in_channels=in_channels,
             patch_size=patch_size,
-            kernel_size=kernel_size,
+            hwd_kernel_size=hwd_kernel_size,
+            split_kernel_size=split_kernel_size,
             exp_rate=exp_rate,
             feature_sizes=feature_sizes,
             depths=depths,
@@ -173,6 +177,7 @@ class UNetIRC(nn.Module):
             upsample_kernel_size=2,
             norm_name=decoder_norm_name,
             res_block=res_block,
+            use_cbam=use_cbam,
         )
 
         self.decoder4 = UnetrUpBlock(
@@ -183,6 +188,7 @@ class UNetIRC(nn.Module):
             upsample_kernel_size=2,
             norm_name=decoder_norm_name,
             res_block=res_block,
+            use_cbam=use_cbam,
         )
 
         self.decoder3 = UnetrUpBlock(
@@ -193,6 +199,7 @@ class UNetIRC(nn.Module):
             upsample_kernel_size=2,
             norm_name=decoder_norm_name,
             res_block=res_block,
+            use_cbam=use_cbam,
         )
 
         self.decoder2 = UnetrUpBlock(
@@ -203,6 +210,7 @@ class UNetIRC(nn.Module):
             upsample_kernel_size=2,
             norm_name=decoder_norm_name,
             res_block=res_block,
+            use_cbam=use_cbam,
         )
 
         self.decoder1 = UnetrUpBlock(
@@ -213,6 +221,7 @@ class UNetIRC(nn.Module):
             upsample_kernel_size=patch_size,
             norm_name=decoder_norm_name,
             res_block=res_block,
+            use_cbam=use_cbam,
         )
 
         print("skip encoder:", skip_encoder_name)
@@ -296,7 +305,8 @@ class Backbone(nn.Module):
         self,
         in_channels=1,
         patch_size=4,
-        kernel_size=7,
+        hwd_kernel_size=7,
+        split_kernel_size=11,
         exp_rate=4,
         feature_sizes=[48, 96, 192, 384],
         depths=[2, 2, 2, 2],
@@ -307,7 +317,8 @@ class Backbone(nn.Module):
         super().__init__()
 
         print("patch size:", patch_size)
-        print("ker size:", kernel_size)
+        print("hwd_kernel_size size:", hwd_kernel_size)
+        print("split_kernel_size size:", split_kernel_size)
         print("exp rate:", exp_rate)
         print("feature sizes:", feature_sizes)
         print("depths:", depths)
@@ -361,7 +372,8 @@ class Backbone(nn.Module):
                 *[
                     InceptionNeXtBlock_V2(
                         dim=feature_sizes[i],
-                        kernel_size=kernel_size,
+                        hwd_kernel_size=hwd_kernel_size,
+                        split_kernel_size=split_kernel_size,
                         exp_rate=exp_rate,
                         drop_path=dp_rates[cur + j],
                     )
