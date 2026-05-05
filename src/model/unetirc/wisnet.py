@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.layers import trunc_normal_
 from monai.networks.blocks import UnetrBasicBlock, UnetrUpBlock, UnetOutBlock
+from src.utils import MODEL
 from .blocks.inceptionnext_v2 import InceptionNeXtBlock_V2
 from .blocks.utils import LayerNorm
 from .blocks.cbam import CBAM
@@ -56,6 +57,7 @@ class W_InceptionBlock(nn.Module):
 # ==============================================================================
 # 2. Proposed Full Model
 # ==============================================================================
+@MODEL.register_module()
 class WISNET(nn.Module):
     def __init__(
         self,
