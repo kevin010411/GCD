@@ -18,6 +18,7 @@ class ErrorStore:
         path = self.root / f"{timestamp}_{slug}.log"
         trace = "".join(traceback.format_exception(type(error), error, error.__traceback__))
         path.write_text(trace, encoding="utf-8")
+        print(f"error log saved to: {path}")
         return path
 
     def save_json(self, payload: dict, *, suffix: str) -> Path:
@@ -25,4 +26,5 @@ class ErrorStore:
         slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", suffix).strip("_").lower() or "error"
         path = self.root / f"{timestamp}_{slug}.json"
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"error log saved to: {path}")
         return path
