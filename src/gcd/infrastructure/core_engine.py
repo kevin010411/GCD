@@ -4,6 +4,7 @@ import os
 from collections.abc import Callable
 
 import monai.transforms as mt
+import numpy as np
 import torch
 import torch.nn.functional as F
 from mmengine import Config
@@ -40,6 +41,7 @@ class GradCamEngine:
         self.origin_meta = {}
         self.origin_shape = None
         self.img1_spacing = self.SPACING
+        self.display_metadata = self._default_display_metadata()
         self.layers = {"layer1": 1}
         self.file_name = ""
         self.patch: list[dict[str, torch.Tensor]] = []
@@ -57,6 +59,20 @@ class GradCamEngine:
 
     def _log(self, message: str) -> None:
         self._logger(message)
+
+    @staticmethod
+    def _default_display_metadata() -> dict[str, object]:
+        affine = np.eye(4, dtype=np.float32)
+        direction = np.eye(3, dtype=np.float32)
+        return {
+            "affine": affine,
+            "origin": (0.0, 0.0, 0.0),
+            "spacing": (1.0, 1.0, 1.0),
+            "direction": tuple(tuple(float(v) for v in row) for row in direction),
+            "vtk_origin": (0.0, 0.0, 0.0),
+            "vtk_spacing": (1.0, 1.0, 1.0),
+            "vtk_direction": tuple(tuple(float(v) for v in row) for row in direction),
+        }
 
     def set_config(self, config_path: str) -> None:
         self.cfg = Config.fromfile(config_path)
@@ -104,27 +120,33 @@ class GradCamEngine:
             self.img1 = mt.SpatialPad(
                 spatial_size=(width, width, depth), mode="constant", value=0
             )(self.img1)
+            img1_affine = self._extract_affine(self.img1)
 
             width, depth = self.SIZE + self.STRIDE, self.SIZE
             shape = list(self.img1.shape)
             slices = [slice(None), slice(None), slice(None), slice(None)]
+            pad_offsets = [0, 0, 0]
             if shape[1] < width:
                 x = (width - shape[1]) // 2
                 slices[1] = slice(x, x + shape[1])
                 shape[1] = width
+                pad_offsets[0] = x
             if shape[2] < width:
                 x = (width - shape[2]) // 2
                 slices[2] = slice(x, x + shape[2])
                 shape[2] = width
+                pad_offsets[1] = x
             if shape[3] < depth:
                 x = (depth - shape[3]) // 2
                 slices[3] = slice(x, x + shape[3])
                 shape[3] = depth
+                pad_offsets[2] = x
             if any(current.start is not None for current in slices):
                 image = torch.zeros(shape)
                 image[tuple(slices)] = self.img1
                 self.img1 = image
                 messages.append("info: image is zero padded")
+                img1_affine = self._shift_affine_for_padding(img1_affine, pad_offsets)
 
             self.img1 = mt.ScaleIntensityRange(
                 a_min=-42, a_max=423, b_min=0, b_max=1, clip=True
@@ -134,6 +156,7 @@ class GradCamEngine:
                 self.SPACING[self.PERMUTE[1]],
                 self.SPACING[self.PERMUTE[2]],
             )
+            self.display_metadata = self._build_display_metadata(img1_affine)
 
         with timer("載入模型"):
             model = build_model(self.cfg.model).to(device)
@@ -380,8 +403,6 @@ class GradCamEngine:
         )
 
     def _safe_affine(self):
-        import numpy as np
-
         spacing = None
         if (
             self.origin_meta
@@ -407,6 +428,54 @@ class GradCamEngine:
                 "float32"
             )
         return affine
+
+    def _extract_affine(self, image) -> np.ndarray:
+        meta = getattr(image, "meta", None)
+        if meta is not None:
+            affine = meta.get("affine")
+            if affine is not None:
+                return np.array(affine, dtype=np.float32, copy=True)
+        return np.array(self._safe_affine(), dtype=np.float32, copy=True)
+
+    @staticmethod
+    def _shift_affine_for_padding(
+        affine: np.ndarray, offsets: list[int] | tuple[int, int, int]
+    ) -> np.ndarray:
+        shifted = np.array(affine, dtype=np.float32, copy=True)
+        offset_vector = np.array(offsets, dtype=np.float32)
+        shifted[:3, 3] -= shifted[:3, :3] @ offset_vector
+        return shifted
+
+    def _build_display_metadata(self, affine: np.ndarray) -> dict[str, object]:
+        axis_order = list(self.PERMUTE)
+        display_affine = np.eye(4, dtype=np.float32)
+        display_affine[:3, :3] = affine[:3, :3][:, axis_order]
+        display_affine[:3, 3] = affine[:3, 3]
+
+        display_vectors = display_affine[:3, :3]
+        display_spacing = np.linalg.norm(display_vectors, axis=0)
+        safe_display_spacing = np.where(display_spacing > 0, display_spacing, 1.0)
+        display_direction = display_vectors / safe_display_spacing
+
+        vtk_axis_order = [2, 1, 0]
+        vtk_vectors = display_vectors[:, vtk_axis_order]
+        vtk_spacing = np.linalg.norm(vtk_vectors, axis=0)
+        safe_vtk_spacing = np.where(vtk_spacing > 0, vtk_spacing, 1.0)
+        vtk_direction = vtk_vectors / safe_vtk_spacing
+
+        return {
+            "affine": display_affine,
+            "origin": tuple(float(v) for v in display_affine[:3, 3]),
+            "spacing": tuple(float(v) for v in safe_display_spacing),
+            "direction": tuple(
+                tuple(float(v) for v in row) for row in display_direction.T
+            ),
+            "vtk_origin": tuple(float(v) for v in display_affine[:3, 3]),
+            "vtk_spacing": tuple(float(v) for v in safe_vtk_spacing),
+            "vtk_direction": tuple(
+                tuple(float(v) for v in row) for row in vtk_direction.T
+            ),
+        }
 
     def _save_volume(
         self, tensor: torch.Tensor, stem: str, exist_ok: bool = True

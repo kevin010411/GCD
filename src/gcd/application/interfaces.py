@@ -4,7 +4,12 @@ from typing import Callable, Protocol
 
 
 class VolumeRenderer(Protocol):
-    def show_volumes(self, volumes: list[object], spacing: list[tuple[float, float, float]]) -> None:
+    def show_volumes(
+        self,
+        volumes: list[object],
+        spacing: list[tuple[float, float, float]],
+        metadata: list[dict[str, object] | None] | None = None,
+    ) -> None:
         ...
 
     def apply_transfer_function(

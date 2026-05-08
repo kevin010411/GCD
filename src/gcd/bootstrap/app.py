@@ -3,7 +3,11 @@ from __future__ import annotations
 from PyQt6.QtWidgets import QApplication
 
 from ..application.presenter import MainWindowPresenter
-from ..application.services import TransferFunctionAppService, WorkflowService
+from ..application.services import (
+    AnnotationJsonService,
+    TransferFunctionAppService,
+    WorkflowService,
+)
 from ..infrastructure.core_engine import GradCamEngine
 from ..infrastructure.error_store import ErrorStore
 from ..presentation.qt.background import QtBackgroundTaskRunner
@@ -24,6 +28,7 @@ def main(argv=None) -> None:
         view=view,
         workflow_service=workflow_service,
         transfer_service=TransferFunctionAppService(),
+        annotation_service=AnnotationJsonService(),
         task_runner=QtBackgroundTaskRunner(),
         error_store=error_store,
     )

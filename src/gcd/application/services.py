@@ -5,6 +5,14 @@ from pathlib import Path
 from typing import Any
 
 from ..domain import ControlPoint, DataRange, TransferFunction
+from ..presentation.qt.workspace_models import (
+    AnnotationMode,
+    AnnotationState,
+    Box2DAnnotation,
+    Box3DAnnotation,
+    PointAnnotation,
+    SliceOrientation,
+)
 
 
 class TransferFunctionAppService:
@@ -169,6 +177,10 @@ class WorkflowService:
             "render_request": {
                 "volumes": [self.engine.cam, self.engine.volume_data],
                 "spacing": [self.engine.img1_spacing, self.engine.img1_spacing],
+                "metadata": [
+                    self.engine.display_metadata,
+                    self.engine.display_metadata,
+                ],
             },
             "data_range": data_range,
             "transfer_function": transfer_function
@@ -179,3 +191,95 @@ class WorkflowService:
             ),
             "use_overlay": use_overlay,
         }
+
+
+class AnnotationJsonService:
+    def serialize(self, state: AnnotationState) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "mode": state.mode.value,
+            "point_size": int(state.point_size),
+            "active_roi_box_id": state.active_roi_box_id,
+            "selected_annotation_id": state.selected_annotation_id,
+            "points": [
+                {
+                    "id": item.id,
+                    "space": item.space,
+                    "position": [float(v) for v in item.position],
+                    "size": int(item.size),
+                    "source_viewer_id": item.source_viewer_id,
+                }
+                for item in state.points
+            ],
+            "boxes_2d": [
+                {
+                    "id": item.id,
+                    "orientation": item.orientation.value,
+                    "slice_index": int(item.slice_index),
+                    "rect": [float(v) for v in item.rect],
+                    "source_viewer_id": item.source_viewer_id,
+                }
+                for item in state.boxes_2d
+            ],
+            "boxes_3d": [
+                {
+                    "id": item.id,
+                    "min_corner": [float(v) for v in item.min_corner],
+                    "max_corner": [float(v) for v in item.max_corner],
+                    "is_roi_target": bool(item.is_roi_target),
+                }
+                for item in state.boxes_3d
+            ],
+        }
+
+    def deserialize(self, payload: dict[str, Any]) -> AnnotationState:
+        if int(payload.get("version", 1)) != 1:
+            raise ValueError("Unsupported annotation JSON version.")
+        state = AnnotationState(
+            mode=AnnotationMode(str(payload.get("mode", AnnotationMode.OFF.value))),
+            point_size=max(1, int(payload.get("point_size", 8))),
+            active_roi_box_id=payload.get("active_roi_box_id"),
+            selected_annotation_id=payload.get("selected_annotation_id"),
+            points=[
+                PointAnnotation(
+                    id=str(item["id"]),
+                    space=str(item.get("space", "voxel")),
+                    position=tuple(float(v) for v in item.get("position", [0, 0, 0])),
+                    size=max(1, int(item.get("size", 8))),
+                    source_viewer_id=str(item.get("source_viewer_id", "")),
+                )
+                for item in payload.get("points", [])
+            ],
+            boxes_2d=[
+                Box2DAnnotation(
+                    id=str(item["id"]),
+                    orientation=SliceOrientation(
+                        str(item.get("orientation", SliceOrientation.AXIAL.value))
+                    ),
+                    slice_index=int(item.get("slice_index", 0)),
+                    rect=tuple(float(v) for v in item.get("rect", [0, 0, 0, 0])),
+                    source_viewer_id=str(item.get("source_viewer_id", "")),
+                )
+                for item in payload.get("boxes_2d", [])
+            ],
+            boxes_3d=[
+                Box3DAnnotation(
+                    id=str(item["id"]),
+                    min_corner=tuple(float(v) for v in item.get("min_corner", [0, 0, 0])),
+                    max_corner=tuple(float(v) for v in item.get("max_corner", [0, 0, 0])),
+                    is_roi_target=bool(item.get("is_roi_target", False)),
+                )
+                for item in payload.get("boxes_3d", [])
+            ],
+        )
+        return state
+
+    def load(self, path: str) -> AnnotationState:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return self.deserialize(payload)
+
+    def save(self, path: str, state: AnnotationState) -> None:
+        payload = self.serialize(state)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)

@@ -2,120 +2,214 @@ from __future__ import annotations
 
 import os
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
+    QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPushButton,
-    QSlider,
-    QSpinBox,
+    QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
-    QFileDialog,
 )
-from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
-from ...infrastructure.renderer import VtkVolumeRenderer
-from .widgets.feature_range import FeatureRangeWidget
-from .widgets.transfer_function_editor import TransferFunctionEditor
+from .plugins import (
+    GradCamPluginPanel,
+    RoiAnnotationPluginPanel,
+    TransferVolumePluginPanel,
+)
+from .workspace import WorkspaceHost
 
 
 class MainWindowView(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Grad-CAM Discoverer")
-        self.setGeometry(QMainWindow().screen().geometry())
+        self.setWindowTitle("Grad-CAM Plugin Workspace")
+        self.plugin_titles = {
+            "gradcam": "Grad-CAM Compute",
+            "roi": "ROI Annotation",
+            "transfer": "Transfer + Volume",
+        }
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
-        self.main_layout = QHBoxLayout(self.central_widget)
+        self.main_layout = QVBoxLayout(self.central_widget)
+        self.main_layout.setContentsMargins(18, 18, 18, 18)
+        self.main_layout.setSpacing(14)
 
-        self.left_container = QWidget()
-        left_container_layout = QVBoxLayout(self.left_container)
-        self.left_widget = QWidget()
-        self.left_layout = QVBoxLayout(self.left_widget)
-        self.left_layout.setSpacing(10)
+        self._build_global_toolbar()
 
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        self.main_layout.addLayout(body, 1)
+
+        self.workspace = WorkspaceHost()
+        self.renderer = self.workspace
+        body.addWidget(self.workspace, 1)
+
+        self.inspector_frame = QFrame()
+        self.inspector_frame.setObjectName("pluginStack")
+        inspector_layout = QVBoxLayout(self.inspector_frame)
+        inspector_layout.setContentsMargins(0, 0, 0, 0)
+        inspector_layout.setSpacing(0)
+        self.inspector_header = QFrame()
+        self.inspector_header.setObjectName("inspectorHeader")
+        header_layout = QVBoxLayout(self.inspector_header)
+        header_layout.setContentsMargins(16, 14, 16, 14)
+        header_layout.setSpacing(8)
+        self.inspector_kicker = QLabel("Plugin")
+        self.inspector_kicker.setObjectName("inspectorKicker")
+        header_layout.addWidget(self.inspector_kicker)
+        self.plugin_switch_row = QFrame()
+        self.plugin_switch_row.setObjectName("pluginSwitchRow")
+        switch_layout = QHBoxLayout(self.plugin_switch_row)
+        switch_layout.setContentsMargins(0, 0, 0, 0)
+        switch_layout.setSpacing(8)
+        self.plugin_button_group = QButtonGroup(self)
+        self.plugin_button_group.setExclusive(True)
+        self.gradcam_plugin_button = QPushButton("Grad-CAM")
+        self.gradcam_plugin_button.setObjectName("pluginTabButton")
+        self.gradcam_plugin_button.setCheckable(True)
+        self.transfer_plugin_button = QPushButton("Transfer")
+        self.transfer_plugin_button.setObjectName("pluginTabButton")
+        self.transfer_plugin_button.setCheckable(True)
+        self.roi_plugin_button = QPushButton("ROI")
+        self.roi_plugin_button.setObjectName("pluginTabButton")
+        self.roi_plugin_button.setCheckable(True)
+        self.plugin_button_group.addButton(self.gradcam_plugin_button)
+        self.plugin_button_group.addButton(self.roi_plugin_button)
+        self.plugin_button_group.addButton(self.transfer_plugin_button)
+        switch_layout.addWidget(self.gradcam_plugin_button, 1)
+        switch_layout.addWidget(self.roi_plugin_button, 1)
+        switch_layout.addWidget(self.transfer_plugin_button, 1)
+        header_layout.addWidget(self.plugin_switch_row)
+        inspector_layout.addWidget(self.inspector_header)
+        self.plugin_stack = QStackedWidget()
+        self.plugin_stack.setObjectName("pluginStack")
+        inspector_layout.addWidget(self.plugin_stack)
+        self.inspector_frame.setMinimumWidth(320)
+        self.inspector_frame.setMaximumWidth(420)
+        body.addWidget(self.inspector_frame)
+
+        self._build_gradcam_plugin()
+        self._build_roi_plugin()
+        self._build_transfer_plugin()
+        self.set_active_plugin("gradcam")
+
+    def _build_global_toolbar(self) -> None:
+        toolbar = QFrame()
+        toolbar.setObjectName("globalToolbar")
+        layout = QHBoxLayout(toolbar)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
+
+        title_layout = QVBoxLayout()
+        title = QLabel("Plugin Workbench")
+        title.setObjectName("appTitle")
+        subtitle = QLabel("Shared 3D viewport with flexible 2D slice tiles")
+        subtitle.setObjectName("appSubtitle")
+        title_layout.addWidget(title)
+        title_layout.addWidget(subtitle)
+        layout.addLayout(title_layout, 1)
+
+        layout.addWidget(QLabel("Model"))
         self.model_combo = QComboBox(self)
-        self.left_layout.addWidget(self.model_combo)
+        self.model_combo.setMinimumWidth(180)
+        layout.addWidget(self.model_combo)
 
-        file_name_layout = QHBoxLayout()
-        self.file_name_label = QLabel("")
-        self.file_name_label.setStyleSheet(
-            "font-family: Consolas; font-size: 16px; font-weight: bold;"
-        )
-        self.open_file_button = QPushButton("Open File")
-        file_name_layout.addWidget(self.file_name_label)
-        file_name_layout.addWidget(self.open_file_button)
-        self.left_layout.addLayout(file_name_layout)
+        self.file_name_label = QLabel("No file loaded")
+        self.file_name_label.setObjectName("statusPill")
+        layout.addWidget(self.file_name_label)
 
-        self.transfer_editor = TransferFunctionEditor(self)
-        self.left_layout.addWidget(self.transfer_editor)
+        self.workbench_button = QToolButton()
+        self.workbench_button.setObjectName("layoutButton")
+        self.workbench_button.setText("Workbench")
+        self.workbench_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.workbench_menu = QMenu(self.workbench_button)
+        self.workbench_button.setMenu(self.workbench_menu)
 
-        reset_buttons_layout = QHBoxLayout()
-        self.overlay_button = QPushButton("Overlay")
-        self.heatmap_button = QPushButton("Heatmap")
-        reset_buttons_layout.addWidget(self.overlay_button)
-        reset_buttons_layout.addWidget(self.heatmap_button)
-        self.left_layout.addLayout(reset_buttons_layout)
+        self.layout_action_focus = QAction("Focus 3D", self)
+        self.layout_action_triple = QAction("3D + Triple Slice", self)
+        self.layout_action_quad = QAction("Quad", self)
+        self.layout_action_compare = QAction("Compare", self)
+        self.workbench_menu.clear()
+        self.workbench_menu.addSection("Layouts")
+        self.workbench_menu.addAction(self.layout_action_focus)
+        self.workbench_menu.addAction(self.layout_action_triple)
+        self.workbench_menu.addAction(self.layout_action_quad)
+        self.workbench_menu.addAction(self.layout_action_compare)
+        layout.addWidget(self.workbench_button)
 
-        replace_buttons_layout = QHBoxLayout()
-        self.replace_camera_button = QPushButton("Replace Camera")
-        replace_buttons_layout.addWidget(self.replace_camera_button)
-        self.left_layout.addLayout(replace_buttons_layout)
+        self.inspector_toggle_button = QPushButton("Inspector")
+        self.inspector_toggle_button.setCheckable(True)
+        self.inspector_toggle_button.setChecked(True)
+        layout.addWidget(self.inspector_toggle_button)
 
-        self.speed_label = QLabel("Rotation Speed: 0.5")
-        self.left_layout.addWidget(self.speed_label)
-        self.speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.speed_slider.setMinimum(0)
-        self.speed_slider.setMaximum(100)
-        self.speed_slider.setValue(5)
-        self.left_layout.addWidget(self.speed_slider)
+        self.open_file_button = QPushButton("Open Volume")
+        self.save_screenshot_button = QPushButton("Screenshot")
+        self.record_video_button = QPushButton("Record")
+        self.replace_camera_button = QPushButton("Reset Camera")
+        layout.addWidget(self.open_file_button)
+        layout.addWidget(self.save_screenshot_button)
+        layout.addWidget(self.record_video_button)
+        layout.addWidget(self.replace_camera_button)
 
-        rotation_buttons_layout = QHBoxLayout()
-        self.start_button = QPushButton("Start Rotation")
-        self.stop_button = QPushButton("Stop Rotation")
-        rotation_buttons_layout.addWidget(self.start_button)
-        rotation_buttons_layout.addWidget(self.stop_button)
-        self.left_layout.addLayout(rotation_buttons_layout)
+        self.main_layout.addWidget(toolbar)
 
-        layer_layout = QHBoxLayout()
-        layer_layout.addWidget(QLabel("Layer Selection"), 1)
-        self.layer_combo = QComboBox()
-        layer_layout.addWidget(self.layer_combo, 2)
-        self.left_layout.addLayout(layer_layout)
+    def _build_gradcam_plugin(self) -> None:
+        self.gradcam_plugin_panel = GradCamPluginPanel(self)
+        self.class_spinbox = self.gradcam_plugin_panel.class_spinbox
+        self.layer_combo = self.gradcam_plugin_panel.layer_combo
+        self.feature_widget = self.gradcam_plugin_panel.feature_widget
+        self.overlay_button = self.gradcam_plugin_panel.overlay_button
+        self.heatmap_button = self.gradcam_plugin_panel.heatmap_button
+        self._add_plugin_tab("gradcam", self.gradcam_plugin_panel)
 
-        self.feature_widget = FeatureRangeWidget()
-        self.left_layout.addWidget(self.feature_widget)
+    def _build_transfer_plugin(self) -> None:
+        self.transfer_plugin_panel = TransferVolumePluginPanel(self)
+        self.transfer_editor = self.transfer_plugin_panel.transfer_editor
+        self.speed_label = self.transfer_plugin_panel.speed_label
+        self.speed_slider = self.transfer_plugin_panel.speed_slider
+        self.start_button = self.transfer_plugin_panel.start_button
+        self.stop_button = self.transfer_plugin_panel.stop_button
+        self._add_plugin_tab("transfer", self.transfer_plugin_panel)
 
-        self.save_screenshot_button = QPushButton("Save Screenshot")
-        self.record_video_button = QPushButton("Record Video")
-        self.left_layout.addWidget(self.save_screenshot_button)
-        self.left_layout.addWidget(self.record_video_button)
+    def _build_roi_plugin(self) -> None:
+        self.roi_plugin_panel = RoiAnnotationPluginPanel(self)
+        self.roi_mode_combo = self.roi_plugin_panel.mode_combo
+        self.roi_point_size_slider = self.roi_plugin_panel.point_size_slider
+        self.roi_point_size_spinbox = self.roi_plugin_panel.point_size_spinbox
+        self.roi_box_combo = self.roi_plugin_panel.roi_box_combo
+        self.roi_import_button = self.roi_plugin_panel.import_button
+        self.roi_export_button = self.roi_plugin_panel.export_button
+        self.roi_delete_selected_button = self.roi_plugin_panel.delete_selected_button
+        self.roi_clear_all_button = self.roi_plugin_panel.clear_all_button
+        self.roi_annotation_list = self.roi_plugin_panel.annotation_list
+        self._add_plugin_tab("roi", self.roi_plugin_panel)
 
-        class_layout = QHBoxLayout()
-        class_layout.addWidget(QLabel("Class Selection: "))
-        self.class_spinbox = QSpinBox()
-        self.class_spinbox.setRange(0, 100)
-        class_layout.addWidget(self.class_spinbox, 1)
-        self.left_layout.addLayout(class_layout)
+    def _add_plugin_tab(self, plugin_id: str, widget: QWidget) -> None:
+        index = self.plugin_stack.addWidget(widget)
+        setattr(self, f"{plugin_id}_plugin_index", index)
 
-        self.left_layout.addStretch()
-        left_container_layout.addWidget(self.left_widget, 1)
+    def set_active_plugin(self, plugin_id: str) -> None:
+        index = getattr(self, f"{plugin_id}_plugin_index")
+        self.plugin_stack.setCurrentIndex(index)
+        self.gradcam_plugin_button.setChecked(plugin_id == "gradcam")
+        self.roi_plugin_button.setChecked(plugin_id == "roi")
+        self.transfer_plugin_button.setChecked(plugin_id == "transfer")
+        self.workspace.set_workspace_mode("roi" if plugin_id == "roi" else "standard")
+        self.inspector_frame.show()
+        self.inspector_toggle_button.setChecked(True)
 
-        self.right_widget = QWidget()
-        right_layout = QVBoxLayout(self.right_widget)
-        self.vtk_widget = QVTKRenderWindowInteractor(self.right_widget)
-        right_layout.addWidget(self.vtk_widget)
-
-        self.main_layout.addWidget(self.left_container, 1)
-        self.main_layout.addWidget(self.right_widget, 3)
-
-        self.renderer = VtkVolumeRenderer(self.vtk_widget)
-        self.vtk_widget.Initialize()
-        self.vtk_widget.Start()
+    def toggle_inspector(self, visible: bool) -> None:
+        self.inspector_frame.setVisible(visible)
+        self.inspector_toggle_button.setChecked(visible)
 
     def set_model_options(self, options: list[dict[str, str]]) -> None:
         self.model_combo.blockSignals(True)
@@ -135,7 +229,9 @@ class MainWindowView(QMainWindow):
         self.feature_widget.set_size(size)
 
     def set_file_name(self, file_name: str) -> None:
-        self.file_name_label.setText(os.path.basename(file_name))
+        self.file_name_label.setText(
+            os.path.basename(file_name) if file_name else "No file loaded"
+        )
 
     def set_rotation_speed_label(self, speed: float) -> None:
         self.speed_label.setText(f"Rotation Speed: {speed:.1f}")
@@ -143,6 +239,14 @@ class MainWindowView(QMainWindow):
     def set_rotation_running(self, is_running: bool) -> None:
         self.start_button.setEnabled(not is_running)
         self.stop_button.setEnabled(is_running)
+
+    def set_render_mode(self, use_overlay: bool) -> None:
+        self.overlay_button.blockSignals(True)
+        self.heatmap_button.blockSignals(True)
+        self.overlay_button.setChecked(use_overlay)
+        self.heatmap_button.setChecked(not use_overlay)
+        self.overlay_button.blockSignals(False)
+        self.heatmap_button.blockSignals(False)
 
     def selected_model_path(self) -> str | None:
         return self.model_combo.currentData()
@@ -171,5 +275,17 @@ class MainWindowView(QMainWindow):
     def choose_video_file(self) -> str:
         file_name, _ = QFileDialog.getSaveFileName(
             self, "Save Video", "rotation_video.mp4", "MP4 Files (*.mp4)"
+        )
+        return file_name
+
+    def choose_annotation_import_file(self) -> str:
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Import Annotations", "", "JSON Files (*.json)"
+        )
+        return file_name
+
+    def choose_annotation_export_file(self) -> str:
+        file_name, _ = QFileDialog.getSaveFileName(
+            self, "Export Annotations", "annotations.json", "JSON Files (*.json)"
         )
         return file_name

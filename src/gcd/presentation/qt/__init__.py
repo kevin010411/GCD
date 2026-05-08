@@ -1,3 +1,1 @@
-from .view import MainWindowView
-
-__all__ = ["MainWindowView"]
+__all__: list[str] = []
