@@ -260,7 +260,6 @@ class GradCamEngine:
         layer: str | None = None,
         n1: int = 0,
         n2: int = 999,
-        use_overlay: bool = True,
     ) -> str:
         if not self.file_name:
             raise ValueError("尚未載入檔案，無法計算 CAM。")
@@ -341,10 +340,8 @@ class GradCamEngine:
             if maximum > 0:
                 cam /= maximum
 
-            self.cam = ((cam + 1) * 400).permute(*self.PERMUTE)
-            self.volume_data = (
-                (self.img1[0] * 300).permute(*self.PERMUTE) if use_overlay else None
-            )
+            self.cam = cam.permute(*self.PERMUTE)
+            self.volume_data = self.img1[0].permute(*self.PERMUTE)
             self.model_output = torch.argmax(model_out, dim=1)[0].permute(*self.PERMUTE)
 
         if self.save_dir:

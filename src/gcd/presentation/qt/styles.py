@@ -180,6 +180,38 @@ STYLESHEET = """
         color: #EFF5FF;
     }
 
+    QComboBox#modelCombo {
+        background: #121B28;
+        border: 1px solid #33465F;
+        color: #F3F6FB;
+    }
+
+    QComboBox#modelCombo:hover {
+        background: #162131;
+        border: 1px solid #46617F;
+    }
+
+    QAbstractItemView#softComboPopup {
+        background: #161F2B;
+        border: 1px solid #31445D;
+        border-radius: 10px;
+        color: #E8EEF6;
+        outline: none;
+        selection-background-color: #28415A;
+        selection-color: #F7FAFD;
+    }
+
+    QAbstractItemView#softComboPopup::item {
+        min-height: 28px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        margin: 2px 4px;
+    }
+
+    QAbstractItemView#softComboPopup::item:hover {
+        background: #203247;
+    }
+
     QSpinBox {
         padding-right: 42px;
     }
@@ -240,6 +272,35 @@ STYLESHEET = """
 
     QCheckBox::indicator:checked {
         background: #4C89C9;
+    }
+
+    QListWidget#annotationList, QListWidget#volumeList {
+        background: #131B26;
+        border: 1px solid #2D3D52;
+        border-radius: 14px;
+        padding: 6px;
+        outline: none;
+        color: #E7EDF5;
+    }
+
+    QListWidget#annotationList::item, QListWidget#volumeList::item {
+        background: #18222F;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        margin: 3px 2px;
+        padding: 8px 10px;
+        color: #D7E0EA;
+    }
+
+    QListWidget#annotationList::item:hover, QListWidget#volumeList::item:hover {
+        background: #1D2A39;
+        border: 1px solid #31455D;
+    }
+
+    QListWidget#annotationList::item:selected, QListWidget#volumeList::item:selected {
+        background: #27405A;
+        border: 1px solid #5C7EA1;
+        color: #F6F9FC;
     }
 
     QLabel#sliceBadge {

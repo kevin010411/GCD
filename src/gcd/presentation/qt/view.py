@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .plugins import (
+    CameraControlsPluginPanel,
     GradCamPluginPanel,
     RoiAnnotationPluginPanel,
     TransferVolumePluginPanel,
@@ -32,6 +33,7 @@ class MainWindowView(QMainWindow):
         super().__init__()
         self.setWindowTitle("Grad-CAM Plugin Workspace")
         self.plugin_titles = {
+            "camera": "Camera Controls",
             "gradcam": "Grad-CAM Compute",
             "roi": "ROI Annotation",
             "transfer": "Transfer + Volume",
@@ -76,6 +78,9 @@ class MainWindowView(QMainWindow):
         self.gradcam_plugin_button = QPushButton("Grad-CAM")
         self.gradcam_plugin_button.setObjectName("pluginTabButton")
         self.gradcam_plugin_button.setCheckable(True)
+        self.camera_plugin_button = QPushButton("Camera")
+        self.camera_plugin_button.setObjectName("pluginTabButton")
+        self.camera_plugin_button.setCheckable(True)
         self.transfer_plugin_button = QPushButton("Transfer")
         self.transfer_plugin_button.setObjectName("pluginTabButton")
         self.transfer_plugin_button.setCheckable(True)
@@ -83,9 +88,11 @@ class MainWindowView(QMainWindow):
         self.roi_plugin_button.setObjectName("pluginTabButton")
         self.roi_plugin_button.setCheckable(True)
         self.plugin_button_group.addButton(self.gradcam_plugin_button)
+        self.plugin_button_group.addButton(self.camera_plugin_button)
         self.plugin_button_group.addButton(self.roi_plugin_button)
         self.plugin_button_group.addButton(self.transfer_plugin_button)
         switch_layout.addWidget(self.gradcam_plugin_button, 1)
+        switch_layout.addWidget(self.camera_plugin_button, 1)
         switch_layout.addWidget(self.roi_plugin_button, 1)
         switch_layout.addWidget(self.transfer_plugin_button, 1)
         header_layout.addWidget(self.plugin_switch_row)
@@ -98,6 +105,7 @@ class MainWindowView(QMainWindow):
         body.addWidget(self.inspector_frame)
 
         self._build_gradcam_plugin()
+        self._build_camera_plugin()
         self._build_roi_plugin()
         self._build_transfer_plugin()
         self.set_active_plugin("gradcam")
@@ -120,7 +128,10 @@ class MainWindowView(QMainWindow):
 
         layout.addWidget(QLabel("Model"))
         self.model_combo = QComboBox(self)
+        self.model_combo.setObjectName("modelCombo")
         self.model_combo.setMinimumWidth(180)
+        if self.model_combo.view() is not None:
+            self.model_combo.view().setObjectName("softComboPopup")
         layout.addWidget(self.model_combo)
 
         self.file_name_label = QLabel("No file loaded")
@@ -154,11 +165,9 @@ class MainWindowView(QMainWindow):
         self.open_file_button = QPushButton("Open Volume")
         self.save_screenshot_button = QPushButton("Screenshot")
         self.record_video_button = QPushButton("Record")
-        self.replace_camera_button = QPushButton("Reset Camera")
         layout.addWidget(self.open_file_button)
         layout.addWidget(self.save_screenshot_button)
         layout.addWidget(self.record_video_button)
-        layout.addWidget(self.replace_camera_button)
 
         self.main_layout.addWidget(toolbar)
 
@@ -167,17 +176,13 @@ class MainWindowView(QMainWindow):
         self.class_spinbox = self.gradcam_plugin_panel.class_spinbox
         self.layer_combo = self.gradcam_plugin_panel.layer_combo
         self.feature_widget = self.gradcam_plugin_panel.feature_widget
-        self.overlay_button = self.gradcam_plugin_panel.overlay_button
-        self.heatmap_button = self.gradcam_plugin_panel.heatmap_button
         self._add_plugin_tab("gradcam", self.gradcam_plugin_panel)
 
     def _build_transfer_plugin(self) -> None:
         self.transfer_plugin_panel = TransferVolumePluginPanel(self)
+        self.volume_list = self.transfer_plugin_panel.volume_list
+        self.reorder_hint_label = self.transfer_plugin_panel.reorder_hint
         self.transfer_editor = self.transfer_plugin_panel.transfer_editor
-        self.speed_label = self.transfer_plugin_panel.speed_label
-        self.speed_slider = self.transfer_plugin_panel.speed_slider
-        self.start_button = self.transfer_plugin_panel.start_button
-        self.stop_button = self.transfer_plugin_panel.stop_button
         self._add_plugin_tab("transfer", self.transfer_plugin_panel)
 
     def _build_roi_plugin(self) -> None:
@@ -193,6 +198,17 @@ class MainWindowView(QMainWindow):
         self.roi_annotation_list = self.roi_plugin_panel.annotation_list
         self._add_plugin_tab("roi", self.roi_plugin_panel)
 
+    def _build_camera_plugin(self) -> None:
+        self.camera_plugin_panel = CameraControlsPluginPanel(self)
+        self.speed_label = self.camera_plugin_panel.speed_label
+        self.speed_slider = self.camera_plugin_panel.speed_slider
+        self.start_button = self.camera_plugin_panel.start_button
+        self.stop_button = self.camera_plugin_panel.stop_button
+        self.replace_camera_button = self.camera_plugin_panel.reset_camera_button
+        self.import_camera_button = self.camera_plugin_panel.import_camera_button
+        self.export_camera_button = self.camera_plugin_panel.export_camera_button
+        self._add_plugin_tab("camera", self.camera_plugin_panel)
+
     def _add_plugin_tab(self, plugin_id: str, widget: QWidget) -> None:
         index = self.plugin_stack.addWidget(widget)
         setattr(self, f"{plugin_id}_plugin_index", index)
@@ -201,9 +217,20 @@ class MainWindowView(QMainWindow):
         index = getattr(self, f"{plugin_id}_plugin_index")
         self.plugin_stack.setCurrentIndex(index)
         self.gradcam_plugin_button.setChecked(plugin_id == "gradcam")
+        self.camera_plugin_button.setChecked(plugin_id == "camera")
         self.roi_plugin_button.setChecked(plugin_id == "roi")
         self.transfer_plugin_button.setChecked(plugin_id == "transfer")
-        self.workspace.set_workspace_mode("roi" if plugin_id == "roi" else "standard")
+        if plugin_id == "roi":
+            self.workspace.set_workspace_mode("roi")
+        elif plugin_id in {"gradcam", "camera"}:
+            self.workspace.set_workspace_mode("standard")
+        reorder_enabled = plugin_id == "transfer" and self.workspace.mode.value == "roi"
+        self.volume_list.set_reorder_enabled(reorder_enabled)
+        self.reorder_hint_label.setText(
+            "Drag to reorder ROI drawing priority."
+            if reorder_enabled
+            else "Reorder is disabled in standard mode."
+        )
         self.inspector_frame.show()
         self.inspector_toggle_button.setChecked(True)
 
@@ -240,14 +267,6 @@ class MainWindowView(QMainWindow):
         self.start_button.setEnabled(not is_running)
         self.stop_button.setEnabled(is_running)
 
-    def set_render_mode(self, use_overlay: bool) -> None:
-        self.overlay_button.blockSignals(True)
-        self.heatmap_button.blockSignals(True)
-        self.overlay_button.setChecked(use_overlay)
-        self.heatmap_button.setChecked(not use_overlay)
-        self.overlay_button.blockSignals(False)
-        self.heatmap_button.blockSignals(False)
-
     def selected_model_path(self) -> str | None:
         return self.model_combo.currentData()
 
@@ -278,6 +297,18 @@ class MainWindowView(QMainWindow):
         )
         return file_name
 
+    def choose_camera_import_file(self) -> str:
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Import Camera", "", "JSON Files (*.json)"
+        )
+        return file_name
+
+    def choose_camera_export_file(self) -> str:
+        file_name, _ = QFileDialog.getSaveFileName(
+            self, "Export Camera", "camera.json", "JSON Files (*.json)"
+        )
+        return file_name
+
     def choose_annotation_import_file(self) -> str:
         file_name, _ = QFileDialog.getOpenFileName(
             self, "Import Annotations", "", "JSON Files (*.json)"
@@ -289,3 +320,9 @@ class MainWindowView(QMainWindow):
             self, "Export Annotations", "annotations.json", "JSON Files (*.json)"
         )
         return file_name
+
+    def closeEvent(self, event) -> None:
+        try:
+            self.workspace.shutdown()
+        finally:
+            super().closeEvent(event)

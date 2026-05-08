@@ -130,13 +130,12 @@ class WorkflowService:
     def load_input(self, file_name: str, target_class: int) -> dict[str, Any]:
         self.engine.set_target_class(target_class)
         messages = self.engine.load_and_process_input(file_name)
-        transfer_function = TransferFunction.overlay_preset()
         compute_result = self.compute_cam(
             layer=None,
             n1=0,
             n2=self.engine.default_feature_size(),
-            use_overlay=True,
-            transfer_function=transfer_function,
+            cam_transfer_function=TransferFunction.heatmap_preset(),
+            volume_transfer_function=TransferFunction.base_preset(),
         )
         return {
             "file_name": file_name,
@@ -144,8 +143,10 @@ class WorkflowService:
             "selected_layer": compute_result["selected_layer"],
             "feature_size": compute_result["feature_size"],
             "render_request": compute_result["render_request"],
-            "data_range": compute_result["data_range"],
-            "transfer_function": compute_result["transfer_function"],
+            "cam_data_range": compute_result["cam_data_range"],
+            "volume_data_range": compute_result["volume_data_range"],
+            "cam_transfer_function": compute_result["cam_transfer_function"],
+            "volume_transfer_function": compute_result["volume_transfer_function"],
             "messages": messages,
         }
 
@@ -155,41 +156,36 @@ class WorkflowService:
         layer: str | None,
         n1: int,
         n2: int,
-        use_overlay: bool,
-        transfer_function: TransferFunction | None = None,
+        cam_transfer_function: TransferFunction | None = None,
+        volume_transfer_function: TransferFunction | None = None,
     ) -> dict[str, Any]:
         selected_layer = self.engine.compute_cam(
             layer=layer,
             n1=n1,
             n2=n2,
-            use_overlay=use_overlay,
         )
-        data_range = DataRange.from_data(
-            [self.engine.cam, self.engine.volume_data],
-            method="minmax",
-            low_q=1.0,
-            high_q=100.0,
+        cam_data_range = DataRange.from_data([self.engine.cam], method="minmax")
+        volume_data_range = DataRange.from_data(
+            [self.engine.volume_data], method="minmax"
         )
         return {
             "layer_names": list(self.engine.layers.keys()),
             "selected_layer": selected_layer,
             "feature_size": self.engine.layers[selected_layer],
             "render_request": {
-                "volumes": [self.engine.cam, self.engine.volume_data],
+                "volumes": [self.engine.volume_data, self.engine.cam],
                 "spacing": [self.engine.img1_spacing, self.engine.img1_spacing],
                 "metadata": [
                     self.engine.display_metadata,
                     self.engine.display_metadata,
                 ],
             },
-            "data_range": data_range,
-            "transfer_function": transfer_function
-            or (
-                TransferFunction.overlay_preset()
-                if use_overlay
-                else TransferFunction.heatmap_preset()
-            ),
-            "use_overlay": use_overlay,
+            "cam_data_range": cam_data_range,
+            "volume_data_range": volume_data_range,
+            "cam_transfer_function": cam_transfer_function
+            or TransferFunction.heatmap_preset(),
+            "volume_transfer_function": volume_transfer_function
+            or TransferFunction.base_preset(),
         }
 
 

@@ -65,4 +65,5 @@ class RoiAnnotationPluginPanel(PluginPanel):
         self.content_layout.addLayout(edit_row)
 
         self.annotation_list = QListWidget()
+        self.annotation_list.setObjectName("annotationList")
         self.content_layout.addWidget(self.annotation_list, 1)

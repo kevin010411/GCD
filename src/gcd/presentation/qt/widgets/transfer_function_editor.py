@@ -24,8 +24,13 @@ class ValueAxis(QWidget):
         self.vmin = 0.0
         self.vmax = 1.0
         self.tick_count = max(2, int(tick_count))
+        self._horizontal_padding = 8
         self.setMinimumHeight(28)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_horizontal_padding(self, padding: int) -> None:
+        self._horizontal_padding = max(0, int(padding))
+        self.update()
 
     def set_range(self, vmin: float, vmax: float) -> None:
         self.vmin = float(vmin)
@@ -35,12 +40,15 @@ class ValueAxis(QWidget):
     def paintEvent(self, _event) -> None:
         width = max(1, self.width())
         height = self.height()
+        left = self._horizontal_padding
+        right = max(left, width - self._horizontal_padding)
+        axis_width = max(1, right - left)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         axis_y = height - 14
         painter.setPen(QPen(QColor("#B0B0B0")))
-        painter.drawLine(0, axis_y, width, axis_y)
+        painter.drawLine(left, axis_y, right, axis_y)
 
         painter.setPen(QPen(QColor("#888888")))
         font = QFont()
@@ -50,7 +58,7 @@ class ValueAxis(QWidget):
         for index in range(self.tick_count):
             ratio = index / (self.tick_count - 1)
             value = self.vmin + ratio * (self.vmax - self.vmin)
-            x = int(round(ratio * (width - 1)))
+            x = int(round(left + ratio * axis_width))
             painter.drawLine(x, axis_y, x, axis_y - 6)
             label = self._formatter(value)
             rect = painter.boundingRect(0, 0, 0, 0, 0, label)
@@ -60,14 +68,24 @@ class ValueAxis(QWidget):
 
 class TransferFunctionCanvas(QWidget):
     transfer_function_changed = pyqtSignal(object, object)
+    HANDLE_RADIUS = 5
+    PLOT_PADDING = HANDLE_RADIUS + 3
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(400, 200)
+        self.setMinimumSize(220, 200)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.transfer_function = TransferFunction.overlay_preset()
         self.data_range = DataRange(0.0, 1.0)
         self.selected_index: int | None = None
+
+    def _plot_rect(self) -> tuple[float, float, float, float]:
+        left = float(self.PLOT_PADDING)
+        top = float(self.PLOT_PADDING)
+        right = max(left, float(self.width() - self.PLOT_PADDING))
+        bottom = max(top, float(self.height() - self.PLOT_PADDING))
+        return left, top, right, bottom
 
     def set_transfer_function(
         self,
@@ -94,16 +112,18 @@ class TransferFunctionCanvas(QWidget):
             self.transfer_function_changed.emit(self.transfer_function, self.data_range)
 
     def _point_position(self, point: ControlPoint) -> QPointF:
+        left, top, right, bottom = self._plot_rect()
         return QPointF(
-            point.position * max(self.width(), 1),
-            (1.0 - point.opacity) * max(self.height(), 1),
+            left + point.position * max(right - left, 1.0),
+            top + (1.0 - point.opacity) * max(bottom - top, 1.0),
         )
 
     def _point_from_qpoint(self, point: QPointF, color: str) -> ControlPoint:
-        width = max(self.width(), 1)
-        height = max(self.height(), 1)
-        position = max(0.0, min(point.x() / width, 1.0))
-        opacity = max(0.0, min(1.0 - (point.y() / height), 1.0))
+        left, top, right, bottom = self._plot_rect()
+        width = max(right - left, 1.0)
+        height = max(bottom - top, 1.0)
+        position = max(0.0, min((point.x() - left) / width, 1.0))
+        opacity = max(0.0, min(1.0 - ((point.y() - top) / height), 1.0))
         return ControlPoint(position, color, opacity)
 
     def _index_at(self, clicked_point: QPointF) -> int | None:
@@ -116,6 +136,7 @@ class TransferFunctionCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         points = self.transfer_function.control_points
+        _left, _top, _right, bottom = self._plot_rect()
 
         for index in range(len(points) - 1):
             p1 = self._point_position(points[index])
@@ -126,13 +147,13 @@ class TransferFunctionCanvas(QWidget):
             painter.setBrush(gradient)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPolygon(
-                QPolygonF([p1, p2, QPointF(p2.x(), self.height()), QPointF(p1.x(), self.height())])
+                QPolygonF([p1, p2, QPointF(p2.x(), bottom), QPointF(p1.x(), bottom)])
             )
 
-        polygon = QPolygonF([QPointF(0, self.height())])
+        polygon = QPolygonF([QPointF(self._point_position(points[0]).x(), bottom)])
         for point in points:
             polygon.append(self._point_position(point))
-        polygon.append(QPointF(self.width(), self.height()))
+        polygon.append(QPointF(self._point_position(points[-1]).x(), bottom))
         painter.setBrush(QColor(150, 150, 150, 100))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPolygon(polygon)
@@ -146,7 +167,7 @@ class TransferFunctionCanvas(QWidget):
                 QPen(QColor("#FF0000") if index == self.selected_index else QColor("#0000FF"), 2)
             )
             painter.setBrush(QColor(point.color))
-            painter.drawEllipse(self._point_position(point), 5, 5)
+            painter.drawEllipse(self._point_position(point), self.HANDLE_RADIUS, self.HANDLE_RADIUS)
 
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -192,12 +213,22 @@ class TransferFunctionCanvas(QWidget):
             return
         points = list(self.transfer_function.control_points)
         current = points[self.selected_index]
-        width = max(self.width(), 1)
-        height = max(self.height(), 1)
-        min_position = 0.0 if self.selected_index == 0 else points[self.selected_index - 1].position
-        max_position = 1.0 if self.selected_index == len(points) - 1 else points[self.selected_index + 1].position
-        position = max(min_position, min(event.position().x() / width, max_position))
-        opacity = max(0.0, min(1.0 - (event.position().y() / height), 1.0))
+        left, top, right, bottom = self._plot_rect()
+        width = max(right - left, 1.0)
+        height = max(bottom - top, 1.0)
+        is_first = self.selected_index == 0
+        is_last = self.selected_index == len(points) - 1
+        min_position = 0.0 if is_first else points[self.selected_index - 1].position
+        max_position = 1.0 if is_last else points[self.selected_index + 1].position
+        if is_first:
+            position = 0.0
+        elif is_last:
+            position = 1.0
+        else:
+            position = max(
+                min_position, min((event.position().x() - left) / width, max_position)
+            )
+        opacity = max(0.0, min(1.0 - ((event.position().y() - top) / height), 1.0))
         points[self.selected_index] = replace(current, position=position, opacity=opacity)
         self.transfer_function = TransferFunction.from_iterable(points)
         self.transfer_function_changed.emit(self.transfer_function, self.data_range)
@@ -221,6 +252,7 @@ class TransferFunctionEditor(QWidget):
         super().__init__(parent)
         self.canvas = TransferFunctionCanvas()
         self.axis = ValueAxis(formatter=self._format_label, tick_count=9)
+        self.axis.set_horizontal_padding(self.canvas.PLOT_PADDING)
         self.axis.set_range(0.0, 1.0)
         self.canvas.transfer_function_changed.connect(self._on_transfer_function_changed)
 

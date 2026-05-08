@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
 from ...domain import DataRange, TransferFunction
-from ...infrastructure.renderer import VtkVolumeRenderer
+from ...infrastructure.renderer import StandardMultiVolumeRenderer, VtkVolumeRenderer
 from .annotation_geometry import move_rect, normalize_rect, resize_rect_with_handle
 from .workspace_models import (
     AnnotationMode,
@@ -143,10 +143,14 @@ def _to_qt_orientation(orientation: SplitterOrientation) -> Qt.Orientation:
 class ViewerPayload:
     volume_data: np.ndarray | None = None
     cam_data: np.ndarray | None = None
-    transfer_function: TransferFunction = field(
+    volume_transfer_function: TransferFunction = field(
+        default_factory=TransferFunction.base_preset
+    )
+    volume_data_range: DataRange = field(default_factory=lambda: DataRange(0.0, 1.0))
+    cam_transfer_function: TransferFunction = field(
         default_factory=TransferFunction.overlay_preset
     )
-    data_range: DataRange = field(default_factory=lambda: DataRange(0.0, 1.0))
+    cam_data_range: DataRange = field(default_factory=lambda: DataRange(0.0, 1.0))
 
 
 class TileHeader(QFrame):
@@ -756,7 +760,7 @@ class ViewerWorkspace(QWidget):
         self.vtk_widget = QVTKRenderWindowInteractor(self.volume_content)
         self.vtk_widget.setObjectName("volumeViewport")
         content_layout.addWidget(self.vtk_widget, 1)
-        self.renderer = VtkVolumeRenderer(self.vtk_widget)
+        self.renderer = self._create_renderer(self.vtk_widget)
         self.vtk_widget.Initialize()
         self.vtk_widget.Start()
         self.state.tiles["viewer-3d"] = ViewerTileState(
@@ -766,6 +770,9 @@ class ViewerWorkspace(QWidget):
         tile.set_content(self.volume_content)
         tile.selected.connect(self._on_viewer_selected)
         self.tile_widgets["viewer-3d"] = tile
+
+    def _create_renderer(self, vtk_widget):
+        return VtkVolumeRenderer(vtk_widget)
 
     def _create_slice_viewer(self, viewer_id: str) -> None:
         widget = SliceViewWidget(viewer_id)
@@ -960,14 +967,18 @@ class ViewerWorkspace(QWidget):
         *,
         volume_data,
         cam_data,
-        transfer_function: TransferFunction,
-        data_range: DataRange,
+        volume_transfer_function: TransferFunction,
+        volume_data_range: DataRange,
+        cam_transfer_function: TransferFunction,
+        cam_data_range: DataRange,
     ) -> None:
         self.payload = ViewerPayload(
             volume_data=_as_numpy(volume_data),
             cam_data=_as_numpy(cam_data),
-            transfer_function=transfer_function,
-            data_range=data_range,
+            volume_transfer_function=volume_transfer_function,
+            volume_data_range=volume_data_range,
+            cam_transfer_function=cam_transfer_function,
+            cam_data_range=cam_data_range,
         )
         self.state.volume_shape = (
             tuple(int(v) for v in self.payload.cam_data.shape)
@@ -984,7 +995,7 @@ class ViewerWorkspace(QWidget):
 
     def refresh_slice_views(self) -> None:
         color_map = _color_map_from_transfer_function(
-            self.payload.transfer_function, self.payload.data_range
+            self.payload.cam_transfer_function, self.payload.cam_data_range
         )
         mode = self.state.annotations.mode if self.enable_annotations else AnnotationMode.OFF
         point_size = self.state.annotations.point_size
@@ -1138,6 +1149,10 @@ class ViewerWorkspace(QWidget):
         self.vtk_widget.update()
         QTimer.singleShot(0, self.renderer.render)
         QTimer.singleShot(25, self.renderer.render)
+
+    def shutdown(self) -> None:
+        if hasattr(self, "renderer"):
+            self.renderer.shutdown()
 
     def _refresh_renderer_annotations(self) -> None:
         if not hasattr(self, "renderer"):
@@ -1456,6 +1471,9 @@ class StandardWorkspace(ViewerWorkspace):
     def __init__(self, parent=None) -> None:
         super().__init__(parent, enable_annotations=False)
 
+    def _create_renderer(self, vtk_widget):
+        return StandardMultiVolumeRenderer(vtk_widget)
+
 
 class RoiWorkspace(ViewerWorkspace):
     def __init__(self, parent=None) -> None:
@@ -1544,24 +1562,32 @@ class WorkspaceHost(QWidget):
         *,
         volume_data,
         cam_data,
-        transfer_function: TransferFunction,
-        data_range: DataRange,
+        volume_transfer_function: TransferFunction,
+        volume_data_range: DataRange,
+        cam_transfer_function: TransferFunction,
+        cam_data_range: DataRange,
     ) -> None:
         self.shared_state.volume_data = volume_data
         self.shared_state.cam_data = cam_data
-        self.shared_state.transfer_function = transfer_function
-        self.shared_state.data_range = data_range
+        self.shared_state.volume_transfer_function = volume_transfer_function
+        self.shared_state.volume_data_range = volume_data_range
+        self.shared_state.cam_transfer_function = cam_transfer_function
+        self.shared_state.cam_data_range = cam_data_range
         self.standard_workspace.set_workspace_payload(
             volume_data=volume_data,
             cam_data=cam_data,
-            transfer_function=transfer_function,
-            data_range=data_range,
+            volume_transfer_function=volume_transfer_function,
+            volume_data_range=volume_data_range,
+            cam_transfer_function=cam_transfer_function,
+            cam_data_range=cam_data_range,
         )
         self.roi_workspace.set_workspace_payload(
             volume_data=volume_data,
             cam_data=cam_data,
-            transfer_function=transfer_function,
-            data_range=data_range,
+            volume_transfer_function=volume_transfer_function,
+            volume_data_range=volume_data_range,
+            cam_transfer_function=cam_transfer_function,
+            cam_data_range=cam_data_range,
         )
         self._apply_shared_snapshot_to(self.active_workspace)
 
@@ -1599,13 +1625,23 @@ class WorkspaceHost(QWidget):
         self.roi_workspace.renderer.show_volumes(volumes, spacing, metadata)
         self._apply_shared_snapshot_to(self.active_workspace)
 
-    def apply_transfer_function(
+    def set_volume_transfer_functions(
         self,
+        index: int,
         color_points: list[tuple[float, float, float, float]],
         opacity_points: list[tuple[float, float]],
+        *,
+        visible: bool | None = None,
+        render: bool = True,
     ) -> None:
-        self.standard_workspace.renderer.apply_transfer_function(color_points, opacity_points)
-        self.roi_workspace.renderer.apply_transfer_function(color_points, opacity_points)
+        self.standard_workspace.renderer.set_volume_transfer_functions(
+            index, color_points, opacity_points, visible=visible, render=False
+        )
+        self.roi_workspace.renderer.set_volume_transfer_functions(
+            index, color_points, opacity_points, visible=visible, render=False
+        )
+        if render:
+            self.active_workspace.renderer.render()
 
     def set_rotation_speed(self, speed: float) -> None:
         self.standard_workspace.renderer.set_rotation_speed(speed)
@@ -1636,3 +1672,7 @@ class WorkspaceHost(QWidget):
 
     def record_rotation_video(self, filename: str, rotation_speed: float) -> None:
         self.active_workspace.renderer.record_rotation_video(filename, rotation_speed)
+
+    def shutdown(self) -> None:
+        self.standard_workspace.shutdown()
+        self.roi_workspace.shutdown()

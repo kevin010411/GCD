@@ -97,8 +97,10 @@ class AnnotationState:
 class SharedImagingState:
     volume_data: object | None = None
     cam_data: object | None = None
-    transfer_function: object | None = None
-    data_range: object | None = None
+    volume_transfer_function: object | None = None
+    volume_data_range: object | None = None
+    cam_transfer_function: object | None = None
+    cam_data_range: object | None = None
     camera_snapshot: dict[str, tuple[float, float, float] | float] | None = None
     slice_snapshot: dict[str, tuple[SliceOrientation, int]] = field(default_factory=dict)
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QSpinBox
+from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QSpinBox
 
 from ..widgets.feature_range import FeatureRangeWidget
 from .base import PluginPanel
@@ -29,15 +29,5 @@ class GradCamPluginPanel(PluginPanel):
 
         self.feature_widget = FeatureRangeWidget()
         self.content_layout.addWidget(self.feature_widget)
-
-        overlay_layout = QHBoxLayout()
-        self.overlay_button = QPushButton("Overlay")
-        self.overlay_button.setCheckable(True)
-        self.overlay_button.setChecked(True)
-        self.heatmap_button = QPushButton("Heatmap")
-        self.heatmap_button.setCheckable(True)
-        overlay_layout.addWidget(self.overlay_button)
-        overlay_layout.addWidget(self.heatmap_button)
-        self.content_layout.addLayout(overlay_layout)
 
         self.content_layout.addStretch()

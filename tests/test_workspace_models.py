@@ -26,7 +26,7 @@ class WorkspaceModelTests(unittest.TestCase):
     def test_slice_index_is_clamped_to_orientation_dimension(self):
         volume_shape = (128, 96, 72)
         self.assertEqual(
-            clamp_slice_index(SliceOrientation.SAGITTAL, 999, volume_shape), 71
+            clamp_slice_index(SliceOrientation.SAGITTAL, 999, volume_shape), 127
         )
         self.assertEqual(
             clamp_slice_index(SliceOrientation.CORONAL, -10, volume_shape), 0

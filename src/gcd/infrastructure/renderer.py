@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import imageio
-import os
 import numpy as np
 import vtk
 import vtk.util.numpy_support
@@ -17,7 +16,6 @@ class Roi3DInteractionController:
 
     def set_mode(self, mode: str) -> None:
         self.mode = mode
-        self.renderer._debug(f"controller mode -> {mode}")
         self.renderer._reset_annotation_interaction_state()
 
     def handles_left_mouse(self) -> bool:
@@ -27,10 +25,8 @@ class Roi3DInteractionController:
         if not self.handles_left_mouse():
             return False
         x, y = self.renderer.interactor.GetEventPosition()
-        self.renderer._debug(f"left press mode={self.mode} screen=({x}, {y})")
         picked = self.renderer._pick_annotation_actor(x, y)
         if picked is not None:
-            self.renderer._debug(f"annotation actor picked: {picked}")
             kind = picked[0]
             if kind == "box":
                 self.renderer._emit_annotation_event(
@@ -47,9 +43,6 @@ class Roi3DInteractionController:
                             self.renderer.dragging_box_initial_bounds = (
                                 tuple(float(v) for v in box["min_corner"]),
                                 tuple(float(v) for v in box["max_corner"]),
-                            )
-                            self.renderer._debug(
-                                f"start moving box {picked[1]} from anchor voxel {voxel}"
                             )
                 obj.AbortFlagOn()
                 return True
@@ -72,11 +65,8 @@ class Roi3DInteractionController:
 
         world = self.renderer._pick_world(x, y)
         if world is None:
-            self.renderer._debug("left press world pick failed")
             return False
-        self.renderer._debug(f"left press world picked: {world}")
         voxel = self.renderer._clamp_voxel(self.renderer._world_to_voxel(world))
-        self.renderer._debug(f"left press voxel: {voxel}")
         if self.mode == "point":
             self.renderer._emit_annotation_event("add_point_3d", {"position": voxel})
             obj.AbortFlagOn()
@@ -96,10 +86,8 @@ class Roi3DInteractionController:
         x, y = self.renderer.interactor.GetEventPosition()
         world = self.renderer._pick_world(x, y)
         if world is None:
-            self.renderer._debug(f"mouse move mode={self.mode} screen=({x}, {y}) world pick failed")
             return False
         voxel = self.renderer._clamp_voxel(self.renderer._world_to_voxel(world))
-        self.renderer._debug(f"mouse move mode={self.mode} screen=({x}, {y}) voxel={voxel}")
         if self.renderer.dragging_handle is not None and self.renderer.dragging_box_id is not None:
             self.renderer._emit_annotation_event(
                 "resize_box_3d",
@@ -156,23 +144,16 @@ class Roi3DInteractionController:
         if self.mode != "box" or not self.renderer.box_creation_active or self.renderer.box_creation_start is None:
             return False
         x, y = self.renderer.interactor.GetEventPosition()
-        self.renderer._debug(f"left release mode={self.mode} screen=({x}, {y})")
         world = self.renderer._pick_world(x, y)
         if world is None:
-            self.renderer._debug("left release world pick failed")
             self.renderer._reset_box_creation_state()
             self.renderer.render()
             return False
         voxel = self.renderer._clamp_voxel(self.renderer._world_to_voxel(world))
-        self.renderer._debug(f"left release voxel: {voxel}")
         if has_meaningful_3d_box_drag(self.renderer.box_creation_start, voxel):
             self.renderer._emit_annotation_event(
                 "add_box_3d",
                 {"min_corner": self.renderer.box_creation_start, "max_corner": voxel},
-            )
-        else:
-            self.renderer._debug(
-                f"box drag too small: start={self.renderer.box_creation_start}, end={voxel}"
             )
         self.renderer._reset_box_creation_state()
         self.renderer.render()
@@ -191,11 +172,6 @@ class VtkVolumeRenderer:
         self.annotation_interactor_style = vtk.vtkInteractorStyleUser()
         self.interactor.SetInteractorStyle(self.camera_interactor_style)
 
-        self.mapper = vtk.vtkGPUVolumeRayCastMapper()
-        self.multi_volume = vtk.vtkMultiVolume()
-        self.multi_volume.SetMapper(self.mapper)
-        self.renderer.AddViewProp(self.multi_volume)
-
         self.volumes = []
         self.rotating = False
         self.timer_id = None
@@ -203,12 +179,6 @@ class VtkVolumeRenderer:
         self.initial_camera = None
         self.observer_tag = None
         self.annotation_mode = "off"
-        self.debug_enabled = os.environ.get("GCD_ROI_DEBUG", "").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
         self.annotation_event_handler = None
         self.annotation_point_size = 8
         self.annotation_points = []
@@ -240,10 +210,6 @@ class VtkVolumeRenderer:
         self.annotation_interactor_style.AddObserver(
             "LeftButtonReleaseEvent", self._on_left_button_release, 1.0
         )
-
-    def _debug(self, message: str) -> None:
-        if self.debug_enabled:
-            print(f"[ROI3D] {message}")
 
     def add_axes_indicator(self) -> None:
         axes = vtk.vtkAxesActor()
@@ -296,24 +262,24 @@ class VtkVolumeRenderer:
         prop.SetDiffuse(0.6)
         prop.SetSpecular(0.4)
 
+        mapper = vtk.vtkGPUVolumeRayCastMapper()
+        mapper.SetInputData(image_data)
+
         volume = vtk.vtkVolume()
         volume.SetProperty(prop)
-        volume.SetMapper(self.mapper)
+        volume.SetMapper(mapper)
 
         cset = color_settings if color_settings is not None else []
         oset = opacity_settings if opacity_settings is not None else []
         self._apply_transfer_functions_to_property(prop, cset, oset)
 
         port = len(self.volumes)
-        self.mapper.SetInputDataObject(port, image_data)
-        try:
-            self.multi_volume.SetVolume(volume, port)
-        except AttributeError:
-            self.multi_volume.AddVolume(volume)
+        self.renderer.AddVolume(volume)
 
         self.volumes.append(
             {
                 "image": image_data,
+                "mapper": mapper,
                 "volume": volume,
                 "prop": prop,
                 "color": list(cset),
@@ -335,17 +301,7 @@ class VtkVolumeRenderer:
         return port
 
     def clear_volumes(self) -> None:
-        for index, _volume in enumerate(self.volumes):
-            try:
-                self.multi_volume.RemoveVolume(index)
-            except AttributeError:
-                pass
-
-        self.mapper = vtk.vtkGPUVolumeRayCastMapper()
-        self.multi_volume = vtk.vtkMultiVolume()
-        self.multi_volume.SetMapper(self.mapper)
         self.renderer.RemoveAllViewProps()
-        self.renderer.AddViewProp(self.multi_volume)
         self.add_axes_indicator()
         self.volumes = []
         self.annotation_point_actors = {}
@@ -369,24 +325,27 @@ class VtkVolumeRenderer:
                 if data is not None and space is not None:
                     self.add_volume_data(data, space, metadata=meta)
 
-    def apply_transfer_function(
+    def set_volume_transfer_functions(
         self,
-        color_points: list[tuple[float, float, float, float]],
-        opacity_points: list[tuple[float, float]],
+        index,
+        color_settings,
+        opacity_settings,
+        *,
+        visible: bool | None = None,
+        render: bool = True,
     ) -> None:
-        for index in range(len(self.volumes)):
-            self.set_volume_transfer_functions(index, color_points, opacity_points)
-        self.render()
-
-    def set_volume_transfer_functions(self, index, color_settings, opacity_settings) -> None:
         if not (0 <= index < len(self.volumes)):
             return
         volume = self.volumes[index]
         volume["color"] = list(color_settings or [])
         volume["opacity"] = list(opacity_settings or [])
+        if visible is not None:
+            volume["volume"].SetVisibility(1 if visible else 0)
         self._apply_transfer_functions_to_property(
             volume["prop"], volume["color"], volume["opacity"]
         )
+        if render:
+            self.render()
 
     def _apply_transfer_functions_to_property(self, prop, color_settings, opacity_settings) -> None:
         pwf = vtk.vtkPiecewiseFunction()
@@ -467,13 +426,10 @@ class VtkVolumeRenderer:
 
     def set_annotation_mode(self, mode: str) -> None:
         self.annotation_mode = mode
-        self._debug(f"renderer annotation mode -> {mode}")
         self.roi_interaction_controller.set_mode(mode)
         if mode in {"point", "box"}:
-            self._debug("switching to annotation interactor style")
             self.interactor.SetInteractorStyle(self.annotation_interactor_style)
         else:
-            self._debug("switching to camera interactor style")
             self.interactor.SetInteractorStyle(self.camera_interactor_style)
 
     def set_annotations(
@@ -653,113 +609,40 @@ class VtkVolumeRenderer:
 
     def _pick_world(self, x: int, y: int):
         if not self.volumes:
-            self._debug("pick world skipped: no volumes loaded")
             return None
         volume_picker = vtk.vtkVolumePicker()
         volume_picker.SetTolerance(0.0005)
         if volume_picker.Pick(x, y, 0, self.renderer):
+            picked_volume = volume_picker.GetVolume()
+            if picked_volume is None:
+                picked_volume = volume_picker.GetProp3D()
+            volume_index = self._volume_index_for_prop(picked_volume)
+            if volume_index is None:
+                return None
             position = tuple(float(v) for v in volume_picker.GetPickPosition())
-            if any(np.isfinite(value) for value in position):
-                self._debug(f"volume picker hit at {position}")
+            if all(np.isfinite(value) for value in position):
                 return position
-        self._debug("volume picker missed")
-
-        picker = vtk.vtkCellPicker()
-        picker.SetTolerance(0.0005)
-        if picker.Pick(x, y, 0, self.renderer):
-            position = tuple(float(v) for v in picker.GetPickPosition())
-            if any(np.isfinite(value) for value in position):
-                self._debug(f"cell picker hit at {position}")
-                return position
-        self._debug("cell picker missed")
-        bounds_hit = self._project_display_to_volume_bounds(x, y)
-        if bounds_hit is not None:
-            self._debug(f"volume bounds fallback hit at {bounds_hit}")
-            return bounds_hit
-        fallback = self._project_display_to_focal_plane(x, y)
-        if fallback is not None:
-            self._debug(f"focal plane fallback hit at {fallback}")
-            return fallback
-        self._debug("focal plane fallback missed")
         return None
 
-    def _project_display_to_volume_bounds(self, x: int, y: int) -> tuple[float, float, float] | None:
-        if not self.volumes:
+    def _volume_index_for_prop(self, prop) -> int | None:
+        if prop is None:
             return None
-        bounds = self.volumes[0]["image"].GetBounds()
-        near_world = self._display_to_world(x, y, 0.0)
-        far_world = self._display_to_world(x, y, 1.0)
-        if near_world is None or far_world is None:
-            return None
-        origin = np.array(near_world, dtype=np.float64)
-        direction = np.array(far_world, dtype=np.float64) - origin
-        t_min = 0.0
-        t_max = 1.0
-        for axis in range(3):
-            axis_min = float(bounds[axis * 2])
-            axis_max = float(bounds[axis * 2 + 1])
-            if abs(direction[axis]) < 1e-8:
-                if origin[axis] < axis_min or origin[axis] > axis_max:
-                    return None
+        for index, item in enumerate(self.volumes):
+            volume = item["volume"]
+            if volume is prop or volume == prop:
+                return index
+            try:
+                if volume.GetAddressAsString("") == prop.GetAddressAsString(""):
+                    return index
+            except AttributeError:
                 continue
-            inv = 1.0 / direction[axis]
-            t1 = (axis_min - origin[axis]) * inv
-            t2 = (axis_max - origin[axis]) * inv
-            low = min(t1, t2)
-            high = max(t1, t2)
-            t_min = max(t_min, low)
-            t_max = min(t_max, high)
-            if t_min > t_max:
-                return None
-        hit = origin + direction * t_min
-        world = tuple(float(value) for value in hit)
-        if not all(np.isfinite(value) for value in world):
-            return None
-        return world
-
-    def _display_to_world(self, x: int, y: int, z: float) -> tuple[float, float, float] | None:
-        self.renderer.SetDisplayPoint(float(x), float(y), float(z))
-        self.renderer.DisplayToWorld()
-        world_point = self.renderer.GetWorldPoint()
-        if not world_point or abs(float(world_point[3])) < 1e-8:
-            return None
-        world = tuple(float(world_point[i] / world_point[3]) for i in range(3))
-        if not all(np.isfinite(value) for value in world):
-            return None
-        return world
-
-    def _project_display_to_focal_plane(self, x: int, y: int) -> tuple[float, float, float] | None:
-        if not self.volumes:
-            return None
-        camera = self.renderer.GetActiveCamera()
-        focal_point = camera.GetFocalPoint()
-        self.renderer.SetWorldPoint(
-            float(focal_point[0]),
-            float(focal_point[1]),
-            float(focal_point[2]),
-            1.0,
-        )
-        self.renderer.WorldToDisplay()
-        display_point = self.renderer.GetDisplayPoint()
-        display_z = float(display_point[2])
-        self.renderer.SetDisplayPoint(float(x), float(y), display_z)
-        self.renderer.DisplayToWorld()
-        world_point = self.renderer.GetWorldPoint()
-        if not world_point or abs(float(world_point[3])) < 1e-8:
-            return None
-        world = tuple(float(world_point[i] / world_point[3]) for i in range(3))
-        if not all(np.isfinite(value) for value in world):
-            return None
-        return world
+        return None
 
     def _pick_annotation_actor(self, x: int, y: int):
         picker = vtk.vtkPropPicker()
         if picker.Pick(x, y, 0, self.renderer):
             actor = picker.GetActor()
-            picked = self.annotation_actor_map.get(actor)
-            self._debug(f"prop picker hit actor -> {picked}")
-            return picked
-        self._debug("prop picker missed")
+            return self.annotation_actor_map.get(actor)
         return None
 
     def _clamp_voxel(self, voxel) -> tuple[float, float, float]:
@@ -770,7 +653,6 @@ class VtkVolumeRenderer:
         )
 
     def _emit_annotation_event(self, event_type: str, payload: dict) -> None:
-        self._debug(f"emit event {event_type}: {payload}")
         if self.annotation_event_handler is not None:
             self.annotation_event_handler(event_type, payload)
 
@@ -833,6 +715,29 @@ class VtkVolumeRenderer:
                 self.interactor.RemoveObserver(self.observer_tag)
                 self.observer_tag = None
 
+    def shutdown(self) -> None:
+        self.stop_rotation()
+        try:
+            if hasattr(self, "orientation_widget") and self.orientation_widget is not None:
+                self.orientation_widget.SetEnabled(0)
+                self.orientation_widget.SetInteractor(None)
+        except Exception:
+            pass
+        try:
+            self.renderer.RemoveAllViewProps()
+        except Exception:
+            pass
+        try:
+            if self.render_window is not None:
+                self.render_window.Finalize()
+        except Exception:
+            pass
+        try:
+            if self.vtk_widget is not None and hasattr(self.vtk_widget, "Finalize"):
+                self.vtk_widget.Finalize()
+        except Exception:
+            pass
+
     def save_screenshot(self, filename: str) -> None:
         window_to_image_filter = vtk.vtkWindowToImageFilter()
         window_to_image_filter.SetInput(self.render_window)
@@ -880,4 +785,99 @@ class VtkVolumeRenderer:
 
         writer.close()
         camera.SetPosition(*initial_position)
+        self.render()
+
+
+class StandardMultiVolumeRenderer(VtkVolumeRenderer):
+    def __init__(self, vtk_widget) -> None:
+        super().__init__(vtk_widget)
+        self._reset_multi_volume_backend()
+
+    def _reset_multi_volume_backend(self) -> None:
+        self.multi_mapper = vtk.vtkGPUVolumeRayCastMapper()
+        self.multi_volume = vtk.vtkMultiVolume()
+        self.multi_volume.SetMapper(self.multi_mapper)
+        self.multi_volume_added = False
+
+    def add_volume_data(
+        self,
+        data,
+        spacing,
+        color_settings=None,
+        opacity_settings=None,
+        origin=(0.0, 0.0, 0.0),
+        metadata: dict[str, object] | None = None,
+    ) -> int:
+        metadata = metadata or {}
+        if hasattr(data, "detach"):
+            np_array = np.ascontiguousarray(data.detach().cpu().numpy())
+        else:
+            np_array = np.ascontiguousarray(np.array(data))
+
+        vtk_array = vtk.util.numpy_support.numpy_to_vtk(
+            np_array.ravel(order="C"), deep=True, array_type=vtk.VTK_FLOAT
+        )
+        image_data = vtk.vtkImageData()
+        dims = (int(np_array.shape[2]), int(np_array.shape[1]), int(np_array.shape[0]))
+        image_data.SetDimensions(*dims)
+        vtk_spacing = tuple(metadata.get("vtk_spacing", spacing))
+        vtk_origin = tuple(metadata.get("vtk_origin", origin))
+        image_data.SetSpacing(*vtk_spacing)
+        image_data.SetOrigin(*vtk_origin)
+        image_data.GetPointData().SetScalars(vtk_array)
+
+        prop = vtk.vtkVolumeProperty()
+        prop.ShadeOn()
+        prop.SetInterpolationTypeToLinear()
+        prop.SetAmbient(0.4)
+        prop.SetDiffuse(0.6)
+        prop.SetSpecular(0.4)
+
+        child_volume = vtk.vtkVolume()
+        child_volume.SetProperty(prop)
+
+        cset = color_settings if color_settings is not None else []
+        oset = opacity_settings if opacity_settings is not None else []
+        self._apply_transfer_functions_to_property(prop, cset, oset)
+
+        port = len(self.volumes)
+        self.multi_mapper.SetInputDataObject(port, image_data)
+        self.multi_volume.SetVolume(child_volume, port)
+        if not self.multi_volume_added:
+            self.renderer.AddVolume(self.multi_volume)
+            self.multi_volume_added = True
+
+        self.volumes.append(
+            {
+                "image": image_data,
+                "mapper": self.multi_mapper,
+                "volume": child_volume,
+                "prop": prop,
+                "color": list(cset),
+                "opacity": list(oset),
+                "affine": self._render_affine(vtk_origin, vtk_spacing),
+                "inverse_affine": None,
+                "volume_id": str(metadata.get("volume_id", port)),
+            }
+        )
+        self.volumes[-1]["inverse_affine"] = self._safe_inverse_affine(
+            self.volumes[-1]["affine"]
+        )
+
+        self.renderer.SetBackground(0.1, 0.1, 0.1)
+        self.volume_shape = tuple(int(v) for v in np_array.shape)
+        self.renderer.ResetCameraClippingRange()
+        self.store_initial_camera()
+        self.render()
+        return port
+
+    def clear_volumes(self) -> None:
+        self.renderer.RemoveAllViewProps()
+        self.add_axes_indicator()
+        self._reset_multi_volume_backend()
+        self.volumes = []
+        self.annotation_point_actors = {}
+        self.annotation_box_actors = {}
+        self.annotation_handle_actors = {}
+        self.annotation_actor_map = {}
         self.render()

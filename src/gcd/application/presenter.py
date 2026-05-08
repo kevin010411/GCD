@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 
 from ..domain import DataRange, TransferFunction
@@ -23,25 +24,33 @@ class MainWindowPresenter:
         self.error_store = error_store
 
         self.current_file = ""
-        self.use_overlay = True
         self.is_recording = False
         self.rotation_speed = 0.5
-        self.transfer_function = TransferFunction.overlay_preset()
-        self.data_range = DataRange(0.0, 1.0)
+        self.volume_transfer_function = TransferFunction.base_preset()
+        self.cam_transfer_function = TransferFunction.heatmap_preset()
+        self.volume_data_range = DataRange(0.0, 1.0)
+        self.cam_data_range = DataRange(0.0, 1.0)
+        self.volume_order = ["volume", "cam"]
+        self.volume_visibility = {"volume": True, "cam": True}
+        self.selected_transfer_volume_id = "cam"
 
         self._connect_signals()
 
     def _connect_signals(self) -> None:
         self.view.model_combo.currentIndexChanged.connect(self.on_model_changed)
         self.view.open_file_button.clicked.connect(self.on_open_file_requested)
-        self.view.overlay_button.clicked.connect(self.on_overlay_selected)
-        self.view.heatmap_button.clicked.connect(self.on_heatmap_selected)
         self.view.replace_camera_button.clicked.connect(
             self.on_replace_camera_requested
         )
         self.view.speed_slider.valueChanged.connect(self.on_rotation_speed_changed)
         self.view.start_button.clicked.connect(self.on_start_rotation_requested)
         self.view.stop_button.clicked.connect(self.on_stop_rotation_requested)
+        self.view.import_camera_button.clicked.connect(
+            self.on_import_camera_requested
+        )
+        self.view.export_camera_button.clicked.connect(
+            self.on_export_camera_requested
+        )
         self.view.layer_combo.currentTextChanged.connect(self.on_layer_changed)
         self.view.feature_widget.apply_requested.connect(self.on_feature_range_changed)
         self.view.class_spinbox.valueChanged.connect(self.on_class_changed)
@@ -49,6 +58,13 @@ class MainWindowPresenter:
             self.on_save_screenshot_requested
         )
         self.view.record_video_button.clicked.connect(self.on_record_video_requested)
+        self.view.volume_list.selection_changed.connect(
+            self.on_transfer_volume_selected
+        )
+        self.view.volume_list.visibility_changed.connect(
+            self.on_volume_visibility_changed
+        )
+        self.view.volume_list.order_changed.connect(self.on_volume_order_changed)
         self.view.transfer_editor.transfer_function_changed.connect(
             self.on_transfer_function_changed
         )
@@ -75,6 +91,9 @@ class MainWindowPresenter:
         )
         self.view.transfer_plugin_button.clicked.connect(
             lambda: self.view.set_active_plugin("transfer")
+        )
+        self.view.camera_plugin_button.clicked.connect(
+            lambda: self.view.set_active_plugin("camera")
         )
         self.view.roi_plugin_button.clicked.connect(
             lambda: self.view.set_active_plugin("roi")
@@ -105,11 +124,10 @@ class MainWindowPresenter:
         if options:
             self.workflow.set_config(options[0]["path"])
         self.view.set_rotation_speed_label(self.rotation_speed)
-        self.view.set_render_mode(self.use_overlay)
         self.view.set_rotation_running(True)
         self.view.renderer.set_rotation_speed(self.rotation_speed)
         self.view.renderer.show_volumes(
-            [self.workflow.engine.cam, self.workflow.engine.volume_data],
+            [self.workflow.engine.volume_data, self.workflow.engine.cam],
             [self.workflow.engine.img1_spacing, self.workflow.engine.img1_spacing],
             [
                 self.workflow.engine.display_metadata,
@@ -117,17 +135,17 @@ class MainWindowPresenter:
             ],
         )
         self.view.renderer.start_rotation()
+        self._sync_volume_list()
         self.apply_transfer_function_to_renderer()
         self.view.workspace.set_workspace_payload(
             volume_data=self.workflow.engine.volume_data,
             cam_data=self.workflow.engine.cam,
-            transfer_function=self.transfer_function,
-            data_range=self.data_range,
+            volume_transfer_function=self.volume_transfer_function,
+            volume_data_range=self.volume_data_range,
+            cam_transfer_function=self.cam_transfer_function,
+            cam_data_range=self.cam_data_range,
         )
-        self.refresh_roi_panel()
-        self.view.transfer_editor.set_transfer_function(
-            self.transfer_function, self.data_range
-        )
+        self._sync_transfer_editor()
 
     def on_model_changed(self, _index: int) -> None:
         path = self.view.selected_model_path()
@@ -153,13 +171,14 @@ class MainWindowPresenter:
     def _on_input_loaded(self, result: dict) -> None:
         self.current_file = result["file_name"]
         self.view.set_file_name(os.path.basename(self.current_file))
-        self.transfer_function = result["transfer_function"]
-        self.data_range = result["data_range"]
+        self.volume_transfer_function = result["volume_transfer_function"]
+        self.cam_transfer_function = result["cam_transfer_function"]
+        self.volume_data_range = result["volume_data_range"]
+        self.cam_data_range = result["cam_data_range"]
         self.view.set_layer_options(result["layer_names"], result["selected_layer"])
         self.view.set_feature_size(result["feature_size"])
-        self.view.transfer_editor.set_transfer_function(
-            self.transfer_function, self.data_range
-        )
+        self._sync_volume_list()
+        self._sync_transfer_editor()
         self._render_result(result)
         self.view.renderer.store_initial_camera()
         self.view.set_rotation_running(True)
@@ -170,18 +189,19 @@ class MainWindowPresenter:
         self.view.set_rotation_running(False)
 
     def _render_result(self, result: dict) -> None:
-        render_request = result["render_request"]
         self.view.renderer.show_volumes(
-            render_request["volumes"],
-            render_request["spacing"],
-            render_request.get("metadata"),
+            self._ordered_volume_payloads(),
+            self._ordered_volume_spacing(),
+            self._ordered_volume_metadata(),
         )
         self.apply_transfer_function_to_renderer()
         self.view.workspace.set_workspace_payload(
             volume_data=self.workflow.engine.volume_data,
             cam_data=self.workflow.engine.cam,
-            transfer_function=self.transfer_function,
-            data_range=self.data_range,
+            volume_transfer_function=self.volume_transfer_function,
+            volume_data_range=self.volume_data_range,
+            cam_transfer_function=self.cam_transfer_function,
+            cam_data_range=self.cam_data_range,
         )
         self.refresh_roi_panel()
 
@@ -193,14 +213,14 @@ class MainWindowPresenter:
             layer=self.view.selected_layer(),
             n1=n1,
             n2=n2,
-            use_overlay=self.use_overlay,
-            transfer_function=self.transfer_function,
+            cam_transfer_function=self.cam_transfer_function,
+            volume_transfer_function=self.volume_transfer_function,
         )
-        self.data_range = result["data_range"]
+        self.cam_data_range = result["cam_data_range"]
+        self.volume_data_range = result["volume_data_range"]
         self.view.set_feature_size(result["feature_size"])
-        self.view.transfer_editor.set_transfer_function(
-            self.transfer_function, self.data_range
-        )
+        self._sync_volume_list()
+        self._sync_transfer_editor()
         self._render_result(result)
 
     def on_layer_changed(self, _layer: str) -> None:
@@ -219,41 +239,128 @@ class MainWindowPresenter:
                 self._on_background_error,
             )
 
-    def on_overlay_selected(self) -> None:
-        self.use_overlay = True
-        self.view.set_render_mode(True)
-        self.transfer_function = TransferFunction.overlay_preset()
-        self.view.transfer_editor.set_transfer_function(
-            self.transfer_function, self.data_range
-        )
-        self._compute_and_render_current_selection()
-
-    def on_heatmap_selected(self) -> None:
-        self.use_overlay = False
-        self.view.set_render_mode(False)
-        self.transfer_function = TransferFunction.heatmap_preset()
-        self.view.transfer_editor.set_transfer_function(
-            self.transfer_function, self.data_range
-        )
-        self._compute_and_render_current_selection()
-
     def on_transfer_function_changed(
         self, transfer_function: TransferFunction, data_range: DataRange
     ) -> None:
-        self.transfer_function = transfer_function
-        self.data_range = data_range
+        if self._current_transfer_target() == "volume":
+            self.volume_transfer_function = transfer_function
+        else:
+            self.cam_transfer_function = transfer_function
         self.apply_transfer_function_to_renderer()
 
     def apply_transfer_function_to_renderer(self) -> None:
-        colors, opacities = self.transfer_function.renderer_points(self.data_range)
-        self.view.renderer.apply_transfer_function(colors, opacities)
+        cam_colors, cam_opacities = self.cam_transfer_function.renderer_points(self.cam_data_range)
+        volume_colors, volume_opacities = self.volume_transfer_function.renderer_points(
+            self.volume_data_range
+        )
+        cam_visible = self._volume_visible("cam")
+        volume_visible = self._volume_visible("volume")
+        if cam_visible and volume_visible:
+            # When both volumes are visible, keep the base anatomy semi-transparent
+            # so the heatmap is not completely occluded by the higher-density shell.
+            volume_opacities = [
+                (value, min(1.0, max(0.0, opacity * 0.35)))
+                for value, opacity in volume_opacities
+            ]
+            cam_opacities = [
+                (value, min(1.0, max(0.0, opacity * 1.1)))
+                for value, opacity in cam_opacities
+            ]
+        for index, volume_id in enumerate(self.volume_order):
+            if volume_id == "volume":
+                colors = volume_colors
+                opacities = volume_opacities
+            else:
+                colors = cam_colors
+                opacities = cam_opacities
+            self.view.renderer.set_volume_transfer_functions(
+                index,
+                colors,
+                opacities,
+                visible=self._volume_visible(volume_id),
+                render=False,
+            )
+        self.view.renderer.render()
         self.view.workspace.set_workspace_payload(
             volume_data=self.workflow.engine.volume_data,
             cam_data=self.workflow.engine.cam,
-            transfer_function=self.transfer_function,
-            data_range=self.data_range,
+            volume_transfer_function=self.volume_transfer_function,
+            volume_data_range=self.volume_data_range,
+            cam_transfer_function=self.cam_transfer_function,
+            cam_data_range=self.cam_data_range,
         )
         self.refresh_roi_panel()
+
+    def _current_transfer_target(self) -> str:
+        return self.selected_transfer_volume_id or "cam"
+
+    def _current_transfer_state(self) -> tuple[TransferFunction, DataRange]:
+        if self._current_transfer_target() == "volume":
+            return self.volume_transfer_function, self.volume_data_range
+        return self.cam_transfer_function, self.cam_data_range
+
+    def _sync_transfer_editor(self) -> None:
+        transfer_function, data_range = self._current_transfer_state()
+        self.view.transfer_editor.blockSignals(True)
+        self.view.transfer_editor.set_transfer_function(transfer_function, data_range)
+        self.view.transfer_editor.blockSignals(False)
+
+    def _sync_volume_list(self) -> None:
+        self.view.volume_list.set_volumes(
+            [
+                {
+                    "id": volume_id,
+                    "display_name": self._volume_display_name(volume_id),
+                    "visible": self._volume_visible(volume_id),
+                }
+                for volume_id in self.volume_order
+            ],
+            self.selected_transfer_volume_id,
+        )
+
+    def _volume_visible(self, volume_id: str) -> bool:
+        return bool(self.volume_visibility.get(volume_id, True))
+
+    def _volume_display_name(self, volume_id: str) -> str:
+        return "Base Volume" if volume_id == "volume" else "Heatmap Volume"
+
+    def _ordered_volume_payloads(self) -> list[object]:
+        return [
+            self.workflow.engine.volume_data if volume_id == "volume" else self.workflow.engine.cam
+            for volume_id in self.volume_order
+        ]
+
+    def _ordered_volume_spacing(self) -> list[tuple[float, float, float]]:
+        return [self.workflow.engine.img1_spacing for _ in self.volume_order]
+
+    def _ordered_volume_metadata(self) -> list[dict[str, object]]:
+        return [
+            {
+                **self.workflow.engine.display_metadata,
+                "volume_id": volume_id,
+            }
+            for volume_id in self.volume_order
+        ]
+
+    def on_transfer_volume_selected(self, volume_id: str) -> None:
+        self.selected_transfer_volume_id = volume_id
+        self._sync_transfer_editor()
+
+    def on_volume_visibility_changed(self, volume_id: str, visible: bool) -> None:
+        self.volume_visibility[volume_id] = bool(visible)
+        self._sync_volume_list()
+        self.apply_transfer_function_to_renderer()
+
+    def on_volume_order_changed(self, ordered_ids: list[str]) -> None:
+        if ordered_ids:
+            self.volume_order = list(ordered_ids)
+        self._sync_volume_list()
+        self.view.renderer.show_volumes(
+            self._ordered_volume_payloads(),
+            self._ordered_volume_spacing(),
+            self._ordered_volume_metadata(),
+        )
+        self.apply_transfer_function_to_renderer()
 
     def on_rotation_speed_changed(self, value: int) -> None:
         self.rotation_speed = min(value / 10.0, 10.0)
@@ -276,6 +383,42 @@ class MainWindowPresenter:
 
     def on_replace_camera_requested(self) -> None:
         self.view.renderer.replace_camera()
+
+    def on_import_camera_requested(self) -> None:
+        try:
+            path = self.view.choose_camera_import_file()
+            if not path:
+                return
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            snapshot = {
+                "position": tuple(float(v) for v in payload["position"]),
+                "focal_point": tuple(float(v) for v in payload["focal_point"]),
+                "view_up": tuple(float(v) for v in payload["view_up"]),
+                "parallel_scale": float(payload.get("parallel_scale", 1.0)),
+            }
+            self.view.renderer.apply_camera_state(snapshot)
+        except Exception as exc:
+            self.error_store.save(exc, context="import_camera")
+
+    def on_export_camera_requested(self) -> None:
+        try:
+            path = self.view.choose_camera_export_file()
+            if not path:
+                return
+            snapshot = self.view.renderer.capture_camera_state()
+            if snapshot is None:
+                return
+            payload = {
+                "position": [float(v) for v in snapshot["position"]],
+                "focal_point": [float(v) for v in snapshot["focal_point"]],
+                "view_up": [float(v) for v in snapshot["view_up"]],
+                "parallel_scale": float(snapshot["parallel_scale"]),
+            }
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            self.error_store.save(exc, context="export_camera")
 
     def on_save_screenshot_requested(self) -> None:
         try:
@@ -312,12 +455,14 @@ class MainWindowPresenter:
             if not path:
                 return
             width, height = self.view.transfer_editor.canvas_size()
-            self.transfer_function, self.data_range = self.transfer_service.load(
+            transfer_function, _loaded_range = self.transfer_service.load(
                 path, canvas_width=width, canvas_height=height
             )
-            self.view.transfer_editor.set_transfer_function(
-                self.transfer_function, self.data_range
-            )
+            if self._current_transfer_target() == "volume":
+                self.volume_transfer_function = transfer_function
+            else:
+                self.cam_transfer_function = transfer_function
+            self._sync_transfer_editor()
             self.apply_transfer_function_to_renderer()
         except Exception as exc:
             self.error_store.save(exc, context="load_transfer_function")
@@ -328,10 +473,11 @@ class MainWindowPresenter:
             if not path:
                 return
             width, height = self.view.transfer_editor.canvas_size()
+            transfer_function, data_range = self._current_transfer_state()
             self.transfer_service.save(
                 path,
-                self.transfer_function,
-                self.data_range,
+                transfer_function,
+                data_range,
                 canvas_width=width,
                 canvas_height=height,
             )

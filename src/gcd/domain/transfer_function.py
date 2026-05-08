@@ -72,13 +72,20 @@ class TransferFunction:
     control_points: tuple[ControlPoint, ...]
 
     def __post_init__(self) -> None:
-        points = tuple(sorted(self.control_points, key=lambda point: point.position))
+        points = list(sorted(self.control_points, key=lambda point: point.position))
         if not points:
             raise ValueError("TransferFunction requires at least one control point.")
-        object.__setattr__(self, "control_points", points)
+        if len(points) == 1:
+            points[0] = ControlPoint(0.0, points[0].color, points[0].opacity)
+        else:
+            points[0] = ControlPoint(0.0, points[0].color, points[0].opacity)
+            points[-1] = ControlPoint(1.0, points[-1].color, points[-1].opacity)
+        object.__setattr__(self, "control_points", tuple(points))
 
     @classmethod
-    def from_iterable(cls, control_points: Iterable[ControlPoint]) -> "TransferFunction":
+    def from_iterable(
+        cls, control_points: Iterable[ControlPoint]
+    ) -> "TransferFunction":
         return cls(tuple(control_points))
 
     @classmethod
@@ -103,17 +110,30 @@ class TransferFunction:
         )
 
     @classmethod
+    def base_preset(cls) -> "TransferFunction":
+        return cls.from_iterable(
+            [
+                ControlPoint(0, "#9D5B2F", 0.0),
+                ControlPoint(0.3, "#9D5B2F", 0.0),
+                ControlPoint(0.35, "#E19A4A", 0.65),
+                ControlPoint(0.4, "#FFFFFF", 0.7),
+                ControlPoint(0.5, "#FFFFFF", 0.8),
+                ControlPoint(0.65, "#FFFFFF", 0.8),
+                ControlPoint(0.875, "#FFEFF4", 0.0),
+                ControlPoint(1, "#FFEFF4", 0.0),
+            ]
+        )
+
+    @classmethod
     def heatmap_preset(cls) -> "TransferFunction":
         return cls.from_iterable(
             [
-                ControlPoint(0.0000, "#FFFFFF", 0.0),
-                ControlPoint(0.1575, "#000000", 0.0),
-                ControlPoint(0.1950, "#0184FF", 0.298),
-                ControlPoint(0.2300, "#00AA00", 0.15),
-                ControlPoint(0.3200, "#FFFF00", 0.106),
-                ControlPoint(0.3925, "#FFAA00", 0.514),
-                ControlPoint(0.5075, "#FF0000", 0.794),
-                ControlPoint(1.0000, "#570000", 1.0),
+                ControlPoint(0, "#00008F", 0.0),
+                ControlPoint(0.075, "#00008F", 0.602),
+                ControlPoint(0.1, "#00C3FF", 0.654),
+                ControlPoint(0.4, "#FCFF03", 0.762),
+                ControlPoint(0.7, "#FF7F00", 0.918),
+                ControlPoint(1, "#FF2800", 1.0),
             ]
         )
 

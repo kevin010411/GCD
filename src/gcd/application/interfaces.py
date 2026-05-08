@@ -12,10 +12,14 @@ class VolumeRenderer(Protocol):
     ) -> None:
         ...
 
-    def apply_transfer_function(
+    def set_volume_transfer_functions(
         self,
+        index: int,
         color_points: list[tuple[float, float, float, float]],
         opacity_points: list[tuple[float, float]],
+        *,
+        visible: bool | None = None,
+        render: bool = True,
     ) -> None:
         ...
 
