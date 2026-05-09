@@ -1667,6 +1667,16 @@ class WorkspaceHost(QWidget):
     def replace_camera(self) -> None:
         self.active_workspace.renderer.replace_camera()
 
+    def capture_camera_state(self):
+        snapshot = self.active_workspace.renderer.capture_camera_state()
+        self.shared_state.camera_snapshot = snapshot
+        return snapshot
+
+    def apply_camera_state(self, snapshot) -> None:
+        self.shared_state.camera_snapshot = snapshot
+        self.standard_workspace.renderer.apply_camera_state(snapshot)
+        self.roi_workspace.renderer.apply_camera_state(snapshot)
+
     def save_screenshot(self, filename: str) -> None:
         self.active_workspace.renderer.save_screenshot(filename)
 

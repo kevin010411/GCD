@@ -212,6 +212,41 @@ STYLESHEET = """
         background: #203247;
     }
 
+    QMenu#softMenuPopup {
+        background: #161F2B;
+        border: 1px solid #31445D;
+        border-radius: 10px;
+        color: #E8EEF6;
+        padding: 4px;
+    }
+
+    QMenu#softMenuPopup::item {
+        padding: 6px 10px;
+        margin: 2px 4px;
+        border-radius: 8px;
+        background: transparent;
+    }
+
+    QMenu#softMenuPopup::item:selected {
+        background: #28415A;
+        color: #F7FAFD;
+    }
+
+    QMenu#softMenuPopup::separator {
+        height: 1px;
+        margin: 6px 8px;
+        background: #31445D;
+    }
+
+    QMenu#softMenuPopup::right-arrow {
+        width: 0px;
+        height: 0px;
+    }
+
+    QMenu#softMenuPopup::icon {
+        padding-left: 0px;
+    }
+
     QSpinBox {
         padding-right: 42px;
     }

@@ -143,6 +143,7 @@ class MainWindowView(QMainWindow):
         self.workbench_button.setText("Workbench")
         self.workbench_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.workbench_menu = QMenu(self.workbench_button)
+        self.workbench_menu.setObjectName("softMenuPopup")
         self.workbench_button.setMenu(self.workbench_menu)
 
         self.layout_action_focus = QAction("Focus 3D", self)
