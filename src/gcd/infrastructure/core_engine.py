@@ -11,6 +11,7 @@ from mmengine import Config
 
 from src import model as _model_registry  # noqa: F401
 from src.utils import build_model, timer
+from .cam_methods import CamMethod, GradCamMethod
 
 
 class ModelLoadStateDictError(RuntimeError):
@@ -44,8 +45,12 @@ class GradCamEngine:
         self.display_metadata = self._default_display_metadata()
         self.layers = {"layer1": 1}
         self.file_name = ""
-        self.patch: list[dict[str, torch.Tensor]] = []
+        self.patch: list[dict[str, object]] = []
         self.target_class = 1
+        self.cam_methods: dict[str, CamMethod] = {
+            GradCamMethod.id: GradCamMethod(self._gradcam_objective)
+        }
+        self.active_method_id = GradCamMethod.id
 
         self.save_dir = save_dir
         if self.save_dir:
@@ -82,8 +87,21 @@ class GradCamEngine:
     def set_target_class(self, target_class: int) -> None:
         self.target_class = int(target_class)
 
+    def available_cam_methods(self) -> list[dict[str, str]]:
+        return [
+            {"id": method.id, "name": method.display_name}
+            for method in self.cam_methods.values()
+        ]
+
     def default_feature_size(self) -> int:
         return list(self.layers.values())[0]
+
+    def _resolve_cam_method(self, method: str | None) -> CamMethod:
+        requested = (method or self.active_method_id or GradCamMethod.id).strip().lower()
+        if requested in self.cam_methods:
+            return self.cam_methods[requested]
+        self._log(f"未知 CAM method '{method}'，改用預設方法: {GradCamMethod.id}")
+        return self.cam_methods[GradCamMethod.id]
 
     @staticmethod
     def _gradcam_objective(logits: torch.Tensor, target_class: int) -> torch.Tensor:
@@ -95,12 +113,16 @@ class GradCamEngine:
         loss = (logits[0, target_class] * (index == target_class)).sum()
         return loss
 
-    def load_and_process_input(self, input_file: str | None = None) -> list[str]:
+    def load_and_process_input(
+        self, input_file: str | None = None, method: str | None = None
+    ) -> list[str]:
         messages: list[str] = []
         if input_file is not None:
             self.file_name = input_file
         if not self.file_name:
             raise ValueError("尚未指定輸入檔案，無法載入與處理資料。")
+        cam_method = self._resolve_cam_method(method)
+        self.active_method_id = cam_method.id
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.origin_img, self.origin_meta = mt.LoadImage(image_only=False)(
@@ -228,9 +250,6 @@ class GradCamEngine:
                     ]
                 )
 
-                loss = self._gradcam_objective(logits, self.target_class)
-                loss.backward()
-
                 if not hasattr(model, "layers") or not model.layers:
                     raise RuntimeError(
                         "model.layers 未填入。請確認模型 forward 在 requires_grad=True 時"
@@ -238,12 +257,12 @@ class GradCamEngine:
                     )
 
                 self.patch.append(
-                    {
-                        key: (value.detach() * value.grad.detach()).cpu()
-                        for key, value in model.layers.items()
-                    }
+                    cam_method.collect_patch_data(
+                        model.layers,
+                        logits,
+                        self.target_class,
+                    )
                 )
-                self.patch[-1]["pred"] = logits.to("cpu")
 
             self.layers = {key: value.size(1) for key, value in model.layers.items()}
 
@@ -260,9 +279,16 @@ class GradCamEngine:
         layer: str | None = None,
         n1: int = 0,
         n2: int = 999,
+        method: str | None = None,
     ) -> str:
         if not self.file_name:
             raise ValueError("尚未載入檔案，無法計算 CAM。")
+        cam_method = self._resolve_cam_method(method)
+        if self.patch and cam_method.id != self.active_method_id:
+            raise ValueError(
+                "目前的 CAM patch 資料與指定 method 不一致，請重新載入輸入資料後再計算。"
+            )
+        self.active_method_id = cam_method.id
 
         selected_layer = layer or self.cfg["default_layer"]
         if selected_layer not in self.layers:
@@ -293,14 +319,17 @@ class GradCamEngine:
                 (self.STRIDE, self.STRIDE),
             ]
             for index, (x, y) in enumerate(tiles):
-                q = torch.sum(
-                    self.patch[index][selected_layer][:, n1:n2, ...], dim=1
-                ).unsqueeze(0)
-                q = F.interpolate(
-                    q, size=(self.SIZE, self.SIZE, self.SIZE), mode="trilinear"
+                q = cam_method.build_tile_cam(
+                    self.patch[index],
+                    selected_layer,
+                    n1,
+                    n2,
+                    (self.SIZE, self.SIZE, self.SIZE),
                 )
 
                 p1 = self.patch[index]["pred"]
+                if not isinstance(p1, torch.Tensor):
+                    raise TypeError("CAM patch payload 缺少 pred tensor。")
                 p1 = F.interpolate(
                     p1, size=(self.SIZE, self.SIZE, self.SIZE), mode="trilinear"
                 )

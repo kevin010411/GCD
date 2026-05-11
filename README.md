@@ -24,6 +24,7 @@ Grad-CAM Discoverer is a Python application for visualizing 3D medical imaging d
 - **Interactive GUI**: Built with PyQt6, featuring:
   - File selection for loading NIfTI files.
   - Transfer function editor for customizing color and opacity.
+  - Explainability method selector with an extensible gradient-based CAM workflow.
   - Layer and feature selection for controlling Grad-CAM outputs.
   - Rotation speed control for 3D visualization.
   - Screenshot and video recording capabilities.
@@ -74,6 +75,7 @@ uv run main.py
 
 2. The GUI will open with the following controls:
    - **Open File**: Select a NIfTI file from the `dat` directory or elsewhere.
+   - **Method Selection**: Choose the explainability method. The current implementation ships with Grad-CAM and keeps the workflow extensible for future gradient-based methods.
    - **Transfer Function Editor**: Click and drag to adjust control points for color and opacity. Double-click to change colors.
    - **Layer Selection**: Choose a layer from the model to compute Grad-CAM.
    - **Feature Selection**: Adjust the feature range using input fields or shift buttons (`<` and `>`).

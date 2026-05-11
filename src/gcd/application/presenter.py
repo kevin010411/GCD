@@ -52,6 +52,7 @@ class MainWindowPresenter:
             self.on_export_camera_requested
         )
         self.view.layer_combo.currentTextChanged.connect(self.on_layer_changed)
+        self.view.method_combo.currentIndexChanged.connect(self.on_method_changed)
         self.view.feature_widget.apply_requested.connect(self.on_feature_range_changed)
         self.view.class_spinbox.valueChanged.connect(self.on_class_changed)
         self.view.save_screenshot_button.clicked.connect(
@@ -121,6 +122,7 @@ class MainWindowPresenter:
     def initialize(self) -> None:
         options = self.workflow.list_model_configs()
         self.view.set_model_options(options)
+        self.view.set_method_options(self.workflow.list_cam_methods(), "gradcam")
         if options:
             self.workflow.set_config(options[0]["path"])
         self.view.set_rotation_speed_label(self.rotation_speed)
@@ -163,7 +165,11 @@ class MainWindowPresenter:
         self.view.renderer.clear_volumes()
         self.view.renderer.render()
         self.task_runner.submit(
-            lambda: self.workflow.load_input(file_name, self.view.selected_class()),
+            lambda: self.workflow.load_input(
+                file_name,
+                self.view.selected_class(),
+                self.view.selected_method(),
+            ),
             self._on_input_loaded,
             self._on_background_error,
         )
@@ -175,6 +181,9 @@ class MainWindowPresenter:
         self.cam_transfer_function = result["cam_transfer_function"]
         self.volume_data_range = result["volume_data_range"]
         self.cam_data_range = result["cam_data_range"]
+        self.view.set_method_options(
+            result["method_options"], result["selected_method"]
+        )
         self.view.set_layer_options(result["layer_names"], result["selected_layer"])
         self.view.set_feature_size(result["feature_size"])
         self._sync_volume_list()
@@ -213,11 +222,15 @@ class MainWindowPresenter:
             layer=self.view.selected_layer(),
             n1=n1,
             n2=n2,
+            method=self.view.selected_method(),
             cam_transfer_function=self.cam_transfer_function,
             volume_transfer_function=self.volume_transfer_function,
         )
         self.cam_data_range = result["cam_data_range"]
         self.volume_data_range = result["volume_data_range"]
+        self.view.set_method_options(
+            result["method_options"], result["selected_method"]
+        )
         self.view.set_feature_size(result["feature_size"])
         self._sync_volume_list()
         self._sync_transfer_editor()
@@ -233,7 +246,21 @@ class MainWindowPresenter:
         if self.current_file:
             self.task_runner.submit(
                 lambda: self.workflow.load_input(
-                    self.current_file, self.view.selected_class()
+                    self.current_file,
+                    self.view.selected_class(),
+                    self.view.selected_method(),
+                ),
+                self._on_input_loaded,
+                self._on_background_error,
+            )
+
+    def on_method_changed(self, _index: int) -> None:
+        if self.current_file:
+            self.task_runner.submit(
+                lambda: self.workflow.load_input(
+                    self.current_file,
+                    self.view.selected_class(),
+                    self.view.selected_method(),
                 ),
                 self._on_input_loaded,
                 self._on_background_error,

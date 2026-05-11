@@ -176,6 +176,7 @@ class MainWindowView(QMainWindow):
         self.gradcam_plugin_panel = GradCamPluginPanel(self)
         self.class_spinbox = self.gradcam_plugin_panel.class_spinbox
         self.layer_combo = self.gradcam_plugin_panel.layer_combo
+        self.method_combo = self.gradcam_plugin_panel.method_combo
         self.feature_widget = self.gradcam_plugin_panel.feature_widget
         self._add_plugin_tab("gradcam", self.gradcam_plugin_panel)
 
@@ -253,6 +254,19 @@ class MainWindowView(QMainWindow):
         self.layer_combo.setCurrentText(selected)
         self.layer_combo.blockSignals(False)
 
+    def set_method_options(
+        self, options: list[dict[str, str]], selected: str | None
+    ) -> None:
+        self.method_combo.blockSignals(True)
+        self.method_combo.clear()
+        for option in options:
+            self.method_combo.addItem(option["name"], option["id"])
+        if selected:
+            index = self.method_combo.findData(selected)
+            if index >= 0:
+                self.method_combo.setCurrentIndex(index)
+        self.method_combo.blockSignals(False)
+
     def set_feature_size(self, size: int) -> None:
         self.feature_widget.set_size(size)
 
@@ -276,6 +290,10 @@ class MainWindowView(QMainWindow):
 
     def selected_class(self) -> int:
         return self.class_spinbox.value()
+
+    def selected_method(self) -> str:
+        current = self.method_combo.currentData()
+        return str(current or "gradcam")
 
     def feature_range(self) -> tuple[int, int]:
         return self.feature_widget.get_range()

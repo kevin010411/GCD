@@ -127,13 +127,19 @@ class WorkflowService:
     def set_config(self, config_path: str) -> None:
         self.engine.set_config(config_path)
 
-    def load_input(self, file_name: str, target_class: int) -> dict[str, Any]:
+    def list_cam_methods(self) -> list[dict[str, str]]:
+        return self.engine.available_cam_methods()
+
+    def load_input(
+        self, file_name: str, target_class: int, method: str | None = None
+    ) -> dict[str, Any]:
         self.engine.set_target_class(target_class)
-        messages = self.engine.load_and_process_input(file_name)
+        messages = self.engine.load_and_process_input(file_name, method=method)
         compute_result = self.compute_cam(
             layer=None,
             n1=0,
             n2=self.engine.default_feature_size(),
+            method=method,
             cam_transfer_function=TransferFunction.heatmap_preset(),
             volume_transfer_function=TransferFunction.base_preset(),
         )
@@ -141,6 +147,8 @@ class WorkflowService:
             "file_name": file_name,
             "layer_names": compute_result["layer_names"],
             "selected_layer": compute_result["selected_layer"],
+            "method_options": compute_result["method_options"],
+            "selected_method": compute_result["selected_method"],
             "feature_size": compute_result["feature_size"],
             "render_request": compute_result["render_request"],
             "cam_data_range": compute_result["cam_data_range"],
@@ -156,6 +164,7 @@ class WorkflowService:
         layer: str | None,
         n1: int,
         n2: int,
+        method: str | None = None,
         cam_transfer_function: TransferFunction | None = None,
         volume_transfer_function: TransferFunction | None = None,
     ) -> dict[str, Any]:
@@ -163,6 +172,7 @@ class WorkflowService:
             layer=layer,
             n1=n1,
             n2=n2,
+            method=method,
         )
         cam_data_range = DataRange.from_data([self.engine.cam], method="minmax")
         volume_data_range = DataRange.from_data(
@@ -171,6 +181,8 @@ class WorkflowService:
         return {
             "layer_names": list(self.engine.layers.keys()),
             "selected_layer": selected_layer,
+            "method_options": self.list_cam_methods(),
+            "selected_method": self.engine.active_method_id,
             "feature_size": self.engine.layers[selected_layer],
             "render_request": {
                 "volumes": [self.engine.volume_data, self.engine.cam],

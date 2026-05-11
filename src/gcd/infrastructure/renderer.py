@@ -35,7 +35,9 @@ class Roi3DInteractionController:
                 if self.mode == "box":
                     world = self.renderer._pick_world(x, y)
                     if world is not None:
-                        voxel = self.renderer._clamp_voxel(self.renderer._world_to_voxel(world))
+                        voxel = self.renderer._clamp_voxel(
+                            self.renderer._world_to_voxel(world)
+                        )
                         box = self.renderer._box_by_id(picked[1])
                         if box is not None:
                             self.renderer.dragging_box_id = picked[1]
@@ -88,7 +90,10 @@ class Roi3DInteractionController:
         if world is None:
             return False
         voxel = self.renderer._clamp_voxel(self.renderer._world_to_voxel(world))
-        if self.renderer.dragging_handle is not None and self.renderer.dragging_box_id is not None:
+        if (
+            self.renderer.dragging_handle is not None
+            and self.renderer.dragging_box_id is not None
+        ):
             self.renderer._emit_annotation_event(
                 "resize_box_3d",
                 {
@@ -117,7 +122,11 @@ class Roi3DInteractionController:
             )
             obj.AbortFlagOn()
             return True
-        if self.mode == "box" and self.renderer.box_creation_active and self.renderer.box_creation_start is not None:
+        if (
+            self.mode == "box"
+            and self.renderer.box_creation_active
+            and self.renderer.box_creation_start is not None
+        ):
             self.renderer.preview_box = (self.renderer.box_creation_start, voxel)
             self.renderer._update_preview_box()
             obj.AbortFlagOn()
@@ -141,7 +150,11 @@ class Roi3DInteractionController:
             self.renderer.dragging_box_initial_bounds = None
             obj.AbortFlagOn()
             return True
-        if self.mode != "box" or not self.renderer.box_creation_active or self.renderer.box_creation_start is None:
+        if (
+            self.mode != "box"
+            or not self.renderer.box_creation_active
+            or self.renderer.box_creation_start is None
+        ):
             return False
         x, y = self.renderer.interactor.GetEventPosition()
         world = self.renderer._pick_world(x, y)
@@ -318,9 +331,7 @@ class VtkVolumeRenderer:
     ) -> None:
         with timer("渲染"):
             self.clear_volumes()
-            metadata_items = (
-                metadata if metadata is not None else [None] * len(volumes)
-            )
+            metadata_items = metadata if metadata is not None else [None] * len(volumes)
             for data, space, meta in zip(volumes, spacing, metadata_items):
                 if data is not None and space is not None:
                     self.add_volume_data(data, space, metadata=meta)
@@ -347,7 +358,9 @@ class VtkVolumeRenderer:
         if render:
             self.render()
 
-    def _apply_transfer_functions_to_property(self, prop, color_settings, opacity_settings) -> None:
+    def _apply_transfer_functions_to_property(
+        self, prop, color_settings, opacity_settings
+    ) -> None:
         pwf = vtk.vtkPiecewiseFunction()
         for value, opacity in opacity_settings:
             pwf.AddPoint(float(value), float(opacity))
@@ -388,7 +401,9 @@ class VtkVolumeRenderer:
         self.renderer.ResetCameraClippingRange()
         self.render()
 
-    def capture_camera_state(self) -> dict[str, tuple[float, float, float] | float] | None:
+    def capture_camera_state(
+        self,
+    ) -> dict[str, tuple[float, float, float] | float] | None:
         if not self.volumes:
             return None
         camera = self.renderer.GetActiveCamera()
@@ -433,7 +448,12 @@ class VtkVolumeRenderer:
             self.interactor.SetInteractorStyle(self.camera_interactor_style)
 
     def set_annotations(
-        self, points, boxes_3d, selected_annotation_id: str | None, active_roi_box_id: str | None, point_size: int
+        self,
+        points,
+        boxes_3d,
+        selected_annotation_id: str | None,
+        active_roi_box_id: str | None,
+        point_size: int,
     ) -> None:
         self.annotation_points = list(points)
         self.annotation_boxes = list(boxes_3d)
@@ -552,12 +572,19 @@ class VtkVolumeRenderer:
         actor.GetProperty().SetColor(0.95, 0.35, 0.2)
         return actor
 
-    def _build_box_actor(self, min_corner, max_corner, *, highlight: bool, selected: bool):
+    def _build_box_actor(
+        self, min_corner, max_corner, *, highlight: bool, selected: bool
+    ):
         source = vtk.vtkOutlineSource()
         world_min = self._voxel_to_world(min_corner)
         world_max = self._voxel_to_world(max_corner)
         source.SetBounds(
-            world_min[0], world_max[0], world_min[1], world_max[1], world_min[2], world_max[2]
+            world_min[0],
+            world_max[0],
+            world_min[1],
+            world_max[1],
+            world_min[2],
+            world_max[2],
         )
         mapper = vtk.vtkPolyDataMapper()
         mapper.SetInputConnection(source.GetOutputPort())
@@ -649,7 +676,8 @@ class VtkVolumeRenderer:
         if not any(self.volume_shape):
             return tuple(float(v) for v in voxel)
         return tuple(
-            max(0.0, min(float(voxel[i]), float(self.volume_shape[i] - 1))) for i in range(3)
+            max(0.0, min(float(voxel[i]), float(self.volume_shape[i] - 1)))
+            for i in range(3)
         )
 
     def _emit_annotation_event(self, event_type: str, payload: dict) -> None:
@@ -718,7 +746,10 @@ class VtkVolumeRenderer:
     def shutdown(self) -> None:
         self.stop_rotation()
         try:
-            if hasattr(self, "orientation_widget") and self.orientation_widget is not None:
+            if (
+                hasattr(self, "orientation_widget")
+                and self.orientation_widget is not None
+            ):
                 self.orientation_widget.SetEnabled(0)
                 self.orientation_widget.SetInteractor(None)
         except Exception:
