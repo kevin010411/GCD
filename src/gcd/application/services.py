@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -122,35 +123,120 @@ class WorkflowService:
         self.engine.set_config(config_path)
 
     def list_cam_methods(self) -> list[dict[str, str]]:
-        return self.engine.available_cam_methods()
+        return self.engine.available_cam_methods("grad")
+
+    def list_perturbation_methods(self) -> list[dict[str, str]]:
+        return self.engine.available_cam_methods("perturbation")
 
     def load_input(
         self, file_name: str, target_class: int, method: str | None = None
     ) -> dict[str, Any]:
         self.engine.set_target_class(target_class)
-        messages = self.engine.load_and_process_input(file_name, method=method)
-        compute_result = self.compute_cam(
-            layer=None,
-            n1=0,
-            n2=self.engine.default_feature_size(),
-            method=method,
-            cam_transfer_function=TransferFunction.heatmap_preset(),
-            volume_transfer_function=TransferFunction.base_preset(),
-        )
+        messages = self.engine.load_volume(file_name)
         return {
             "file_name": file_name,
-            "layer_names": compute_result["layer_names"],
-            "selected_layer": compute_result["selected_layer"],
-            "method_options": compute_result["method_options"],
-            "selected_method": compute_result["selected_method"],
-            "feature_size": compute_result["feature_size"],
-            "render_request": compute_result["render_request"],
-            "cam_data_range": compute_result["cam_data_range"],
-            "volume_data_range": compute_result["volume_data_range"],
-            "cam_transfer_function": compute_result["cam_transfer_function"],
-            "volume_transfer_function": compute_result["volume_transfer_function"],
+            "dataset_state": self.engine.export_state(),
+            "layer_names": list(self.engine.layers.keys()),
+            "selected_layer": self.engine.cfg["default_layer"],
+            "method_options": self.list_cam_methods(),
+            "selected_method": method or self.engine.active_method_id,
+            "feature_size": self.engine.default_feature_size(),
+            "volume_data": self.engine.volume_data,
+            "spacing": self.engine.img1_spacing,
+            "display_metadata": dict(self.engine.display_metadata),
+            "volume_data_range": DataRange.from_data([self.engine.volume_data], method="minmax"),
+            "volume_transfer_function": TransferFunction.base_preset(),
             "messages": messages,
         }
+
+    def compute_dataset_result(
+        self,
+        dataset_state: dict[str, Any],
+        *,
+        target_class: int,
+        layer: str | None,
+        n1: int,
+        n2: int,
+        method: str,
+        result_name: str,
+        method_params: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        self.engine.restore_state(dataset_state)
+        self.engine.set_target_class(target_class)
+        cfg_name = str(getattr(self.engine.cfg, "filename", "") or "")
+        desired_cache_key = f"{cfg_name}|{target_class}|{method}"
+        if self._needs_xai_prepare(
+            dataset_state,
+            desired_cache_key=desired_cache_key,
+            method=method,
+            layer=layer,
+        ):
+            self.engine.prepare_xai_inputs(method=method)
+        selected_layer = self.engine.compute_cam(
+            layer=layer,
+            n1=n1,
+            n2=n2,
+            method=method,
+            method_params=method_params,
+        )
+        cam_data_range = DataRange.from_data([self.engine.cam], method="minmax")
+        volume_data_range = DataRange.from_data([self.engine.volume_data], method="minmax")
+        default_transfer = (
+            TransferFunction.heatmap_preset()
+            if method.startswith("grad")
+            else TransferFunction.overlay_preset()
+        )
+        return {
+            "dataset_state": self.engine.export_state(),
+            "layer_names": list(self.engine.layers.keys()),
+            "selected_layer": selected_layer,
+            "method_options": self.engine.available_cam_methods(
+                "perturbation" if method.startswith("perturb") else "grad"
+            ),
+            "selected_method": self.engine.active_method_id,
+            "feature_size": self.engine.layers[selected_layer],
+            "volume_data_range": volume_data_range,
+            "renderable_item": {
+                "name": result_name,
+                "source": "xai",
+                "method_id": method,
+                "data": self.engine.cam,
+                "data_range": cam_data_range,
+                "transfer_function": default_transfer,
+                "spacing": self.engine.img1_spacing,
+                "metadata": {
+                    **self.engine.display_metadata,
+                },
+                "shape": tuple(int(v) for v in self.engine.cam.shape),
+            },
+        }
+
+    def _needs_xai_prepare(
+        self,
+        dataset_state: dict[str, Any],
+        *,
+        desired_cache_key: str,
+        method: str,
+        layer: str | None,
+    ) -> bool:
+        if str(dataset_state.get("xai_cache_key", "")) != desired_cache_key:
+            return True
+        patch = getattr(self.engine, "patch", None)
+        if not patch:
+            return True
+        if any(not isinstance(item, dict) or item.get("method") != method for item in patch):
+            return True
+        layers = getattr(self.engine, "layers", {}) or {}
+        default_layer = str(self.engine.cfg["default_layer"])
+        if (
+            len(layers) == 1
+            and default_layer in layers
+            and int(layers.get(default_layer, 0) or 0) <= 1
+        ):
+            return True
+        if layer and layer not in layers:
+            return True
+        return False
 
     def compute_cam(
         self,

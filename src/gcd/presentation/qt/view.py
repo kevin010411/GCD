@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 
-from PyQt6.QtGui import QAction
+from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtGui import QAction, QColor, QLinearGradient, QPainter
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -13,6 +14,8 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QToolButton,
     QVBoxLayout,
@@ -22,10 +25,125 @@ from PyQt6.QtWidgets import (
 from .plugins import (
     CameraControlsPluginPanel,
     GradCamPluginPanel,
+    PerturbationPluginPanel,
     RoiAnnotationPluginPanel,
     TransferVolumePluginPanel,
 )
 from .workspace import WorkspaceHost
+
+
+class _ScrollFade(QWidget):
+    def __init__(self, edge: str, parent=None) -> None:
+        super().__init__(parent)
+        self.edge = edge
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFixedWidth(26)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        gradient = QLinearGradient()
+        if self.edge == "left":
+            gradient = QLinearGradient(self.width(), 0, 0, 0)
+        else:
+            gradient = QLinearGradient(0, 0, self.width(), 0)
+        base = QColor("#151F2F")
+        transparent = QColor(base)
+        transparent.setAlpha(0)
+        gradient.setColorAt(0.0, base)
+        gradient.setColorAt(1.0, transparent)
+        painter.fillRect(self.rect(), gradient)
+
+
+class PluginTabStrip(QWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("pluginSwitchStrip")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.scroll = QScrollArea(self)
+        self.scroll.setObjectName("pluginSwitchScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.scroll.setFixedHeight(42)
+        self.scroll.viewport().installEventFilter(self)
+
+        self.content = QWidget()
+        self.content.setObjectName("pluginSwitchContent")
+        self.row = QFrame()
+        self.row.setObjectName("pluginSwitchRow")
+        self.row_layout = QHBoxLayout(self.row)
+        self.row_layout.setContentsMargins(0, 0, 0, 0)
+        self.row_layout.setSpacing(8)
+        self.row_layout.addStretch(1)
+
+        content_layout = QHBoxLayout(self.content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        content_layout.addWidget(self.row, 0, Qt.AlignmentFlag.AlignLeft)
+        content_layout.addStretch(1)
+        self.scroll.setWidget(self.content)
+
+        self.left_fade = _ScrollFade("left", self)
+        self.right_fade = _ScrollFade("right", self)
+
+        layout.addWidget(self.scroll, 1)
+        self.left_fade.raise_()
+        self.right_fade.raise_()
+
+        scrollbar = self.scroll.horizontalScrollBar()
+        scrollbar.valueChanged.connect(self._update_fades)
+        scrollbar.rangeChanged.connect(self._update_fades)
+        self._update_fades()
+
+    def add_button(self, button: QPushButton) -> None:
+        insert_index = max(0, self.row_layout.count() - 1)
+        self.row_layout.insertWidget(insert_index, button)
+        self._update_fades()
+
+    def center_button(self, button: QPushButton) -> None:
+        scrollbar = self.scroll.horizontalScrollBar()
+        content_pos = button.mapTo(self.content, button.rect().topLeft())
+        button_center = content_pos.x() + button.width() // 2
+        viewport_half = self.scroll.viewport().width() // 2
+        target = button_center - viewport_half
+        scrollbar.setValue(max(scrollbar.minimum(), min(target, scrollbar.maximum())))
+        self._update_fades()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        height = self.scroll.height()
+        self.left_fade.setGeometry(0, 0, self.left_fade.width(), height)
+        self.right_fade.setGeometry(
+            max(0, self.width() - self.right_fade.width()),
+            0,
+            self.right_fade.width(),
+            height,
+        )
+
+    def eventFilter(self, source, event) -> bool:
+        if source is self.scroll.viewport() and event.type() == QEvent.Type.Wheel:
+            delta = event.angleDelta().y()
+            if delta:
+                scrollbar = self.scroll.horizontalScrollBar()
+                step = max(40, self.width() // 5)
+                direction = -1 if delta > 0 else 1
+                scrollbar.setValue(scrollbar.value() + direction * step)
+                return True
+        return super().eventFilter(source, event)
+
+    def _update_fades(self, *_args) -> None:
+        scrollbar = self.scroll.horizontalScrollBar()
+        maximum = scrollbar.maximum()
+        value = scrollbar.value()
+        self.left_fade.setVisible(value > 0)
+        self.right_fade.setVisible(maximum > 0 and value < maximum)
 
 
 class MainWindowView(QMainWindow):
@@ -35,6 +153,7 @@ class MainWindowView(QMainWindow):
         self.plugin_titles = {
             "camera": "Camera Controls",
             "gradcam": "Grad-CAM Compute",
+            "perturbation": "Perturbation-based XAI",
             "roi": "ROI Annotation",
             "transfer": "Transfer + Volume",
         }
@@ -68,34 +187,50 @@ class MainWindowView(QMainWindow):
         self.inspector_kicker = QLabel("Plugin")
         self.inspector_kicker.setObjectName("inspectorKicker")
         header_layout.addWidget(self.inspector_kicker)
-        self.plugin_switch_row = QFrame()
-        self.plugin_switch_row.setObjectName("pluginSwitchRow")
-        switch_layout = QHBoxLayout(self.plugin_switch_row)
-        switch_layout.setContentsMargins(0, 0, 0, 0)
-        switch_layout.setSpacing(8)
+        self.plugin_switch_strip = PluginTabStrip(self)
         self.plugin_button_group = QButtonGroup(self)
         self.plugin_button_group.setExclusive(True)
         self.gradcam_plugin_button = QPushButton("Grad-CAM")
         self.gradcam_plugin_button.setObjectName("pluginTabButton")
         self.gradcam_plugin_button.setCheckable(True)
+        self.gradcam_plugin_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
         self.camera_plugin_button = QPushButton("Camera")
         self.camera_plugin_button.setObjectName("pluginTabButton")
         self.camera_plugin_button.setCheckable(True)
+        self.camera_plugin_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.perturbation_plugin_button = QPushButton("Perturb")
+        self.perturbation_plugin_button.setObjectName("pluginTabButton")
+        self.perturbation_plugin_button.setCheckable(True)
+        self.perturbation_plugin_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
         self.transfer_plugin_button = QPushButton("Transfer")
         self.transfer_plugin_button.setObjectName("pluginTabButton")
         self.transfer_plugin_button.setCheckable(True)
+        self.transfer_plugin_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
         self.roi_plugin_button = QPushButton("ROI")
         self.roi_plugin_button.setObjectName("pluginTabButton")
         self.roi_plugin_button.setCheckable(True)
+        self.roi_plugin_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
         self.plugin_button_group.addButton(self.gradcam_plugin_button)
         self.plugin_button_group.addButton(self.camera_plugin_button)
+        self.plugin_button_group.addButton(self.perturbation_plugin_button)
         self.plugin_button_group.addButton(self.roi_plugin_button)
         self.plugin_button_group.addButton(self.transfer_plugin_button)
-        switch_layout.addWidget(self.gradcam_plugin_button, 1)
-        switch_layout.addWidget(self.camera_plugin_button, 1)
-        switch_layout.addWidget(self.roi_plugin_button, 1)
-        switch_layout.addWidget(self.transfer_plugin_button, 1)
-        header_layout.addWidget(self.plugin_switch_row)
+        self.plugin_switch_strip.add_button(self.gradcam_plugin_button)
+        self.plugin_switch_strip.add_button(self.camera_plugin_button)
+        self.plugin_switch_strip.add_button(self.perturbation_plugin_button)
+        self.plugin_switch_strip.add_button(self.roi_plugin_button)
+        self.plugin_switch_strip.add_button(self.transfer_plugin_button)
+        header_layout.addWidget(self.plugin_switch_strip)
         inspector_layout.addWidget(self.inspector_header)
         self.plugin_stack = QStackedWidget()
         self.plugin_stack.setObjectName("pluginStack")
@@ -106,6 +241,7 @@ class MainWindowView(QMainWindow):
 
         self._build_gradcam_plugin()
         self._build_camera_plugin()
+        self._build_perturbation_plugin()
         self._build_roi_plugin()
         self._build_transfer_plugin()
         self.set_active_plugin("gradcam")
@@ -175,15 +311,30 @@ class MainWindowView(QMainWindow):
     def _build_gradcam_plugin(self) -> None:
         self.gradcam_plugin_panel = GradCamPluginPanel(self)
         self.class_spinbox = self.gradcam_plugin_panel.class_spinbox
+        self.gradcam_dataset_combo = self.gradcam_plugin_panel.dataset_combo
         self.layer_combo = self.gradcam_plugin_panel.layer_combo
         self.method_combo = self.gradcam_plugin_panel.method_combo
         self.feature_widget = self.gradcam_plugin_panel.feature_widget
+        self.gradcam_run_button = self.gradcam_plugin_panel.run_button
         self._add_plugin_tab("gradcam", self.gradcam_plugin_panel)
+
+    def _build_perturbation_plugin(self) -> None:
+        self.perturbation_plugin_panel = PerturbationPluginPanel(self)
+        self.perturbation_dataset_combo = self.perturbation_plugin_panel.dataset_combo
+        self.perturbation_class_spinbox = self.perturbation_plugin_panel.class_spinbox
+        self.perturbation_method_combo = self.perturbation_plugin_panel.method_combo
+        self.perturbation_block_size_spinbox = (
+            self.perturbation_plugin_panel.block_size_spinbox
+        )
+        self.perturbation_stride_spinbox = self.perturbation_plugin_panel.stride_spinbox
+        self.perturbation_run_button = self.perturbation_plugin_panel.run_button
+        self._add_plugin_tab("perturbation", self.perturbation_plugin_panel)
 
     def _build_transfer_plugin(self) -> None:
         self.transfer_plugin_panel = TransferVolumePluginPanel(self)
         self.volume_list = self.transfer_plugin_panel.volume_list
         self.reorder_hint_label = self.transfer_plugin_panel.reorder_hint
+        self.overlay_status_label = self.transfer_plugin_panel.overlay_status
         self.transfer_editor = self.transfer_plugin_panel.transfer_editor
         self._add_plugin_tab("transfer", self.transfer_plugin_panel)
 
@@ -220,11 +371,20 @@ class MainWindowView(QMainWindow):
         self.plugin_stack.setCurrentIndex(index)
         self.gradcam_plugin_button.setChecked(plugin_id == "gradcam")
         self.camera_plugin_button.setChecked(plugin_id == "camera")
+        self.perturbation_plugin_button.setChecked(plugin_id == "perturbation")
         self.roi_plugin_button.setChecked(plugin_id == "roi")
         self.transfer_plugin_button.setChecked(plugin_id == "transfer")
+        active_button = {
+            "gradcam": self.gradcam_plugin_button,
+            "camera": self.camera_plugin_button,
+            "perturbation": self.perturbation_plugin_button,
+            "roi": self.roi_plugin_button,
+            "transfer": self.transfer_plugin_button,
+        }[plugin_id]
+        self.plugin_switch_strip.center_button(active_button)
         if plugin_id == "roi":
             self.workspace.set_workspace_mode("roi")
-        elif plugin_id in {"gradcam", "camera"}:
+        elif plugin_id in {"gradcam", "camera", "perturbation"}:
             self.workspace.set_workspace_mode("standard")
         reorder_enabled = plugin_id == "transfer" and self.workspace.mode.value == "roi"
         self.volume_list.set_reorder_enabled(reorder_enabled)
@@ -267,6 +427,45 @@ class MainWindowView(QMainWindow):
                 self.method_combo.setCurrentIndex(index)
         self.method_combo.blockSignals(False)
 
+    def set_gradcam_dataset_options(
+        self, options: list[dict[str, str]], selected: str | None
+    ) -> None:
+        self.gradcam_dataset_combo.blockSignals(True)
+        self.gradcam_dataset_combo.clear()
+        for option in options:
+            self.gradcam_dataset_combo.addItem(option["name"], option["id"])
+        if selected:
+            index = self.gradcam_dataset_combo.findData(selected)
+            if index >= 0:
+                self.gradcam_dataset_combo.setCurrentIndex(index)
+        self.gradcam_dataset_combo.blockSignals(False)
+
+    def set_perturbation_dataset_options(
+        self, options: list[dict[str, str]], selected: str | None
+    ) -> None:
+        self.perturbation_dataset_combo.blockSignals(True)
+        self.perturbation_dataset_combo.clear()
+        for option in options:
+            self.perturbation_dataset_combo.addItem(option["name"], option["id"])
+        if selected:
+            index = self.perturbation_dataset_combo.findData(selected)
+            if index >= 0:
+                self.perturbation_dataset_combo.setCurrentIndex(index)
+        self.perturbation_dataset_combo.blockSignals(False)
+
+    def set_perturbation_method_options(
+        self, options: list[dict[str, str]], selected: str | None
+    ) -> None:
+        self.perturbation_method_combo.blockSignals(True)
+        self.perturbation_method_combo.clear()
+        for option in options:
+            self.perturbation_method_combo.addItem(option["name"], option["id"])
+        if selected:
+            index = self.perturbation_method_combo.findData(selected)
+            if index >= 0:
+                self.perturbation_method_combo.setCurrentIndex(index)
+        self.perturbation_method_combo.blockSignals(False)
+
     def set_feature_size(self, size: int) -> None:
         self.feature_widget.set_size(size)
 
@@ -282,6 +481,9 @@ class MainWindowView(QMainWindow):
         self.start_button.setEnabled(not is_running)
         self.stop_button.setEnabled(is_running)
 
+    def set_overlay_status_message(self, message: str) -> None:
+        self.overlay_status_label.setText(message)
+
     def selected_model_path(self) -> str | None:
         return self.model_combo.currentData()
 
@@ -294,6 +496,18 @@ class MainWindowView(QMainWindow):
     def selected_method(self) -> str:
         current = self.method_combo.currentData()
         return str(current or "gradcam")
+
+    def selected_gradcam_dataset(self) -> str:
+        current = self.gradcam_dataset_combo.currentData()
+        return str(current or "")
+
+    def selected_perturbation_dataset(self) -> str:
+        current = self.perturbation_dataset_combo.currentData()
+        return str(current or "")
+
+    def selected_perturbation_method(self) -> str:
+        current = self.perturbation_method_combo.currentData()
+        return str(current or "perturb_occlusion")
 
     def feature_range(self) -> tuple[int, int]:
         return self.feature_widget.get_range()

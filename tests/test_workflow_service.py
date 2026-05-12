@@ -11,19 +11,36 @@ class _FakeEngine:
         self.cam = np.array([0.0, 2.0, 4.0], dtype=np.float32)
         self.volume_data = np.array([-10.0, 10.0, 30.0], dtype=np.float32)
         self.img1_spacing = (1.0, 1.0, 1.0)
-        self.display_metadata = {"vtk_origin": (0.0, 0.0, 0.0)}
+        self.display_metadata = {
+            "vtk_origin": (0.0, 0.0, 0.0),
+            "affine": np.eye(4, dtype=np.float32),
+        }
         self.layers = {"layer-a": 8}
+        self.cfg = {"default_layer": "layer-a"}
         self.active_method_id = "gradcam"
         self.compute_cam_calls = []
-        self.load_input_calls = []
+        self.load_volume_calls = []
+        self.prepare_calls = []
+        self.target_class = 0
+        self.patch = []
+        self.xai_cache_key = ""
+        self.prepared_layers = {"layer-a": 8, "layer-b": 4}
 
-    def available_cam_methods(self):
+    def available_cam_methods(self, category=None):
+        if category == "perturbation":
+            return [{"id": "perturb_occlusion", "name": "Occlusion"}]
         return [{"id": "gradcam", "name": "Grad-CAM"}]
 
-    def load_and_process_input(self, file_name, method=None):
-        self.load_input_calls.append((file_name, method))
-        self.active_method_id = method or "gradcam"
+    def load_volume(self, file_name):
+        self.load_volume_calls.append(file_name)
         return ["ok"]
+
+    def prepare_xai_inputs(self, method=None):
+        self.prepare_calls.append(method)
+        self.active_method_id = method or "gradcam"
+        self.patch = [{"method": self.active_method_id, "pred": np.zeros((1, 1, 1), dtype=np.float32)}]
+        self.layers = dict(self.prepared_layers)
+        self.xai_cache_key = f"cfg.py|{self.target_class}|{self.active_method_id}"
 
     def set_target_class(self, target_class):
         self.target_class = target_class
@@ -31,8 +48,28 @@ class _FakeEngine:
     def default_feature_size(self):
         return 8
 
-    def compute_cam(self, *, layer, n1, n2, method=None):
-        self.compute_cam_calls.append((layer, n1, n2, method))
+    def export_state(self):
+        return {
+            "file_name": "sample.nii.gz",
+            "target_class": self.target_class,
+            "active_method_id": self.active_method_id,
+            "xai_cache_key": self.xai_cache_key,
+            "layers": dict(self.layers),
+        }
+
+    def restore_state(self, state):
+        self.target_class = state["target_class"]
+        self.active_method_id = state["active_method_id"]
+        self.xai_cache_key = state.get("xai_cache_key", "")
+        self.layers = dict(state.get("layers", self.layers))
+        self.patch = (
+            []
+            if not self.xai_cache_key
+            else [{"method": self.active_method_id, "pred": np.zeros((1, 1, 1), dtype=np.float32)}]
+        )
+
+    def compute_cam(self, *, layer, n1, n2, method=None, method_params=None):
+        self.compute_cam_calls.append((layer, n1, n2, method, method_params))
         self.active_method_id = method or "gradcam"
         return "layer-a"
 
@@ -60,17 +97,94 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertEqual(
             result["method_options"], [{"id": "gradcam", "name": "Grad-CAM"}]
         )
-        self.assertEqual(service.engine.compute_cam_calls, [(None, 0, 8, None)])
+        self.assertEqual(service.engine.compute_cam_calls, [(None, 0, 8, None, None)])
 
-    def test_load_input_passes_method_through_engine_and_result(self) -> None:
+    def test_load_input_passes_method_through_engine_without_auto_compute(self) -> None:
         service = WorkflowService(_FakeEngine())
 
         result = service.load_input("sample.nii.gz", 3, method="gradcam")
 
-        self.assertEqual(service.engine.load_input_calls, [("sample.nii.gz", "gradcam")])
-        self.assertEqual(service.engine.compute_cam_calls, [(None, 0, 8, "gradcam")])
+        self.assertEqual(service.engine.load_volume_calls, ["sample.nii.gz"])
+        self.assertEqual(service.engine.compute_cam_calls, [])
+        self.assertEqual(service.engine.prepare_calls, [])
         self.assertEqual(result["selected_method"], "gradcam")
         self.assertEqual(result["messages"], ["ok"])
+        self.assertIs(result["volume_data"], service.engine.volume_data)
+        self.assertEqual(result["spacing"], (1.0, 1.0, 1.0))
+        self.assertEqual(result["display_metadata"]["vtk_origin"], (0.0, 0.0, 0.0))
+        np.testing.assert_allclose(
+            result["display_metadata"]["affine"], np.eye(4, dtype=np.float32)
+        )
+
+    def test_compute_dataset_result_returns_renderable_item_metadata(self) -> None:
+        service = WorkflowService(_FakeEngine())
+
+        result = service.compute_dataset_result(
+            {
+                "file_name": "sample.nii.gz",
+                "target_class": 1,
+                "active_method_id": "gradcam",
+                "xai_cache_key": "",
+            },
+            target_class=1,
+            layer="layer-a",
+            n1=0,
+            n2=8,
+            method="perturb_occlusion",
+            result_name="sample_model_perturb方法",
+            method_params={"block_size": 16},
+        )
+
+        self.assertEqual(
+            service.engine.compute_cam_calls,
+            [("layer-a", 0, 8, "perturb_occlusion", {"block_size": 16})],
+        )
+        self.assertEqual(service.engine.prepare_calls, ["perturb_occlusion"])
+        self.assertEqual(result["renderable_item"]["name"], "sample_model_perturb方法")
+        self.assertEqual(result["renderable_item"]["source"], "xai")
+        self.assertEqual(result["selected_method"], "perturb_occlusion")
+
+    def test_compute_dataset_result_prepares_when_only_placeholder_layers_exist(self) -> None:
+        service = WorkflowService(_FakeEngine())
+
+        service.compute_dataset_result(
+            {
+                "file_name": "sample.nii.gz",
+                "target_class": 1,
+                "active_method_id": "gradcam",
+                "xai_cache_key": "cfg.py|1|gradcam",
+                "layers": {"layer-a": 1},
+            },
+            target_class=1,
+            layer="layer-a",
+            n1=0,
+            n2=8,
+            method="gradcam",
+            result_name="sample_model_grad方法",
+        )
+
+        self.assertEqual(service.engine.prepare_calls, ["gradcam"])
+
+    def test_compute_dataset_result_prepares_when_requested_layer_is_missing(self) -> None:
+        service = WorkflowService(_FakeEngine())
+
+        service.compute_dataset_result(
+            {
+                "file_name": "sample.nii.gz",
+                "target_class": 1,
+                "active_method_id": "gradcam",
+                "xai_cache_key": "cfg.py|1|gradcam",
+                "layers": {"layer-a": 8},
+            },
+            target_class=1,
+            layer="layer-z",
+            n1=0,
+            n2=8,
+            method="gradcam",
+            result_name="sample_model_grad方法",
+        )
+
+        self.assertEqual(service.engine.prepare_calls, ["gradcam"])
 
 
 if __name__ == "__main__":

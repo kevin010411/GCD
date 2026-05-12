@@ -92,7 +92,18 @@ STYLESHEET = """
         text-transform: uppercase;
     }
 
+    QWidget#pluginSwitchStrip,
+    QWidget#pluginSwitchContent,
     QFrame#pluginSwitchRow {
+        background: transparent;
+    }
+
+    QScrollArea#pluginSwitchScroll {
+        background: transparent;
+        border: none;
+    }
+
+    QScrollArea#pluginSwitchScroll > QWidget > QWidget {
         background: transparent;
     }
 
@@ -136,27 +147,27 @@ STYLESHEET = """
     }
 
     QPushButton#pluginTabButton {
-        min-width: 0px;
+        min-width: 92px;
         min-height: 32px;
-        padding: 4px 10px;
-        border-radius: 10px;
-        background: #182435;
-        border: 1px solid #29415E;
-        color: #AFC0D6;
+        padding: 5px 14px;
+        border-radius: 16px;
+        background: rgba(18, 28, 42, 0.82);
+        border: 1px solid #243A56;
+        color: #95A8C0;
         font-size: 11px;
         font-weight: 700;
     }
 
     QPushButton#pluginTabButton:hover {
-        background: #22344C;
-        border: 1px solid #42668F;
+        background: rgba(29, 46, 68, 0.95);
+        border: 1px solid #3E648E;
         color: #E8F1FF;
     }
 
     QPushButton#pluginTabButton:checked {
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-            stop:0 #274562, stop:1 #32608B);
-        border: 1px solid #6D9DCE;
+            stop:0 #274765, stop:1 #356793);
+        border: 1px solid #77A5D3;
         color: #F5F9FF;
     }
 

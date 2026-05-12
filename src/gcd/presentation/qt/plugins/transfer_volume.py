@@ -11,10 +11,12 @@ class VolumeListWidget(QListWidget):
     selection_changed = pyqtSignal(str)
     visibility_changed = pyqtSignal(str, bool)
     order_changed = pyqtSignal(list)
+    name_changed = pyqtSignal(str, str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._syncing = False
+        self._check_states: dict[str, Qt.CheckState] = {}
         self.setObjectName("volumeList")
         self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.setAlternatingRowColors(True)
@@ -32,6 +34,7 @@ class VolumeListWidget(QListWidget):
     def set_volumes(self, items: list[dict[str, object]], selected_id: str | None) -> None:
         self._syncing = True
         self.clear()
+        self._check_states = {}
         selected_item: QListWidgetItem | None = None
         for item_data in items:
             item = QListWidgetItem(str(item_data["display_name"]))
@@ -41,12 +44,15 @@ class VolumeListWidget(QListWidget):
                 | Qt.ItemFlag.ItemIsSelectable
                 | Qt.ItemFlag.ItemIsUserCheckable
                 | Qt.ItemFlag.ItemIsDragEnabled
+                | Qt.ItemFlag.ItemIsEditable
             )
-            item.setCheckState(
+            check_state = (
                 Qt.CheckState.Checked
                 if bool(item_data.get("visible", True))
                 else Qt.CheckState.Unchecked
             )
+            item.setCheckState(check_state)
+            self._check_states[str(item_data["id"])] = check_state
             self.addItem(item)
             if item.data(Qt.ItemDataRole.UserRole) == selected_id:
                 selected_item = item
@@ -78,10 +84,17 @@ class VolumeListWidget(QListWidget):
     def _emit_visibility_changed(self, item: QListWidgetItem) -> None:
         if self._syncing:
             return
-        self.visibility_changed.emit(
-            str(item.data(Qt.ItemDataRole.UserRole)),
-            item.checkState() == Qt.CheckState.Checked,
-        )
+        volume_id = str(item.data(Qt.ItemDataRole.UserRole))
+        previous_state = self._check_states.get(volume_id)
+        current_state = item.checkState()
+        if previous_state != current_state:
+            self._check_states[volume_id] = current_state
+            self.visibility_changed.emit(
+                volume_id,
+                current_state == Qt.CheckState.Checked,
+            )
+            return
+        self.name_changed.emit(volume_id, item.text())
 
     def dropEvent(self, event) -> None:
         super().dropEvent(event)
@@ -106,6 +119,10 @@ class TransferVolumePluginPanel(PluginPanel):
 
         self.reorder_hint = QLabel("Reorder is enabled only in ROI mode.")
         self.content_layout.addWidget(self.reorder_hint)
+
+        self.overlay_status = QLabel("")
+        self.overlay_status.setWordWrap(True)
+        self.content_layout.addWidget(self.overlay_status)
 
         self.transfer_editor = TransferFunctionEditor(self)
         self.transfer_editor.setMinimumHeight(320)

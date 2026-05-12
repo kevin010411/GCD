@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 from collections.abc import Callable
 
 import monai.transforms as mt
@@ -11,7 +12,12 @@ from mmengine import Config
 
 from src import model as _model_registry  # noqa: F401
 from src.utils import build_model, timer
-from .cam_methods import CamMethod, GradCamMethod
+from .cam_methods import (
+    CamMethod,
+    GradCAMTestMethod,
+    GradCamMethod,
+    PerturbationOcclusionMethod,
+)
 
 
 class ModelLoadStateDictError(RuntimeError):
@@ -47,8 +53,11 @@ class GradCamEngine:
         self.file_name = ""
         self.patch: list[dict[str, object]] = []
         self.target_class = 1
+        self.xai_cache_key = ""
         self.cam_methods: dict[str, CamMethod] = {
-            GradCamMethod.id: GradCamMethod(self._gradcam_objective)
+            GradCamMethod.id: GradCamMethod(self._gradcam_objective),
+            GradCAMTestMethod.id: GradCAMTestMethod(),
+            PerturbationOcclusionMethod.id: PerturbationOcclusionMethod(),
         }
         self.active_method_id = GradCamMethod.id
 
@@ -87,14 +96,54 @@ class GradCamEngine:
     def set_target_class(self, target_class: int) -> None:
         self.target_class = int(target_class)
 
-    def available_cam_methods(self) -> list[dict[str, str]]:
-        return [
-            {"id": method.id, "name": method.display_name}
-            for method in self.cam_methods.values()
-        ]
+    def available_cam_methods(self, category: str | None = None) -> list[dict[str, str]]:
+        methods = self.cam_methods.values()
+        if category is not None:
+            methods = [method for method in methods if getattr(method, "category", "") == category]
+        return [{"id": method.id, "name": method.display_name} for method in methods]
 
     def default_feature_size(self) -> int:
         return list(self.layers.values())[0]
+
+    def export_state(self) -> dict[str, object]:
+        return {
+            "cam": self.cam.detach().clone() if isinstance(self.cam, torch.Tensor) else deepcopy(self.cam),
+            "volume_data": self.volume_data.detach().clone()
+            if isinstance(self.volume_data, torch.Tensor)
+            else deepcopy(self.volume_data),
+            "img0": deepcopy(self.img0),
+            "img1": deepcopy(self.img1),
+            "origin_img": deepcopy(self.origin_img),
+            "origin_meta": deepcopy(self.origin_meta),
+            "origin_shape": deepcopy(self.origin_shape),
+            "img1_spacing": deepcopy(self.img1_spacing),
+            "display_metadata": deepcopy(self.display_metadata),
+            "layers": deepcopy(self.layers),
+            "file_name": self.file_name,
+            "patch": deepcopy(self.patch),
+            "target_class": self.target_class,
+            "active_method_id": self.active_method_id,
+            "model_output": deepcopy(getattr(self, "model_output", None)),
+            "xai_cache_key": self.xai_cache_key,
+        }
+
+    def restore_state(self, state: dict[str, object]) -> None:
+        self.cam = deepcopy(state["cam"])
+        self.volume_data = deepcopy(state["volume_data"])
+        self.img0 = deepcopy(state["img0"])
+        self.img1 = deepcopy(state["img1"])
+        self.origin_img = deepcopy(state["origin_img"])
+        self.origin_meta = deepcopy(state["origin_meta"])
+        self.origin_shape = deepcopy(state["origin_shape"])
+        self.img1_spacing = deepcopy(state["img1_spacing"])
+        self.display_metadata = deepcopy(state["display_metadata"])
+        self.layers = deepcopy(state["layers"])
+        self.file_name = str(state["file_name"])
+        self.patch = deepcopy(state["patch"])
+        self.target_class = int(state["target_class"])
+        self.active_method_id = str(state["active_method_id"])
+        self.model_output = deepcopy(state.get("model_output"))
+        self.xai_cache_key = str(state.get("xai_cache_key", ""))
 
     def _resolve_cam_method(self, method: str | None) -> CamMethod:
         requested = (method or self.active_method_id or GradCamMethod.id).strip().lower()
@@ -102,6 +151,7 @@ class GradCamEngine:
             return self.cam_methods[requested]
         self._log(f"未知 CAM method '{method}'，改用預設方法: {GradCamMethod.id}")
         return self.cam_methods[GradCamMethod.id]
+
 
     @staticmethod
     def _gradcam_objective(logits: torch.Tensor, target_class: int) -> torch.Tensor:
@@ -113,18 +163,13 @@ class GradCamEngine:
         loss = (logits[0, target_class] * (index == target_class)).sum()
         return loss
 
-    def load_and_process_input(
-        self, input_file: str | None = None, method: str | None = None
-    ) -> list[str]:
+    def load_volume(self, input_file: str | None = None) -> list[str]:
         messages: list[str] = []
         if input_file is not None:
             self.file_name = input_file
         if not self.file_name:
             raise ValueError("尚未指定輸入檔案，無法載入與處理資料。")
-        cam_method = self._resolve_cam_method(method)
-        self.active_method_id = cam_method.id
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.origin_img, self.origin_meta = mt.LoadImage(image_only=False)(
             self.file_name
         )
@@ -179,7 +224,25 @@ class GradCamEngine:
                 self.SPACING[self.PERMUTE[2]],
             )
             self.display_metadata = self._build_display_metadata(img1_affine)
+            self.volume_data = self.img1[0].permute(*self.PERMUTE).to(torch.float32)
+            self.cam = torch.zeros_like(self.volume_data)
+            self.model_output = None
+            self.patch = []
+            self.layers = {self.cfg["default_layer"]: 1}
+            self.xai_cache_key = ""
 
+        for message in messages:
+            self._log(message)
+        return messages
+
+    def prepare_xai_inputs(self, method: str | None = None) -> None:
+        if not self.file_name or self.img1 is None:
+            raise ValueError("尚未載入檔案，無法準備 XAI 輸入。")
+        cam_method = self._resolve_cam_method(method)
+        self.active_method_id = cam_method.id
+        self.patch = []
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         with timer("載入模型"):
             model = build_model(self.cfg.model).to(device)
             ckpt_path = self.cfg.ckpt
@@ -265,13 +328,19 @@ class GradCamEngine:
                 )
 
             self.layers = {key: value.size(1) for key, value in model.layers.items()}
+            self.model_output = logits.detach().to("cpu")
 
             del model, img2, pth, sd
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+        cfg_name = str(getattr(self.cfg, "filename", "") or "")
+        self.xai_cache_key = f"{cfg_name}|{self.target_class}|{cam_method.id}"
 
-        for message in messages:
-            self._log(message)
+    def load_and_process_input(
+        self, input_file: str | None = None, method: str | None = None
+    ) -> list[str]:
+        messages = self.load_volume(input_file)
+        self.prepare_xai_inputs(method)
         return messages
 
     def compute_cam(
@@ -280,6 +349,7 @@ class GradCamEngine:
         n1: int = 0,
         n2: int = 999,
         method: str | None = None,
+        method_params: dict[str, object] | None = None,
     ) -> str:
         if not self.file_name:
             raise ValueError("尚未載入檔案，無法計算 CAM。")
@@ -288,17 +358,34 @@ class GradCamEngine:
             raise ValueError(
                 "目前的 CAM patch 資料與指定 method 不一致，請重新載入輸入資料後再計算。"
             )
+        if not self.patch:
+            raise RuntimeError("尚未準備 XAI patch 資料，請先執行 prepare_xai_inputs。")
+        if any(
+            not isinstance(item, dict) or item.get("method") != cam_method.id
+            for item in self.patch
+        ):
+            raise ValueError("目前的 CAM patch payload 與指定 method 不一致。")
         self.active_method_id = cam_method.id
 
+        available_layers = list(self.layers.keys())
         selected_layer = layer or self.cfg["default_layer"]
         if selected_layer not in self.layers:
-            selected_layer = self.cfg["default_layer"]
-            self._log(f"指定 layer 不存在，改用預設 layer: {selected_layer}")
+            fallback_layer = (
+                self.cfg["default_layer"]
+                if self.cfg["default_layer"] in self.layers
+                else (available_layers[0] if available_layers else "")
+            )
+            if not fallback_layer:
+                raise RuntimeError("目前沒有可用的 CAM layer。")
+            selected_layer = fallback_layer
+            self._log(f"指定 layer 不存在，改用可用 layer: {selected_layer}")
 
         with timer(f"layer={selected_layer} 計算 GradCAM"):
             n2 = min(n2, self.layers[selected_layer])
             shape = list(self.img1[0].shape)
             cam = torch.zeros(shape, dtype=torch.float32)
+            if not isinstance(self.patch[0].get("pred"), torch.Tensor):
+                raise TypeError("CAM patch payload 缺少 pred tensor。")
             pred_shape = list(self.patch[0]["pred"].shape)[:2] + shape
             model_out = torch.zeros(pred_shape, dtype=torch.float32)
 
@@ -325,6 +412,7 @@ class GradCamEngine:
                     n1,
                     n2,
                     (self.SIZE, self.SIZE, self.SIZE),
+                    method_params=method_params,
                 )
 
                 p1 = self.patch[index]["pred"]

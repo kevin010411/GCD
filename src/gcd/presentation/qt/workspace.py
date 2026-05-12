@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 from PyQt6.QtCore import QMimeData, QPoint, QPointF, QRectF, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QDrag, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
@@ -96,11 +98,10 @@ def _normalize_slice(slice_array: np.ndarray) -> np.ndarray:
 
 def _blend_slice_image(
     volume_slice: np.ndarray | None,
-    cam_slice: np.ndarray | None,
+    xai_slices: list[tuple[np.ndarray, np.ndarray]],
     slice_state: SliceViewState,
-    color_map: np.ndarray,
 ) -> np.ndarray:
-    if volume_slice is None and cam_slice is None:
+    if volume_slice is None and not xai_slices:
         return np.zeros((32, 32, 3), dtype=np.uint8)
 
     base = None
@@ -108,20 +109,21 @@ def _blend_slice_image(
         gray = _normalize_slice(volume_slice)
         base = np.stack([gray, gray, gray], axis=-1)
 
-    if slice_state.overlay_modes.get("cam", True) and cam_slice is not None:
-        cam_normalized = _normalize_slice(cam_slice)
-        cam_rgb = color_map[cam_normalized]
-        if base is None:
-            base = cam_rgb
-        else:
-            alpha = (cam_normalized.astype(np.float32) / 255.0)[..., None] * 0.7
-            base = np.clip(base * (1.0 - alpha) + cam_rgb * alpha, 0, 255).astype(
-                np.uint8
-            )
+    if slice_state.overlay_modes.get("cam", True):
+        for xai_slice, color_map in xai_slices:
+            cam_normalized = _normalize_slice(xai_slice)
+            cam_rgb = color_map[cam_normalized]
+            if base is None:
+                base = cam_rgb
+            else:
+                alpha = (cam_normalized.astype(np.float32) / 255.0)[..., None] * 0.7
+                base = np.clip(base * (1.0 - alpha) + cam_rgb * alpha, 0, 255).astype(
+                    np.uint8
+                )
 
     if base is None:
         fallback = _normalize_slice(
-            volume_slice if volume_slice is not None else cam_slice
+            volume_slice if volume_slice is not None else xai_slices[0][0]
         )
         base = np.stack([fallback, fallback, fallback], axis=-1)
     if slice_state.orientation == SliceOrientation.AXIAL:
@@ -129,6 +131,130 @@ def _blend_slice_image(
     if slice_state.orientation == SliceOrientation.CORONAL:
         return np.ascontiguousarray(np.flipud(np.fliplr(np.transpose(base, (1, 0, 2)))))
     return np.ascontiguousarray(np.flipud(np.fliplr(base)))
+
+
+def _metadata_affine(item: dict[str, object], *, source: bool = False) -> np.ndarray | None:
+    key = "source_affine" if source else "metadata"
+    if source:
+        affine = item.get(key)
+    else:
+        metadata = item.get(key)
+        affine = metadata.get("affine") if isinstance(metadata, dict) else None
+    if affine is None:
+        return None
+    return np.array(affine, dtype=np.float32, copy=True)
+
+
+def _slice_output_shape(
+    volume_shape: tuple[int, int, int], orientation: SliceOrientation
+) -> tuple[int, int]:
+    if orientation == SliceOrientation.AXIAL:
+        return (volume_shape[0], volume_shape[2])
+    if orientation == SliceOrientation.CORONAL:
+        return (volume_shape[0], volume_shape[1])
+    return (volume_shape[1], volume_shape[2])
+
+
+def _world_grid_for_slice(
+    base_shape: tuple[int, int, int],
+    base_affine: np.ndarray,
+    orientation: SliceOrientation,
+    index: int,
+) -> np.ndarray:
+    height, width = _slice_output_shape(base_shape, orientation)
+    row_coords, col_coords = np.meshgrid(
+        np.arange(height, dtype=np.float32),
+        np.arange(width, dtype=np.float32),
+        indexing="ij",
+    )
+    if orientation == SliceOrientation.AXIAL:
+        voxel_coords = np.stack(
+            [row_coords, np.full_like(row_coords, float(index)), col_coords], axis=-1
+        )
+    elif orientation == SliceOrientation.CORONAL:
+        voxel_coords = np.stack(
+            [row_coords, col_coords, np.full_like(row_coords, float(index))], axis=-1
+        )
+    else:
+        voxel_coords = np.stack(
+            [np.full_like(row_coords, float(index)), row_coords, col_coords], axis=-1
+        )
+    homogeneous = np.concatenate(
+        [voxel_coords, np.ones((*voxel_coords.shape[:2], 1), dtype=np.float32)], axis=-1
+    )
+    return homogeneous @ base_affine.T
+
+
+def _sample_slice_with_affine(
+    volume: np.ndarray,
+    world_grid: np.ndarray,
+    inverse_affine: np.ndarray,
+) -> np.ndarray:
+    homogeneous = world_grid.reshape(-1, 4)
+    sample_voxels = homogeneous @ inverse_affine.T
+    sample_voxels = sample_voxels[:, :3].reshape(*world_grid.shape[:2], 3)
+
+    depth, height, width = volume.shape
+    x = sample_voxels[..., 2]
+    y = sample_voxels[..., 1]
+    z = sample_voxels[..., 0]
+
+    def _norm(values: np.ndarray, size: int) -> np.ndarray:
+        if size <= 1:
+            return np.zeros_like(values, dtype=np.float32)
+        return ((values / float(size - 1)) * 2.0 - 1.0).astype(np.float32)
+
+    grid = np.stack([_norm(x, width), _norm(y, height), _norm(z, depth)], axis=-1)
+    grid_tensor = torch.from_numpy(grid).unsqueeze(0).unsqueeze(1)
+    volume_tensor = torch.from_numpy(volume.astype(np.float32, copy=False)).unsqueeze(0).unsqueeze(0)
+    sampled = F.grid_sample(
+        volume_tensor,
+        grid_tensor,
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True,
+    )
+    return sampled[0, 0, 0].detach().cpu().numpy()
+
+
+def _resample_item_slice_to_base(
+    base_item: dict[str, object],
+    overlay_item: dict[str, object],
+    orientation: SliceOrientation,
+    index: int,
+) -> tuple[np.ndarray | None, str | None]:
+    overlay_data = overlay_item.get("data")
+    base_data = base_item.get("data")
+    if overlay_data is None or base_data is None:
+        return None, None
+    overlay_array = np.array(overlay_data, copy=False)
+    base_shape = tuple(int(v) for v in np.array(base_data, copy=False).shape)
+    if tuple(int(v) for v in overlay_array.shape) == base_shape:
+        base_affine = _metadata_affine(base_item)
+        overlay_affine = _metadata_affine(overlay_item)
+        if (
+            base_affine is None
+            or overlay_affine is None
+            or np.allclose(base_affine, overlay_affine, atol=1e-4)
+        ):
+            return _extract_slice(overlay_array, orientation, index), None
+
+    base_affine = _metadata_affine(base_item)
+    overlay_affine = _metadata_affine(overlay_item)
+    if base_affine is None or overlay_affine is None:
+        return None, f"{overlay_item.get('display_name', 'Heatmap')}: missing geometry metadata"
+    try:
+        inverse_affine = np.linalg.inv(overlay_affine)
+    except np.linalg.LinAlgError:
+        return None, f"{overlay_item.get('display_name', 'Heatmap')}: invalid geometry transform"
+    try:
+        world_grid = _world_grid_for_slice(base_shape, base_affine, orientation, index)
+        return (
+            _sample_slice_with_affine(overlay_array, world_grid, inverse_affine),
+            f"{overlay_item.get('display_name', 'Heatmap')}: resampled to active data",
+        )
+    except Exception:
+        return None, f"{overlay_item.get('display_name', 'Heatmap')}: resample failed"
 
 
 def _to_qt_orientation(orientation: SplitterOrientation) -> Qt.Orientation:
@@ -141,16 +267,7 @@ def _to_qt_orientation(orientation: SplitterOrientation) -> Qt.Orientation:
 
 @dataclass(slots=True)
 class ViewerPayload:
-    volume_data: np.ndarray | None = None
-    cam_data: np.ndarray | None = None
-    volume_transfer_function: TransferFunction = field(
-        default_factory=TransferFunction.base_preset
-    )
-    volume_data_range: DataRange = field(default_factory=lambda: DataRange(0.0, 1.0))
-    cam_transfer_function: TransferFunction = field(
-        default_factory=TransferFunction.overlay_preset
-    )
-    cam_data_range: DataRange = field(default_factory=lambda: DataRange(0.0, 1.0))
+    renderable_items: list[dict[str, object]] = field(default_factory=list)
 
 
 class TileHeader(QFrame):
@@ -718,6 +835,7 @@ class ViewerWorkspace(QWidget):
         self.state = WorkspaceState()
         self.presets = {preset.id: preset for preset in default_layout_presets()}
         self.payload = ViewerPayload()
+        self.overlay_status_messages: list[str] = []
         self.tile_widgets: dict[str, ViewerTileWidget] = {}
         self.slice_widgets: dict[str, SliceViewWidget] = {}
         self.viewer_slice_states: dict[str, SliceViewState] = {}
@@ -772,7 +890,7 @@ class ViewerWorkspace(QWidget):
         self.tile_widgets["viewer-3d"] = tile
 
     def _create_renderer(self, vtk_widget):
-        return VtkVolumeRenderer(vtk_widget)
+        return StandardMultiVolumeRenderer(vtk_widget)
 
     def _create_slice_viewer(self, viewer_id: str) -> None:
         widget = SliceViewWidget(viewer_id)
@@ -965,40 +1083,43 @@ class ViewerWorkspace(QWidget):
     def set_workspace_payload(
         self,
         *,
-        volume_data,
-        cam_data,
-        volume_transfer_function: TransferFunction,
-        volume_data_range: DataRange,
-        cam_transfer_function: TransferFunction,
-        cam_data_range: DataRange,
+        renderable_items: list[dict[str, object]],
     ) -> None:
-        self.payload = ViewerPayload(
-            volume_data=_as_numpy(volume_data),
-            cam_data=_as_numpy(cam_data),
-            volume_transfer_function=volume_transfer_function,
-            volume_data_range=volume_data_range,
-            cam_transfer_function=cam_transfer_function,
-            cam_data_range=cam_data_range,
-        )
-        self.state.volume_shape = (
-            tuple(int(v) for v in self.payload.cam_data.shape)
-            if self.payload.cam_data is not None
-            else (
-                tuple(int(v) for v in self.payload.volume_data.shape)
-                if self.payload.volume_data is not None
-                else (0, 0, 0)
+        normalized_items = []
+        for item in renderable_items:
+            normalized_items.append(
+                {
+                    **item,
+                    "data": _as_numpy(item.get("data")),
+                }
             )
-        )
+        self.payload = ViewerPayload(renderable_items=normalized_items)
+        self.state.volume_shape = self._reference_volume_shape()
         self._normalize_slot_states()
         self.refresh_slice_views()
         self._refresh_renderer_annotations()
 
     def refresh_slice_views(self) -> None:
-        color_map = _color_map_from_transfer_function(
-            self.payload.cam_transfer_function, self.payload.cam_data_range
-        )
         mode = self.state.annotations.mode if self.enable_annotations else AnnotationMode.OFF
         point_size = self.state.annotations.point_size
+        self.overlay_status_messages = []
+        visible_base_items = [
+            item
+            for item in self.payload.renderable_items
+            if item.get("source") == "base"
+        ]
+        visible_xai_items = [
+            item
+            for item in self.payload.renderable_items
+            if item.get("source") == "xai" and bool(item.get("visible", True))
+        ]
+        base_item = self._select_reference_base_item(visible_base_items, visible_xai_items)
+        self.state.volume_shape = (
+            tuple(int(v) for v in base_item["data"].shape)
+            if base_item is not None and base_item.get("data") is not None
+            else (0, 0, 0)
+        )
+        self._normalize_slot_states()
         for viewer_id, widget in self.slice_widgets.items():
             slot_id = self.viewer_to_slot.get(viewer_id)
             if slot_id is None:
@@ -1007,28 +1128,42 @@ class ViewerWorkspace(QWidget):
             state = self.viewer_slice_states[viewer_id]
             widget.set_state(state, self.state.volume_shape)
             volume_slice = None
-            if self.payload.volume_data is not None and state.overlay_modes.get(
-                "volume", True
+            if (
+                base_item is not None
+                and state.overlay_modes.get("volume", True)
+                and base_item.get("data") is not None
             ):
                 index = clamp_slice_index(
                     state.orientation, state.slice_index, self.state.volume_shape
                 )
-                volume_slice = _extract_slice(
-                    self.payload.volume_data, state.orientation, index
-                )
-            cam_slice = None
-            if self.payload.cam_data is not None and state.overlay_modes.get(
-                "cam", True
-            ):
+                volume_slice = _extract_slice(base_item["data"], state.orientation, index)
+            xai_slices: list[tuple[np.ndarray, np.ndarray]] = []
+            if state.overlay_modes.get("cam", True):
                 index = clamp_slice_index(
                     state.orientation, state.slice_index, self.state.volume_shape
                 )
-                cam_slice = _extract_slice(
-                    self.payload.cam_data, state.orientation, index
-                )
-            widget.set_image(
-                _blend_slice_image(volume_slice, cam_slice, state, color_map)
-            )
+                for item in visible_xai_items:
+                    if item.get("data") is None or base_item is None:
+                        continue
+                    xai_slice, status_message = _resample_item_slice_to_base(
+                        base_item, item, state.orientation, index
+                    )
+                    if (
+                        status_message
+                        and status_message not in self.overlay_status_messages
+                    ):
+                        self.overlay_status_messages.append(status_message)
+                    if xai_slice is None:
+                        continue
+                    xai_slices.append(
+                        (
+                            xai_slice,
+                            _color_map_from_transfer_function(
+                                item["transfer_function"], item["data_range"]
+                            ),
+                        )
+                    )
+            widget.set_image(_blend_slice_image(volume_slice, xai_slices, state))
             points = self._slice_points_for_viewer(viewer_id, state) if self.enable_annotations else []
             boxes = self._slice_boxes_for_viewer(viewer_id, state) if self.enable_annotations else []
             roi_projection = self._roi_projection_for_viewer(state) if self.enable_annotations else None
@@ -1373,6 +1508,49 @@ class ViewerWorkspace(QWidget):
         self._refresh_renderer_annotations()
         self.refresh_slice_views()
 
+    def overlay_status_message(self) -> str:
+        unique_messages = list(dict.fromkeys(self.overlay_status_messages))
+        return " | ".join(unique_messages[:3])
+
+    def _reference_volume_shape(self) -> tuple[int, int, int]:
+        for item in self.payload.renderable_items:
+            data = item.get("data")
+            if item.get("source") == "base" and data is not None:
+                return tuple(int(v) for v in data.shape)
+        for item in self.payload.renderable_items:
+            data = item.get("data")
+            if data is not None:
+                return tuple(int(v) for v in data.shape)
+        return (0, 0, 0)
+
+    def _select_reference_base_item(
+        self,
+        base_items: list[dict[str, object]],
+        xai_items: list[dict[str, object]],
+    ) -> dict[str, object] | None:
+        focused_item = next(
+            (item for item in self.payload.renderable_items if bool(item.get("is_focus"))),
+            None,
+        )
+        if isinstance(focused_item, dict):
+            if focused_item.get("source") == "base" and focused_item.get("data") is not None:
+                return focused_item
+            source_base_id = focused_item.get("source_base_item_id")
+            if source_base_id:
+                for item in base_items:
+                    if item.get("id") == source_base_id and item.get("data") is not None:
+                        return item
+        visible_base_items = [item for item in base_items if bool(item.get("visible", True))]
+        if visible_base_items:
+            return visible_base_items[0]
+        if xai_items:
+            source_base_id = xai_items[0].get("source_base_item_id")
+            if source_base_id:
+                for item in base_items:
+                    if item.get("id") == source_base_id and item.get("data") is not None:
+                        return item
+        return base_items[0] if base_items else None
+
     def _resize_3d_box(self, annotation_id: str, corner_index: int, position) -> None:
         for box in self.state.annotations.boxes_3d:
             if box.id != annotation_id:
@@ -1471,13 +1649,13 @@ class StandardWorkspace(ViewerWorkspace):
     def __init__(self, parent=None) -> None:
         super().__init__(parent, enable_annotations=False)
 
-    def _create_renderer(self, vtk_widget):
-        return StandardMultiVolumeRenderer(vtk_widget)
-
 
 class RoiWorkspace(ViewerWorkspace):
     def __init__(self, parent=None) -> None:
         super().__init__(parent, enable_annotations=True)
+
+    def _create_renderer(self, vtk_widget):
+        return VtkVolumeRenderer(vtk_widget)
 
 
 class WorkspaceHost(QWidget):
@@ -1488,6 +1666,8 @@ class WorkspaceHost(QWidget):
         super().__init__(parent)
         self.mode = WorkspaceMode.STANDARD
         self.shared_state = SharedImagingState()
+        self._scene_initialized = False
+        self._scene_signature: tuple[tuple[str, tuple[int, ...]], ...] = ()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1544,6 +1724,7 @@ class WorkspaceHost(QWidget):
             self._apply_shared_snapshot_to(self.standard_workspace)
         if was_rotating:
             self.active_workspace.renderer.start_rotation()
+        self.active_workspace.renderer.render()
 
     def _apply_shared_snapshot_to(self, workspace: ViewerWorkspace) -> None:
         workspace.apply_slice_snapshot(self.shared_state.slice_snapshot)
@@ -1560,36 +1741,15 @@ class WorkspaceHost(QWidget):
     def set_workspace_payload(
         self,
         *,
-        volume_data,
-        cam_data,
-        volume_transfer_function: TransferFunction,
-        volume_data_range: DataRange,
-        cam_transfer_function: TransferFunction,
-        cam_data_range: DataRange,
+        renderable_items: list[dict[str, object]],
     ) -> None:
-        self.shared_state.volume_data = volume_data
-        self.shared_state.cam_data = cam_data
-        self.shared_state.volume_transfer_function = volume_transfer_function
-        self.shared_state.volume_data_range = volume_data_range
-        self.shared_state.cam_transfer_function = cam_transfer_function
-        self.shared_state.cam_data_range = cam_data_range
+        self.shared_state.renderable_items = list(renderable_items)
         self.standard_workspace.set_workspace_payload(
-            volume_data=volume_data,
-            cam_data=cam_data,
-            volume_transfer_function=volume_transfer_function,
-            volume_data_range=volume_data_range,
-            cam_transfer_function=cam_transfer_function,
-            cam_data_range=cam_data_range,
+            renderable_items=renderable_items,
         )
         self.roi_workspace.set_workspace_payload(
-            volume_data=volume_data,
-            cam_data=cam_data,
-            volume_transfer_function=volume_transfer_function,
-            volume_data_range=volume_data_range,
-            cam_transfer_function=cam_transfer_function,
-            cam_data_range=cam_data_range,
+            renderable_items=renderable_items,
         )
-        self._apply_shared_snapshot_to(self.active_workspace)
 
     def set_annotation_mode(self, mode: str | AnnotationMode) -> None:
         self.roi_workspace.set_annotation_mode(mode)
@@ -1621,9 +1781,26 @@ class WorkspaceHost(QWidget):
         spacing: list[tuple[float, float, float]],
         metadata: list[dict[str, object] | None] | None = None,
     ) -> None:
+        metadata_items = metadata if metadata is not None else [None] * len(volumes)
+        scene_signature = tuple(
+            (
+                str((meta or {}).get("volume_id", index)),
+                tuple(int(v) for v in np.array(volume).shape),
+            )
+            for index, (volume, meta) in enumerate(zip(volumes, metadata_items))
+        )
         self.standard_workspace.renderer.show_volumes(volumes, spacing, metadata)
         self.roi_workspace.renderer.show_volumes(volumes, spacing, metadata)
-        self._apply_shared_snapshot_to(self.active_workspace)
+        scene_changed = (not self._scene_initialized) or scene_signature != self._scene_signature
+        if scene_changed:
+            self.sync_camera_to_visible_volumes()
+            self._scene_initialized = True
+            self._scene_signature = scene_signature
+        elif self.shared_state.camera_snapshot:
+            self._apply_shared_snapshot_to(self.standard_workspace)
+            self._apply_shared_snapshot_to(self.roi_workspace)
+        self.standard_workspace.renderer.render()
+        self.roi_workspace.renderer.render()
 
     def set_volume_transfer_functions(
         self,
@@ -1641,7 +1818,8 @@ class WorkspaceHost(QWidget):
             index, color_points, opacity_points, visible=visible, render=False
         )
         if render:
-            self.active_workspace.renderer.render()
+            self.standard_workspace.renderer.render()
+            self.roi_workspace.renderer.render()
 
     def set_rotation_speed(self, speed: float) -> None:
         self.standard_workspace.renderer.set_rotation_speed(speed)
@@ -1656,16 +1834,32 @@ class WorkspaceHost(QWidget):
     def clear_volumes(self) -> None:
         self.standard_workspace.renderer.clear_volumes()
         self.roi_workspace.renderer.clear_volumes()
+        self._scene_initialized = False
+        self._scene_signature = ()
 
     def render(self) -> None:
-        self.active_workspace.renderer.render()
+        self.standard_workspace.renderer.render()
+        self.roi_workspace.renderer.render()
+
+    def overlay_status_message(self) -> str:
+        return self.active_workspace.overlay_status_message()
 
     def store_initial_camera(self) -> None:
         self.standard_workspace.renderer.store_initial_camera()
         self.roi_workspace.renderer.store_initial_camera()
 
     def replace_camera(self) -> None:
-        self.active_workspace.renderer.replace_camera()
+        self.sync_camera_to_visible_volumes()
+
+    def sync_camera_to_visible_volumes(self) -> None:
+        snapshot = self.roi_workspace.renderer.camera_state_for_visible_volumes()
+        if snapshot is None:
+            snapshot = self.standard_workspace.renderer.camera_state_for_visible_volumes()
+        if snapshot is None:
+            return
+        self.shared_state.camera_snapshot = snapshot
+        self.standard_workspace.renderer.apply_camera_state(snapshot)
+        self.roi_workspace.renderer.apply_camera_state(snapshot)
 
     def capture_camera_state(self):
         snapshot = self.active_workspace.renderer.capture_camera_state()
