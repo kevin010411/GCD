@@ -133,7 +133,9 @@ def _blend_slice_image(
     return np.ascontiguousarray(np.flipud(np.fliplr(base)))
 
 
-def _metadata_affine(item: dict[str, object], *, source: bool = False) -> np.ndarray | None:
+def _metadata_affine(
+    item: dict[str, object], *, source: bool = False
+) -> np.ndarray | None:
     key = "source_affine" if source else "metadata"
     if source:
         affine = item.get(key)
@@ -206,7 +208,11 @@ def _sample_slice_with_affine(
 
     grid = np.stack([_norm(x, width), _norm(y, height), _norm(z, depth)], axis=-1)
     grid_tensor = torch.from_numpy(grid).unsqueeze(0).unsqueeze(1)
-    volume_tensor = torch.from_numpy(volume.astype(np.float32, copy=False)).unsqueeze(0).unsqueeze(0)
+    volume_tensor = (
+        torch.from_numpy(volume.astype(np.float32, copy=False))
+        .unsqueeze(0)
+        .unsqueeze(0)
+    )
     sampled = F.grid_sample(
         volume_tensor,
         grid_tensor,
@@ -242,11 +248,17 @@ def _resample_item_slice_to_base(
     base_affine = _metadata_affine(base_item)
     overlay_affine = _metadata_affine(overlay_item)
     if base_affine is None or overlay_affine is None:
-        return None, f"{overlay_item.get('display_name', 'Heatmap')}: missing geometry metadata"
+        return (
+            None,
+            f"{overlay_item.get('display_name', 'Heatmap')}: missing geometry metadata",
+        )
     try:
         inverse_affine = np.linalg.inv(overlay_affine)
     except np.linalg.LinAlgError:
-        return None, f"{overlay_item.get('display_name', 'Heatmap')}: invalid geometry transform"
+        return (
+            None,
+            f"{overlay_item.get('display_name', 'Heatmap')}: invalid geometry transform",
+        )
     try:
         world_grid = _world_grid_for_slice(base_shape, base_affine, orientation, index)
         return (
@@ -276,12 +288,15 @@ class TileHeader(QFrame):
     def __init__(self, viewer_id: str, title: str, parent=None) -> None:
         super().__init__(parent)
         self.viewer_id = viewer_id
+        self.setObjectName("tileHeader")
+        self.setFixedHeight(38)
         self._drag_start: QPoint | None = None
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
         self.title_label = QLabel(title)
         self.title_label.setObjectName("tileTitle")
+        self.title_label.setMinimumHeight(18)
         layout.addWidget(self.title_label)
         layout.addStretch()
 
@@ -489,7 +504,11 @@ class SliceCanvasWidget(QWidget):
             painter.drawPixmap(rect.topLeft(), scaled)
         else:
             painter.setPen(QColor("#8FA6C5"))
-            painter.drawText(self.rect(), int(Qt.AlignmentFlag.AlignCenter), "Load a volume to inspect slices")
+            painter.drawText(
+                self.rect(),
+                int(Qt.AlignmentFlag.AlignCenter),
+                "Load a volume to inspect slices",
+            )
 
         if self._roi_projection is not None:
             painter.setPen(QPen(QColor("#F0C94A"), 2, Qt.PenStyle.DashLine))
@@ -572,7 +591,9 @@ class SliceCanvasWidget(QWidget):
         p2 = self._image_to_widget(max(x1, x2), max(y1, y2))
         return QRectF(p1, p2)
 
-    def _rect_handles(self, rect: tuple[float, float, float, float]) -> list[tuple[float, float]]:
+    def _rect_handles(
+        self, rect: tuple[float, float, float, float]
+    ) -> list[tuple[float, float]]:
         x1, y1, x2, y2 = normalize_rect(rect)
         return [
             (x1, y1),
@@ -581,7 +602,9 @@ class SliceCanvasWidget(QWidget):
             (x2, y2),
         ]
 
-    def _find_box_hit(self, point: tuple[float, float]) -> tuple[str | None, int | None]:
+    def _find_box_hit(
+        self, point: tuple[float, float]
+    ) -> tuple[str | None, int | None]:
         for annotation_id, x1, y1, x2, y2, _selected in self._boxes:
             left, top, right, bottom = normalize_rect((x1, y1, x2, y2))
             handles = self._rect_handles((left, top, right, bottom))
@@ -592,7 +615,9 @@ class SliceCanvasWidget(QWidget):
                 return annotation_id, None
         return None, None
 
-    def _box_rect_by_id(self, annotation_id: str) -> tuple[float, float, float, float] | None:
+    def _box_rect_by_id(
+        self, annotation_id: str
+    ) -> tuple[float, float, float, float] | None:
         for box_id, x1, y1, x2, y2, _selected in self._boxes:
             if box_id == annotation_id:
                 return normalize_rect((x1, y1, x2, y2))
@@ -612,7 +637,10 @@ class SliceCanvasWidget(QWidget):
                 self._dragging_box_offset = None
                 if handle_index is None and self._dragging_box_rect is not None:
                     left, top, _right, _bottom = self._dragging_box_rect
-                    self._dragging_box_offset = (image_pos[0] - left, image_pos[1] - top)
+                    self._dragging_box_offset = (
+                        image_pos[0] - left,
+                        image_pos[1] - top,
+                    )
             return
 
         if self._mode == AnnotationMode.POINT:
@@ -620,7 +648,12 @@ class SliceCanvasWidget(QWidget):
             return
         if self._mode == AnnotationMode.BOX:
             self._drag_start = image_pos
-            self._preview_rect = (image_pos[0], image_pos[1], image_pos[0], image_pos[1])
+            self._preview_rect = (
+                image_pos[0],
+                image_pos[1],
+                image_pos[0],
+                image_pos[1],
+            )
             self.update()
 
     def mouseMoveEvent(self, event) -> None:
@@ -661,7 +694,11 @@ class SliceCanvasWidget(QWidget):
             self._dragging_box_rect = None
             self._dragging_box_offset = None
             return
-        if self._drag_start is None or image_pos is None or self._mode != AnnotationMode.BOX:
+        if (
+            self._drag_start is None
+            or image_pos is None
+            or self._mode != AnnotationMode.BOX
+        ):
             return
         left = min(self._drag_start[0], image_pos[0])
         top = min(self._drag_start[1], image_pos[1])
@@ -770,13 +807,17 @@ class SliceViewWidget(QWidget):
         boxes: list[tuple[str, float, float, float, float, bool]],
         roi_projection: tuple[float, float, float, float] | None,
     ) -> None:
-        image_size = (self._pixmap.width(), self._pixmap.height()) if self._pixmap else (1, 1)
+        image_size = (
+            (self._pixmap.width(), self._pixmap.height()) if self._pixmap else (1, 1)
+        )
         self.canvas.set_render_state(
             pixmap=self._pixmap,
             image_size=image_size,
-            orientation=SliceOrientation(self.orientation_combo.currentData())
-            if self.orientation_combo.currentData()
-            else SliceOrientation.AXIAL,
+            orientation=(
+                SliceOrientation(self.orientation_combo.currentData())
+                if self.orientation_combo.currentData()
+                else SliceOrientation.AXIAL
+            ),
             mode=mode,
             point_size=point_size,
             selected_annotation_id=selected_annotation_id,
@@ -828,6 +869,7 @@ class SliceViewWidget(QWidget):
 class ViewerWorkspace(QWidget):
     layout_changed = pyqtSignal(str, str)
     annotations_changed = pyqtSignal()
+    volume_view_title = "3d view"
 
     def __init__(self, parent=None, *, enable_annotations: bool = True) -> None:
         super().__init__(parent)
@@ -871,10 +913,7 @@ class ViewerWorkspace(QWidget):
         self.volume_content = QWidget()
         content_layout = QVBoxLayout(self.volume_content)
         content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(6)
-        hint_label = QLabel("Shared 3D Volume Workspace")
-        hint_label.setObjectName("workspaceHint")
-        content_layout.addWidget(hint_label)
+        content_layout.setSpacing(0)
         self.vtk_widget = QVTKRenderWindowInteractor(self.volume_content)
         self.vtk_widget.setObjectName("volumeViewport")
         content_layout.addWidget(self.vtk_widget, 1)
@@ -882,9 +921,9 @@ class ViewerWorkspace(QWidget):
         self.vtk_widget.Initialize()
         self.vtk_widget.Start()
         self.state.tiles["viewer-3d"] = ViewerTileState(
-            "viewer-3d", ViewerType.VOLUME_3D, "3D Volume"
+            "viewer-3d", ViewerType.VOLUME_3D, self.volume_view_title
         )
-        tile = ViewerTileWidget("viewer-3d", "3D Volume")
+        tile = ViewerTileWidget("viewer-3d", self.volume_view_title)
         tile.set_content(self.volume_content)
         tile.selected.connect(self._on_viewer_selected)
         self.tile_widgets["viewer-3d"] = tile
@@ -1100,7 +1139,11 @@ class ViewerWorkspace(QWidget):
         self._refresh_renderer_annotations()
 
     def refresh_slice_views(self) -> None:
-        mode = self.state.annotations.mode if self.enable_annotations else AnnotationMode.OFF
+        mode = (
+            self.state.annotations.mode
+            if self.enable_annotations
+            else AnnotationMode.OFF
+        )
         point_size = self.state.annotations.point_size
         self.overlay_status_messages = []
         visible_base_items = [
@@ -1113,7 +1156,9 @@ class ViewerWorkspace(QWidget):
             for item in self.payload.renderable_items
             if item.get("source") == "xai" and bool(item.get("visible", True))
         ]
-        base_item = self._select_reference_base_item(visible_base_items, visible_xai_items)
+        base_item = self._select_reference_base_item(
+            visible_base_items, visible_xai_items
+        )
         self.state.volume_shape = (
             tuple(int(v) for v in base_item["data"].shape)
             if base_item is not None and base_item.get("data") is not None
@@ -1136,7 +1181,9 @@ class ViewerWorkspace(QWidget):
                 index = clamp_slice_index(
                     state.orientation, state.slice_index, self.state.volume_shape
                 )
-                volume_slice = _extract_slice(base_item["data"], state.orientation, index)
+                volume_slice = _extract_slice(
+                    base_item["data"], state.orientation, index
+                )
             xai_slices: list[tuple[np.ndarray, np.ndarray]] = []
             if state.overlay_modes.get("cam", True):
                 index = clamp_slice_index(
@@ -1164,9 +1211,21 @@ class ViewerWorkspace(QWidget):
                         )
                     )
             widget.set_image(_blend_slice_image(volume_slice, xai_slices, state))
-            points = self._slice_points_for_viewer(viewer_id, state) if self.enable_annotations else []
-            boxes = self._slice_boxes_for_viewer(viewer_id, state) if self.enable_annotations else []
-            roi_projection = self._roi_projection_for_viewer(state) if self.enable_annotations else None
+            points = (
+                self._slice_points_for_viewer(viewer_id, state)
+                if self.enable_annotations
+                else []
+            )
+            boxes = (
+                self._slice_boxes_for_viewer(viewer_id, state)
+                if self.enable_annotations
+                else []
+            )
+            roi_projection = (
+                self._roi_projection_for_viewer(state)
+                if self.enable_annotations
+                else None
+            )
             widget.set_annotation_overlay(
                 mode=mode,
                 point_size=point_size,
@@ -1179,7 +1238,7 @@ class ViewerWorkspace(QWidget):
                 f"{state.orientation.value.title()} Slice"
             )
             self.tile_widgets[viewer_id].show()
-        self.tile_widgets["viewer-3d"].set_title("3D Volume")
+        self.tile_widgets["viewer-3d"].set_title(self.volume_view_title)
         self._refresh_renderer_annotations()
         self._refresh_3d_view()
 
@@ -1282,8 +1341,29 @@ class ViewerWorkspace(QWidget):
         self.volume_content.updateGeometry()
         self.vtk_widget.updateGeometry()
         self.vtk_widget.update()
+        self._refresh_3d_tile_chrome()
+        QTimer.singleShot(0, self._refresh_3d_tile_chrome)
+        QTimer.singleShot(25, self._refresh_3d_tile_chrome)
+        QTimer.singleShot(100, self._refresh_3d_tile_chrome)
         QTimer.singleShot(0, self.renderer.render)
         QTimer.singleShot(25, self.renderer.render)
+
+    def _refresh_3d_tile_chrome(self) -> None:
+        tile = self.tile_widgets.get("viewer-3d")
+        if tile is None:
+            return
+        tile.set_title(self.volume_view_title)
+        tile.show()
+        tile.header.show()
+        tile.header.title_label.show()
+        tile.header.raise_()
+        tile.header.title_label.raise_()
+        tile.updateGeometry()
+        tile.header.updateGeometry()
+        tile.header.title_label.updateGeometry()
+        tile.update()
+        tile.header.update()
+        tile.header.title_label.update()
 
     def shutdown(self) -> None:
         if hasattr(self, "renderer"):
@@ -1294,7 +1374,9 @@ class ViewerWorkspace(QWidget):
             return
         if not self.enable_annotations:
             self.renderer.set_annotation_mode(AnnotationMode.OFF.value)
-            self.renderer.set_annotations([], [], None, None, self.state.annotations.point_size)
+            self.renderer.set_annotations(
+                [], [], None, None, self.state.annotations.point_size
+            )
             return
         self.renderer.set_annotation_mode(self.state.annotations.mode.value)
         self.renderer.set_annotations(
@@ -1307,7 +1389,9 @@ class ViewerWorkspace(QWidget):
         self.annotations_changed.emit()
 
     def set_annotation_mode(self, mode: str | AnnotationMode) -> None:
-        self.state.annotations.mode = mode if isinstance(mode, AnnotationMode) else AnnotationMode(mode)
+        self.state.annotations.mode = (
+            mode if isinstance(mode, AnnotationMode) else AnnotationMode(mode)
+        )
         self._refresh_renderer_annotations()
         self.refresh_slice_views()
 
@@ -1381,7 +1465,10 @@ class ViewerWorkspace(QWidget):
     def _slice_boxes_for_viewer(self, viewer_id: str, state: SliceViewState):
         results = []
         for item in self.state.annotations.boxes_2d:
-            if item.orientation != state.orientation or item.slice_index != state.slice_index:
+            if (
+                item.orientation != state.orientation
+                or item.slice_index != state.slice_index
+            ):
                 continue
             results.append(
                 (
@@ -1399,7 +1486,10 @@ class ViewerWorkspace(QWidget):
         active_id = self.state.annotations.active_roi_box_id
         if not active_id:
             return None
-        target = next((item for item in self.state.annotations.boxes_3d if item.id == active_id), None)
+        target = next(
+            (item for item in self.state.annotations.boxes_3d if item.id == active_id),
+            None,
+        )
         if target is None:
             return None
         min_corner = target.min_corner
@@ -1435,7 +1525,9 @@ class ViewerWorkspace(QWidget):
             max_axis1 - min_corner[1],
         )
 
-    def _voxel_to_slice_coords(self, position: tuple[float, float, float], state: SliceViewState):
+    def _voxel_to_slice_coords(
+        self, position: tuple[float, float, float], state: SliceViewState
+    ):
         max_axis0 = max(0, self.state.volume_shape[0] - 1)
         max_axis1 = max(0, self.state.volume_shape[1] - 1)
         max_axis2 = max(0, self.state.volume_shape[2] - 1)
@@ -1495,7 +1587,9 @@ class ViewerWorkspace(QWidget):
             self.state.annotations.boxes_3d.append(box)
             self.state.annotations.selected_annotation_id = box.id
         elif event_type == "resize_box_3d":
-            self._resize_3d_box(payload["annotation_id"], payload["corner_index"], payload["position"])
+            self._resize_3d_box(
+                payload["annotation_id"], payload["corner_index"], payload["position"]
+            )
         elif event_type == "move_box_3d":
             self._move_3d_box(
                 payload["annotation_id"],
@@ -1529,25 +1623,40 @@ class ViewerWorkspace(QWidget):
         xai_items: list[dict[str, object]],
     ) -> dict[str, object] | None:
         focused_item = next(
-            (item for item in self.payload.renderable_items if bool(item.get("is_focus"))),
+            (
+                item
+                for item in self.payload.renderable_items
+                if bool(item.get("is_focus"))
+            ),
             None,
         )
         if isinstance(focused_item, dict):
-            if focused_item.get("source") == "base" and focused_item.get("data") is not None:
+            if (
+                focused_item.get("source") == "base"
+                and focused_item.get("data") is not None
+            ):
                 return focused_item
             source_base_id = focused_item.get("source_base_item_id")
             if source_base_id:
                 for item in base_items:
-                    if item.get("id") == source_base_id and item.get("data") is not None:
+                    if (
+                        item.get("id") == source_base_id
+                        and item.get("data") is not None
+                    ):
                         return item
-        visible_base_items = [item for item in base_items if bool(item.get("visible", True))]
+        visible_base_items = [
+            item for item in base_items if bool(item.get("visible", True))
+        ]
         if visible_base_items:
             return visible_base_items[0]
         if xai_items:
             source_base_id = xai_items[0].get("source_base_item_id")
             if source_base_id:
                 for item in base_items:
-                    if item.get("id") == source_base_id and item.get("data") is not None:
+                    if (
+                        item.get("id") == source_base_id
+                        and item.get("data") is not None
+                    ):
                         return item
         return base_items[0] if base_items else None
 
@@ -1570,12 +1679,18 @@ class ViewerWorkspace(QWidget):
             box.max_corner = tuple(max(c[i] for c in corners) for i in range(3))
             break
 
-    def _move_3d_box(self, annotation_id: str, delta, initial_min_corner, initial_max_corner) -> None:
+    def _move_3d_box(
+        self, annotation_id: str, delta, initial_min_corner, initial_max_corner
+    ) -> None:
         for box in self.state.annotations.boxes_3d:
             if box.id != annotation_id:
                 continue
-            next_min = tuple(float(initial_min_corner[i]) + float(delta[i]) for i in range(3))
-            next_max = tuple(float(initial_max_corner[i]) + float(delta[i]) for i in range(3))
+            next_min = tuple(
+                float(initial_min_corner[i]) + float(delta[i]) for i in range(3)
+            )
+            next_max = tuple(
+                float(initial_max_corner[i]) + float(delta[i]) for i in range(3)
+            )
             clamped_min, clamped_max = self._clamp_3d_box_bounds(next_min, next_max)
             box.min_corner = clamped_min
             box.max_corner = clamped_max
@@ -1584,7 +1699,9 @@ class ViewerWorkspace(QWidget):
     def _clamp_3d_box_bounds(self, min_corner, max_corner):
         volume_shape = self.state.volume_shape
         if not any(volume_shape):
-            return tuple(float(v) for v in min_corner), tuple(float(v) for v in max_corner)
+            return tuple(float(v) for v in min_corner), tuple(
+                float(v) for v in max_corner
+            )
         lengths = [float(max_corner[i]) - float(min_corner[i]) for i in range(3)]
         clamped_min = []
         clamped_max = []
@@ -1621,7 +1738,9 @@ class ViewerWorkspace(QWidget):
         self._refresh_renderer_annotations()
         self.refresh_slice_views()
 
-    def _add_box_from_slice(self, viewer_id: str, rect: tuple[float, float, float, float]) -> None:
+    def _add_box_from_slice(
+        self, viewer_id: str, rect: tuple[float, float, float, float]
+    ) -> None:
         state = self.viewer_slice_states[viewer_id]
         box = Box2DAnnotation(
             id=f"box2d-{uuid4().hex[:8]}",
@@ -1635,7 +1754,9 @@ class ViewerWorkspace(QWidget):
         self._refresh_renderer_annotations()
         self.refresh_slice_views()
 
-    def _update_box_from_slice(self, annotation_id: str, rect: tuple[float, float, float, float]) -> None:
+    def _update_box_from_slice(
+        self, annotation_id: str, rect: tuple[float, float, float, float]
+    ) -> None:
         for box in self.state.annotations.boxes_2d:
             if box.id == annotation_id:
                 box.rect = tuple(float(v) for v in rect)
@@ -1651,6 +1772,8 @@ class StandardWorkspace(ViewerWorkspace):
 
 
 class RoiWorkspace(ViewerWorkspace):
+    volume_view_title = "Interactive 3D"
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent, enable_annotations=True)
 
@@ -1717,7 +1840,11 @@ class WorkspaceHost(QWidget):
         self.mode = target_mode
         if self.mode == WorkspaceMode.ROI:
             self.stack.setCurrentWidget(self.roi_workspace)
-            self.roi_workspace.apply_layout("triple_slice")
+            if (
+                self.roi_workspace.current_preset.id
+                != self.standard_workspace.current_preset.id
+            ):
+                self.roi_workspace.apply_layout(self.standard_workspace.current_preset.id)
             self._apply_shared_snapshot_to(self.roi_workspace)
         else:
             self.stack.setCurrentWidget(self.standard_workspace)
@@ -1732,6 +1859,7 @@ class WorkspaceHost(QWidget):
 
     def apply_layout(self, preset_id: str) -> None:
         self.standard_workspace.apply_layout(preset_id)
+        self.roi_workspace.apply_layout(preset_id)
         if self.mode == WorkspaceMode.STANDARD:
             self.layout_changed.emit(
                 self.standard_workspace.current_preset.id,
@@ -1791,7 +1919,9 @@ class WorkspaceHost(QWidget):
         )
         self.standard_workspace.renderer.show_volumes(volumes, spacing, metadata)
         self.roi_workspace.renderer.show_volumes(volumes, spacing, metadata)
-        scene_changed = (not self._scene_initialized) or scene_signature != self._scene_signature
+        scene_changed = (
+            not self._scene_initialized
+        ) or scene_signature != self._scene_signature
         if scene_changed:
             self.sync_camera_to_visible_volumes()
             self._scene_initialized = True
@@ -1854,7 +1984,9 @@ class WorkspaceHost(QWidget):
     def sync_camera_to_visible_volumes(self) -> None:
         snapshot = self.roi_workspace.renderer.camera_state_for_visible_volumes()
         if snapshot is None:
-            snapshot = self.standard_workspace.renderer.camera_state_for_visible_volumes()
+            snapshot = (
+                self.standard_workspace.renderer.camera_state_for_visible_volumes()
+            )
         if snapshot is None:
             return
         self.shared_state.camera_snapshot = snapshot

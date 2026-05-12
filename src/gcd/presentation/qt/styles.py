@@ -385,7 +385,7 @@ STYLESHEET = """
         border-radius: 16px;
     }
 
-    TileHeader {
+    QFrame#tileHeader {
         background: #162235;
         border-bottom: 1px solid #243754;
         border-top-left-radius: 16px;

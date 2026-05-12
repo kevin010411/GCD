@@ -259,9 +259,6 @@ class _FakeView:
     def choose_input_file(self):
         return "sample.nii.gz"
 
-    def set_file_name(self, _name):
-        pass
-
     def set_method_options(self, options, selected):
         self.method_options_calls.append((options, selected))
 

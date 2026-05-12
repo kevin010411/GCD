@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtGui import QAction, QColor, QLinearGradient, QPainter
 from PyQt6.QtWidgets import (
@@ -114,6 +112,11 @@ class PluginTabStrip(QWidget):
         viewport_half = self.scroll.viewport().width() // 2
         target = button_center - viewport_half
         scrollbar.setValue(max(scrollbar.minimum(), min(target, scrollbar.maximum())))
+        self._update_fades()
+
+    def scroll_to_start(self) -> None:
+        scrollbar = self.scroll.horizontalScrollBar()
+        scrollbar.setValue(scrollbar.minimum())
         self._update_fades()
 
     def resizeEvent(self, event) -> None:
@@ -245,6 +248,7 @@ class MainWindowView(QMainWindow):
         self._build_roi_plugin()
         self._build_transfer_plugin()
         self.set_active_plugin("gradcam")
+        self.plugin_switch_strip.scroll_to_start()
 
     def _build_global_toolbar(self) -> None:
         toolbar = QFrame()
@@ -269,10 +273,6 @@ class MainWindowView(QMainWindow):
         if self.model_combo.view() is not None:
             self.model_combo.view().setObjectName("softComboPopup")
         layout.addWidget(self.model_combo)
-
-        self.file_name_label = QLabel("No file loaded")
-        self.file_name_label.setObjectName("statusPill")
-        layout.addWidget(self.file_name_label)
 
         self.workbench_button = QToolButton()
         self.workbench_button.setObjectName("layoutButton")
@@ -468,11 +468,6 @@ class MainWindowView(QMainWindow):
 
     def set_feature_size(self, size: int) -> None:
         self.feature_widget.set_size(size)
-
-    def set_file_name(self, file_name: str) -> None:
-        self.file_name_label.setText(
-            os.path.basename(file_name) if file_name else "No file loaded"
-        )
 
     def set_rotation_speed_label(self, speed: float) -> None:
         self.speed_label.setText(f"Rotation Speed: {speed:.1f}")

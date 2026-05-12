@@ -167,7 +167,6 @@ class MainWindowPresenter:
         file_name = self.view.choose_input_file()
         if not file_name:
             return
-        self.view.set_file_name(file_name)
         self.view.renderer.stop_rotation()
         self.view.set_rotation_running(False)
         self.task_runner.submit(
