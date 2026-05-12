@@ -28,14 +28,12 @@ class TransferFunctionAppService:
         control_points = []
         for point in transfer_function.control_points:
             x = point.position * canvas_width
-            y = (1.0 - point.opacity) * canvas_height
             color = point.color
             if include_alpha and len(color) == 7:
                 color = f"{color}FF"
             control_points.append(
                 {
                     "x": float(x),
-                    "y": float(y),
                     "color": color,
                     "opacity": float(point.opacity),
                 }
@@ -57,7 +55,6 @@ class TransferFunctionAppService:
             raise ValueError("Unsupported transfer function version.")
         source_canvas = payload.get("canvas", {})
         source_width = float(source_canvas.get("width", 400.0) or 400.0)
-        source_height = float(source_canvas.get("height", 200.0) or 200.0)
         data_range_payload = payload.get("data_range", {})
         data_range = DataRange(
             float(data_range_payload.get("min", 0.0)),
@@ -67,9 +64,6 @@ class TransferFunctionAppService:
         for item in payload.get("control_points", []):
             x = float(item.get("x", 0.0))
             opacity = float(item.get("opacity", 1.0))
-            if "opacity" not in item:
-                y = float(item.get("y", source_height))
-                opacity = 1.0 - (y / max(source_height, 1.0))
             position = (x / max(source_width, 1.0)) if source_width else 0.0
             color = str(item.get("color", "#808080")).strip()
             if len(color) == 9:

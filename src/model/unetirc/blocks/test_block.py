@@ -17,12 +17,17 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-# from monai.networks.blocks.dynunet_block import UnetBasicBlock, UnetResBlock, get_conv_layer
+from monai.networks.blocks.dynunet_block import (
+    UnetBasicBlock,
+    # UnetResBlock,
+    # get_conv_layer,
+)
 from monai.networks.blocks.convolutions import Convolution
 from monai.networks.layers.factories import Act, Norm
 from monai.networks.layers.utils import get_act_layer, get_norm_layer
 from .dynunet_block import get_conv_layer
 from .cbam import CBAM
+from .ca import CoordAtt3D
 
 
 class UnetrUpBlock(nn.Module):
@@ -97,6 +102,79 @@ class UnetrUpBlock(nn.Module):
         return out
 
 
+class UnetrUpCABlock(nn.Module):
+    """
+    An upsampling module that can be used for UNETR: "Hatamizadeh et al.,
+    UNETR: Transformers for 3D Medical Image Segmentation <https://arxiv.org/abs/2103.10504>"
+    """
+
+    def __init__(
+        self,
+        spatial_dims: int,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Sequence[int] | int,
+        upsample_kernel_size: Sequence[int] | int,
+        norm_name: tuple | str,
+        res_block: bool = False,
+    ) -> None:
+        """
+        Args:
+            spatial_dims: number of spatial dimensions.
+            in_channels: number of input channels.
+            out_channels: number of output channels.
+            kernel_size: convolution kernel size.
+            upsample_kernel_size: convolution kernel size for transposed convolution layers.
+            norm_name: feature normalization type and arguments.
+            res_block: bool argument to determine if residual block is used.
+
+        """
+
+        super().__init__()
+        upsample_stride = upsample_kernel_size
+        self.transp_conv = get_conv_layer(
+            spatial_dims,
+            in_channels,
+            out_channels,
+            kernel_size=upsample_kernel_size,
+            stride=upsample_stride,
+            conv_only=True,
+            is_transposed=True,
+        )
+
+        if res_block:
+            self.conv_block = UnetResBlock(
+                spatial_dims,
+                out_channels + out_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=1,
+                norm_name=norm_name,
+                use_cbam=False,
+                use_coord_attn=True,
+                coord_reduction=4,
+            )
+        else:
+            self.conv_block = UnetBasicBlock(  # type: ignore
+                spatial_dims,
+                out_channels + out_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=1,
+                norm_name=norm_name,
+            )
+
+    def forward(self, inp, skip):
+        # number of channels for skip should equals to out_channels
+        out = self.transp_conv(inp)
+        # print(inp.shape)
+        # print(skip.shape)
+        # print(out.shape)
+        out = torch.cat((out, skip), dim=1)
+        out = self.conv_block(out)
+        return out
+
+
 class UnetrPrUpBlock(nn.Module):
     """
     A projection upsampling module that can be used for UNETR: "Hatamizadeh et al.,
@@ -115,7 +193,6 @@ class UnetrPrUpBlock(nn.Module):
         norm_name: tuple | str,
         conv_block: bool = False,
         res_block: bool = False,
-        use_cbam: bool = True,
     ) -> None:
         """
         Args:
@@ -165,7 +242,6 @@ class UnetrPrUpBlock(nn.Module):
                                 kernel_size=kernel_size,
                                 stride=stride,
                                 norm_name=norm_name,
-                                use_cbam=use_cbam,
                             ),
                         )
                         for i in range(num_layer)
@@ -304,6 +380,8 @@ class UnetResBlock(nn.Module):
         ),
         dropout: tuple | str | float | None = None,
         use_cbam: bool = True,
+        use_coord_attn: bool = False,
+        coord_reduction=16,
     ):
         super().__init__()
         self.conv1 = get_conv_layer(
@@ -340,6 +418,12 @@ class UnetResBlock(nn.Module):
         if use_cbam:
             self.cbam = CBAM(out_channels, reduction=16, kernel_size=7)
 
+        self.coord_att = nn.Identity()
+        if use_coord_attn:
+            self.coord_att = CoordAtt3D(
+                out_channels, out_channels, reduction=coord_reduction
+            )
+
         stride_np = np.atleast_1d(stride)
         if not np.all(stride_np == 1):
             self.downsample = True
@@ -371,6 +455,7 @@ class UnetResBlock(nn.Module):
         if hasattr(self, "norm3"):
             residual = self.norm3(residual)
         out = self.cbam(out)
+        out = self.coord_att(out)
         out += residual
         out = self.lrelu(out)
         return out
