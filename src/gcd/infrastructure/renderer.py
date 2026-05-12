@@ -937,6 +937,12 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         self.multi_volume_added = False
         self.multi_volume_dummy_port = None
 
+    def _remove_multi_volume_from_renderer(self) -> None:
+        if not self.multi_volume_added:
+            return
+        self.renderer.RemoveVolume(self.multi_volume)
+        self.multi_volume_added = False
+
     def show_volumes(
         self,
         volumes: list[object],
@@ -1011,6 +1017,8 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
                 ),
                 "inverse_affine": None,
                 "volume_id": str(metadata.get("volume_id", port)),
+                "visible": True,
+                "render_port": port,
             }
         )
         self.volumes[-1]["inverse_affine"] = self._safe_inverse_affine(
@@ -1036,11 +1044,17 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         self.annotation_actor_map = {}
         self.render()
 
-    def _ensure_single_volume_multi_input(self) -> None:
-        if len(self.volumes) != 1 or self.multi_volume_dummy_port is not None:
+    def _visible_multi_volume_items(self):
+        return [
+            (index, volume)
+            for index, volume in enumerate(self.volumes)
+            if bool(volume.get("visible", True))
+        ]
+
+    def _add_single_volume_dummy_input(self, source_volume, port: int) -> None:
+        if self.multi_volume_dummy_port is not None:
             return
 
-        source_volume = self.volumes[0]
         dummy_prop = vtk.vtkVolumeProperty()
         dummy_prop.SetInterpolationTypeToLinear()
         opacity = vtk.vtkPiecewiseFunction()
@@ -1060,7 +1074,6 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
             matrix.DeepCopy(source_matrix)
             dummy_volume.SetUserMatrix(matrix)
 
-        port = len(self.volumes)
         self.multi_mapper.SetInputDataObject(port, source_volume["image"])
         self.multi_volume.SetVolume(dummy_volume, port)
         dummy_volume.Modified()
@@ -1068,6 +1081,42 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         self.multi_mapper.Modified()
         self.multi_volume.Modified()
         self.multi_volume_dummy_port = port
+
+    def _ensure_single_volume_multi_input(self) -> None:
+        visible_items = self._visible_multi_volume_items()
+        if len(visible_items) != 1:
+            return
+        self._add_single_volume_dummy_input(visible_items[0][1], len(visible_items))
+
+    def _rebuild_visible_multi_volume(self) -> None:
+        self._remove_multi_volume_from_renderer()
+        self._reset_multi_volume_backend()
+        visible_items = self._visible_multi_volume_items()
+
+        for port, (_original_index, volume) in enumerate(visible_items):
+            volume["mapper"] = self.multi_mapper
+            volume["render_port"] = port
+            volume["volume"].SetVisibility(1)
+            volume["volume"].Modified()
+            volume["prop"].Modified()
+            self.multi_mapper.SetInputDataObject(port, volume["image"])
+            self.multi_volume.SetVolume(volume["volume"], port)
+
+        visible_ids = {id(volume) for _index, volume in visible_items}
+        for volume in self.volumes:
+            if id(volume) not in visible_ids:
+                volume["render_port"] = None
+
+        if len(visible_items) == 1:
+            self._add_single_volume_dummy_input(visible_items[0][1], len(visible_items))
+
+        if visible_items:
+            self.renderer.AddVolume(self.multi_volume)
+            self.multi_volume_added = True
+
+        self.multi_mapper.Modified()
+        self.multi_volume.Modified()
+        self.renderer.ResetCameraClippingRange()
 
     def set_volume_transfer_functions(
         self,
@@ -1084,15 +1133,21 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         volume["color"] = list(color_settings or [])
         volume["opacity"] = list(opacity_settings or [])
         if visible is not None:
+            volume["visible"] = bool(visible)
             volume["volume"].SetVisibility(1 if visible else 0)
             volume["volume"].Modified()
         self._apply_transfer_functions_to_property(
             volume["prop"], volume["color"], volume["opacity"]
         )
         volume["prop"].Modified()
-        self.multi_volume.SetVolume(volume["volume"], index)
-        self.multi_volume.Modified()
-        self.multi_mapper.Modified()
+        if visible is not None:
+            self._rebuild_visible_multi_volume()
+        else:
+            render_port = volume.get("render_port")
+            if render_port is not None:
+                self.multi_volume.SetVolume(volume["volume"], int(render_port))
+                self.multi_volume.Modified()
+                self.multi_mapper.Modified()
         self._rebuild_annotation_actors()
         if render:
             self.render()
