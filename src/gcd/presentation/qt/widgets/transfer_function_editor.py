@@ -2,8 +2,17 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from PyQt6.QtCore import QPointF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QPolygonF
+from PyQt6.QtCore import QPointF, QRect, Qt, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QImage,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPolygonF,
+)
 from PyQt6.QtWidgets import (
     QColorDialog,
     QFileDialog,
@@ -247,6 +256,7 @@ class TransferFunctionEditor(QWidget):
     transfer_function_changed = pyqtSignal(object, object)
     load_requested = pyqtSignal()
     save_requested = pyqtSignal()
+    export_png_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -265,10 +275,13 @@ class TransferFunctionEditor(QWidget):
         buttons = QHBoxLayout()
         self.load_button = QPushButton("Load")
         self.save_button = QPushButton("Save")
+        self.export_png_button = QPushButton("Export PNG")
         self.load_button.clicked.connect(self.load_requested.emit)
         self.save_button.clicked.connect(self.save_requested.emit)
+        self.export_png_button.clicked.connect(self.export_png_requested.emit)
         buttons.addWidget(self.load_button)
         buttons.addWidget(self.save_button)
+        buttons.addWidget(self.export_png_button)
         layout.addLayout(buttons)
 
     def _format_label(self, value: float) -> str:
@@ -312,3 +325,114 @@ class TransferFunctionEditor(QWidget):
             self, "Save Transfer Function", "trasfer.json", "JSON Files (*.json)"
         )
         return file_name
+
+    def choose_export_png_path(self) -> str:
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Transfer Function PNG",
+            "transfer_function.png",
+            "PNG Files (*.png)",
+        )
+        if file_name and not file_name.lower().endswith(".png"):
+            file_name = f"{file_name}.png"
+        return file_name
+
+    def export_png(
+        self,
+        path: str,
+        transfer_function: TransferFunction,
+        data_range: DataRange,
+        *,
+        width: int = 1800,
+        height: int = 360,
+        dpi: int = 300,
+    ) -> None:
+        image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        dots_per_meter = int(round(dpi / 0.0254))
+        image.setDotsPerMeterX(dots_per_meter)
+        image.setDotsPerMeterY(dots_per_meter)
+
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            self._paint_publication_transfer_function(
+                painter, transfer_function, data_range, width, height
+            )
+        finally:
+            painter.end()
+        if not image.save(path, "PNG"):
+            raise OSError(f"Could not save transfer function PNG: {path}")
+
+    def _paint_publication_transfer_function(
+        self,
+        painter: QPainter,
+        transfer_function: TransferFunction,
+        data_range: DataRange,
+        width: int,
+        height: int,
+    ) -> None:
+        margin_left = 92
+        margin_right = 92
+        bar_top = 56
+        bar_height = 132
+        axis_y = bar_top + bar_height + 48
+        left = margin_left
+        right = width - margin_right
+        bar_width = max(2, right - left)
+        bar_bottom = bar_top + bar_height
+
+        samples = transfer_function.rgb_samples(bar_width)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for offset, rgb in enumerate(samples):
+            painter.setBrush(
+                QColor(int(rgb[0]), int(rgb[1]), int(rgb[2]), 255)
+            )
+            painter.drawRect(left + offset, bar_top, 1, bar_height)
+
+        opacity_samples = transfer_function.opacity_samples(bar_width)
+        fill_path = QPainterPath(QPointF(left, bar_bottom))
+        curve_path = QPainterPath()
+        for offset, opacity in enumerate(opacity_samples):
+            x = left + offset
+            y = bar_bottom - float(opacity) * bar_height
+            if offset == 0:
+                curve_path.moveTo(x, y)
+            else:
+                curve_path.lineTo(x, y)
+            fill_path.lineTo(x, y)
+        fill_path.lineTo(right, bar_bottom)
+        fill_path.closeSubpath()
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(30, 30, 30, 55))
+        painter.drawPath(fill_path)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(20, 20, 20, 230), 3))
+        painter.drawPath(curve_path)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(35, 35, 35, 230), 1))
+        painter.drawRect(QRect(left, bar_top, bar_width, bar_height))
+
+        painter.setPen(QPen(QColor(35, 35, 35, 230), 1))
+        painter.drawLine(left, axis_y, right, axis_y)
+
+        font = QFont()
+        font.setPointSize(14)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor(35, 35, 35, 255), 1))
+        tick_count = 5
+        for index in range(tick_count):
+            ratio = index / (tick_count - 1)
+            value = data_range.min_value + ratio * (
+                data_range.max_value - data_range.min_value
+            )
+            x = int(round(left + ratio * bar_width))
+            painter.drawLine(x, axis_y, x, axis_y - 9)
+            label = self._format_label(value)
+            bounds = painter.boundingRect(
+                QRect(0, 0, 400, 80), Qt.AlignmentFlag.AlignCenter, label
+            )
+            text_x = max(0, min(x - bounds.width() // 2, width - bounds.width()))
+            painter.drawText(text_x, axis_y + 28, label)

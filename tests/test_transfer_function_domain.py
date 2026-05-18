@@ -55,6 +55,65 @@ class TransferFunctionDomainTests(unittest.TestCase):
             [point.position for point in transfer_function.control_points],
         )
 
+    def test_rgba_samples_interpolate_color_and_opacity(self):
+        transfer_function = TransferFunction.from_iterable(
+            [
+                ControlPoint(0.0, "#000000", 0.0),
+                ControlPoint(1.0, "#FFFFFF", 1.0),
+            ]
+        )
+
+        samples = transfer_function.rgba_samples(3)
+
+        self.assertEqual(
+            samples.tolist(),
+            [[0, 0, 0, 0], [128, 128, 128, 128], [255, 255, 255, 255]],
+        )
+
+    def test_rgba_samples_use_endpoint_control_points(self):
+        transfer_function = TransferFunction.from_iterable(
+            [
+                ControlPoint(0.0, "#102030", 0.25),
+                ControlPoint(1.0, "#A0B0C0", 0.75),
+            ]
+        )
+
+        samples = transfer_function.rgba_samples(5)
+
+        self.assertEqual(samples[0].tolist(), [16, 32, 48, 64])
+        self.assertEqual(samples[-1].tolist(), [160, 176, 192, 191])
+
+    def test_rgba_samples_requires_at_least_two_samples(self):
+        with self.assertRaises(ValueError):
+            TransferFunction.base_preset().rgba_samples(1)
+
+    def test_rgb_samples_do_not_include_opacity(self):
+        transfer_function = TransferFunction.from_iterable(
+            [
+                ControlPoint(0.0, "#000000", 0.0),
+                ControlPoint(1.0, "#FFFFFF", 1.0),
+            ]
+        )
+
+        samples = transfer_function.rgb_samples(3)
+
+        self.assertEqual(
+            samples.tolist(),
+            [[0, 0, 0], [128, 128, 128], [255, 255, 255]],
+        )
+
+    def test_opacity_samples_interpolate_opacity_strength(self):
+        transfer_function = TransferFunction.from_iterable(
+            [
+                ControlPoint(0.0, "#000000", 0.0),
+                ControlPoint(1.0, "#FFFFFF", 1.0),
+            ]
+        )
+
+        samples = transfer_function.opacity_samples(3)
+
+        self.assertEqual(samples.tolist(), [0.0, 0.5, 1.0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -88,6 +88,9 @@ class MainWindowPresenter:
         self.view.transfer_editor.save_requested.connect(
             self.on_save_transfer_requested
         )
+        self.view.transfer_editor.export_png_requested.connect(
+            self.on_export_transfer_png_requested
+        )
         self.view.layout_action_focus.triggered.connect(
             lambda: self.view.workspace.apply_layout("focus_3d")
         )
@@ -666,6 +669,16 @@ class MainWindowPresenter:
             )
         except Exception as exc:
             self.error_store.save(exc, context="save_transfer_function")
+
+    def on_export_transfer_png_requested(self) -> None:
+        try:
+            path = self.view.transfer_editor.choose_export_png_path()
+            if not path:
+                return
+            transfer_function, data_range = self._current_transfer_state()
+            self.view.transfer_editor.export_png(path, transfer_function, data_range)
+        except Exception as exc:
+            self.error_store.save(exc, context="export_transfer_function_png")
 
     def on_roi_mode_changed(self, _index: int) -> None:
         mode = self.view.roi_mode_combo.currentData()

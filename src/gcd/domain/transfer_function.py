@@ -169,3 +169,50 @@ class TransferFunction:
             colors.append((value, r, g, b))
             opacities.append((value, point.opacity))
         return colors, opacities
+
+    def rgba_samples(self, sample_count: int) -> np.ndarray:
+        rgb = self.rgb_samples(sample_count).astype(np.uint8)
+        alpha = np.rint(self.opacity_samples(sample_count) * 255.0).astype(np.uint8)
+        return np.column_stack([rgb, alpha])
+
+    def rgb_samples(self, sample_count: int) -> np.ndarray:
+        if sample_count < 2:
+            raise ValueError("Transfer function sampling requires at least 2 samples.")
+
+        positions = np.array(
+            [point.position for point in self.control_points], dtype=np.float32
+        )
+        colors = np.array(
+            [self._rgb_u8(point.color) for point in self.control_points],
+            dtype=np.float32,
+        )
+        sample_positions = np.linspace(0.0, 1.0, int(sample_count), dtype=np.float32)
+        channels = [
+            np.interp(sample_positions, positions, colors[:, channel])
+            for channel in range(3)
+        ]
+        rgb = np.stack(channels, axis=1)
+        return np.clip(np.rint(rgb), 0, 255).astype(np.uint8)
+
+    def opacity_samples(self, sample_count: int) -> np.ndarray:
+        if sample_count < 2:
+            raise ValueError("Transfer function sampling requires at least 2 samples.")
+
+        positions = np.array(
+            [point.position for point in self.control_points], dtype=np.float32
+        )
+        opacities = np.array(
+            [point.opacity for point in self.control_points], dtype=np.float32
+        )
+        sample_positions = np.linspace(0.0, 1.0, int(sample_count), dtype=np.float32)
+        samples = np.interp(sample_positions, positions, opacities)
+        return np.clip(samples, 0.0, 1.0).astype(np.float32)
+
+    @staticmethod
+    def _rgb_u8(color: str) -> tuple[int, int, int]:
+        value = color.strip().lstrip("#")
+        return (
+            int(value[0:2], 16),
+            int(value[2:4], 16),
+            int(value[4:6], 16),
+        )

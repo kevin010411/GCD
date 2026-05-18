@@ -76,12 +76,21 @@ class _TransferEditor:
         self.transfer_function_changed = _Signal()
         self.load_requested = _Signal()
         self.save_requested = _Signal()
+        self.export_png_requested = _Signal()
+        self.export_png_calls = []
+        self._export_path = "transfer_function.png"
 
     def blockSignals(self, *_args):
         pass
 
     def set_transfer_function(self, *_args):
         pass
+
+    def choose_export_png_path(self):
+        return self._export_path
+
+    def export_png(self, *args):
+        self.export_png_calls.append(args)
 
 
 class _Workspace:
@@ -397,8 +406,11 @@ class _FakeTaskRunner:
 
 
 class _FakeErrorStore:
+    def __init__(self) -> None:
+        self.calls = []
+
     def save(self, *_args, **_kwargs):
-        pass
+        self.calls.append((_args, _kwargs))
 
 
 class PresenterMethodTests(unittest.TestCase):
@@ -521,6 +533,44 @@ class PresenterMethodTests(unittest.TestCase):
         presenter.on_transfer_item_renamed(base_item_id, "Renamed Base")
 
         self.assertEqual(presenter.render_items[base_item_id]["display_name"], "Renamed Base")
+
+    def test_export_transfer_png_uses_current_transfer_state(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+        presenter.on_open_file_requested()
+        transfer_function, data_range = presenter._current_transfer_state()
+
+        presenter.on_export_transfer_png_requested()
+
+        self.assertEqual(
+            view.transfer_editor.export_png_calls,
+            [("transfer_function.png", transfer_function, data_range)],
+        )
+
+    def test_export_transfer_png_cancel_does_not_export(self) -> None:
+        view = _FakeView()
+        view.transfer_editor._export_path = ""
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+
+        presenter.on_export_transfer_png_requested()
+
+        self.assertEqual(view.transfer_editor.export_png_calls, [])
 
 
 if __name__ == "__main__":
