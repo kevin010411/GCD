@@ -3,8 +3,17 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Protocol
 
-import torch
-import torch.nn.functional as F
+
+def _torch():
+    import torch
+
+    return torch
+
+
+def _torch_functional():
+    import torch.nn.functional as F
+
+    return F
 
 
 class CamMethod(Protocol):
@@ -71,6 +80,8 @@ class GradCamMethod:
         output_size: tuple[int, int, int],
         method_params: Mapping[str, object] | None = None,
     ) -> torch.Tensor:
+        torch = _torch()
+        F = _torch_functional()
         layers = patch_payload["layers"]
         if not isinstance(layers, dict) or layer not in layers:
             raise KeyError(f"layer '{layer}' 不存在於 CAM payload 中。")
@@ -132,6 +143,8 @@ class GradCAMTestMethod:
         output_size: tuple[int, int, int],
         method_params: Mapping[str, object] | None = None,
     ) -> torch.Tensor:
+        torch = _torch()
+        F = _torch_functional()
         layers = patch_payload["layers"]
         if not isinstance(layers, dict) or layer not in layers:
             raise KeyError(f"layer '{layer}' 不存在於 CAM payload 中。")
@@ -183,6 +196,8 @@ class PerturbationOcclusionMethod:
         output_size: tuple[int, int, int],
         method_params: Mapping[str, object] | None = None,
     ) -> torch.Tensor:
+        torch = _torch()
+        F = _torch_functional()
         layers = patch_payload["layers"]
         if not isinstance(layers, dict) or layer not in layers:
             raise KeyError(f"layer '{layer}' 不存在於 CAM payload 中。")
@@ -192,7 +207,9 @@ class PerturbationOcclusionMethod:
         activation = layer_payload["activation"]
         if not isinstance(activation, torch.Tensor):
             raise TypeError("CAM layer payload 缺少 activation tensor。")
-        occlusion_map = torch.mean(torch.abs(activation[:, n1:n2, ...]), dim=1, keepdim=True)
+        occlusion_map = torch.mean(
+            torch.abs(activation[:, n1:n2, ...]), dim=1, keepdim=True
+        )
         occlusion_map = F.interpolate(occlusion_map, size=output_size, mode="trilinear")
         block_size = int((method_params or {}).get("block_size", 16) or 16)
         kernel = max(1, min(block_size // 8, 7))

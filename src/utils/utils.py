@@ -1,6 +1,5 @@
 import time
 from contextlib import contextmanager
-import torch
 
 
 @contextmanager
@@ -19,8 +18,12 @@ def timer(
     """
     start = time.perf_counter()
     gpu_peak = None
+    torch = None
 
-    if track_gpu and torch.cuda.is_available():
+    if track_gpu:
+        import torch
+
+    if torch is not None and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
 
     try:
@@ -29,7 +32,7 @@ def timer(
         end = time.perf_counter()
         elapsed = end - start
 
-        if track_gpu and torch.cuda.is_available():
+        if torch is not None and torch.cuda.is_available():
             gpu_peak = torch.cuda.max_memory_allocated(device) / (1024**2)  # 轉換為 MB
 
         # 格式化輸出

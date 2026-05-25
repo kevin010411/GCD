@@ -4,20 +4,61 @@ import os
 from copy import deepcopy
 from collections.abc import Callable
 
-import monai.transforms as mt
-import numpy as np
-import torch
-import torch.nn.functional as F
-from mmengine import Config
-
-from src import model as _model_registry  # noqa: F401
-from src.utils import build_model, timer
 from .cam_methods import (
     CamMethod,
     GradCAMTestMethod,
     GradCamMethod,
     PerturbationOcclusionMethod,
 )
+
+
+def _np():
+    import numpy as np
+
+    return np
+
+
+def _torch():
+    import torch
+
+    return torch
+
+
+def _torch_functional():
+    import torch.nn.functional as F
+
+    return F
+
+
+def _monai_transforms():
+    import monai.transforms as mt
+
+    return mt
+
+
+def _config_from_file(config_path: str):
+    from mmengine import Config
+
+    return Config.fromfile(config_path)
+
+
+def _build_model(cfg):
+    import src.model  # noqa: F401
+    from src.utils import build_model
+
+    return build_model(cfg)
+
+
+def _timer(*args, **kwargs):
+    from src.utils.utils import timer
+
+    return timer(*args, **kwargs)
+
+
+def _clone_tensor_or_value(value):
+    if hasattr(value, "detach") and hasattr(value, "clone"):
+        return value.detach().clone()
+    return deepcopy(value)
 
 
 class ModelLoadStateDictError(RuntimeError):
@@ -37,11 +78,11 @@ class GradCamEngine:
     ) -> None:
         self._logger = logger or (lambda message: None)
         self.error_store = error_store
-        self.cfg = Config.fromfile(cfg_path)
+        self.cfg = _config_from_file(cfg_path)
         self._apply_config()
 
-        self.cam = torch.zeros([256, 256, 150], dtype=torch.float32)
-        self.volume_data = torch.zeros([256, 256, 150], dtype=torch.float32)
+        self.cam = None
+        self.volume_data = None
         self.img0 = None
         self.img1 = None
         self.origin_img = None
@@ -76,6 +117,7 @@ class GradCamEngine:
 
     @staticmethod
     def _default_display_metadata() -> dict[str, object]:
+        np = _np()
         affine = np.eye(4, dtype=np.float32)
         direction = np.eye(3, dtype=np.float32)
         return {
@@ -89,7 +131,7 @@ class GradCamEngine:
         }
 
     def set_config(self, config_path: str) -> None:
-        self.cfg = Config.fromfile(config_path)
+        self.cfg = _config_from_file(config_path)
         self._apply_config()
         self._log(f"已設定 Config 為: {config_path}")
 
@@ -107,10 +149,8 @@ class GradCamEngine:
 
     def export_state(self) -> dict[str, object]:
         return {
-            "cam": self.cam.detach().clone() if isinstance(self.cam, torch.Tensor) else deepcopy(self.cam),
-            "volume_data": self.volume_data.detach().clone()
-            if isinstance(self.volume_data, torch.Tensor)
-            else deepcopy(self.volume_data),
+            "cam": _clone_tensor_or_value(self.cam),
+            "volume_data": _clone_tensor_or_value(self.volume_data),
             "img0": deepcopy(self.img0),
             "img1": deepcopy(self.img1),
             "origin_img": deepcopy(self.origin_img),
@@ -155,6 +195,7 @@ class GradCamEngine:
 
     @staticmethod
     def _gradcam_objective(logits: torch.Tensor, target_class: int) -> torch.Tensor:
+        torch = _torch()
         if not (0 <= target_class < logits.size(1)):
             raise ValueError(
                 f"target_class={target_class} 超出模型輸出範圍 0..{logits.size(1) - 1}"
@@ -164,6 +205,8 @@ class GradCamEngine:
         return loss
 
     def load_volume(self, input_file: str | None = None) -> list[str]:
+        torch = _torch()
+        mt = _monai_transforms()
         messages: list[str] = []
         if input_file is not None:
             self.file_name = input_file
@@ -175,7 +218,7 @@ class GradCamEngine:
         )
         self.img0 = mt.EnsureChannelFirst()(self.origin_img, self.origin_meta)
 
-        with timer("資料前處理"):
+        with _timer("資料前處理"):
             try:
                 self.origin_meta = dict(self.img0.meta)
             except Exception:
@@ -236,6 +279,7 @@ class GradCamEngine:
         return messages
 
     def prepare_xai_inputs(self, method: str | None = None) -> None:
+        torch = _torch()
         if not self.file_name or self.img1 is None:
             raise ValueError("尚未載入檔案，無法準備 XAI 輸入。")
         cam_method = self._resolve_cam_method(method)
@@ -243,8 +287,8 @@ class GradCamEngine:
         self.patch = []
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        with timer("載入模型"):
-            model = build_model(self.cfg.model).to(device)
+        with _timer("載入模型"):
+            model = _build_model(self.cfg.model).to(device)
             ckpt_path = self.cfg.ckpt
             if not os.path.exists(ckpt_path):
                 raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
@@ -284,7 +328,7 @@ class GradCamEngine:
         img2 = self.img1.unsqueeze(0).to(device)
         img2.requires_grad_()
 
-        with timer("模型推論", track_gpu=True):
+        with _timer("模型推論", track_gpu=True):
             x0, y0, z0 = list(
                 (
                     torch.tensor(self.img1[0].shape)
@@ -351,6 +395,8 @@ class GradCamEngine:
         method: str | None = None,
         method_params: dict[str, object] | None = None,
     ) -> str:
+        torch = _torch()
+        F = _torch_functional()
         if not self.file_name:
             raise ValueError("尚未載入檔案，無法計算 CAM。")
         cam_method = self._resolve_cam_method(method)
@@ -380,7 +426,7 @@ class GradCamEngine:
             selected_layer = fallback_layer
             self._log(f"指定 layer 不存在，改用可用 layer: {selected_layer}")
 
-        with timer(f"layer={selected_layer} 計算 GradCAM"):
+        with _timer(f"layer={selected_layer} 計算 GradCAM"):
             n2 = min(n2, self.layers[selected_layer])
             shape = list(self.img1[0].shape)
             cam = torch.zeros(shape, dtype=torch.float32)
@@ -488,6 +534,8 @@ class GradCamEngine:
         return tensor.permute(*inverse)
 
     def _resize(self, volume: torch.Tensor, size) -> torch.Tensor:
+        torch = _torch()
+        F = _torch_functional()
         mode = (
             "trilinear"
             if volume.dtype in (torch.float32, torch.float16, torch.float64)
@@ -517,6 +565,7 @@ class GradCamEngine:
         )
 
     def _safe_affine(self):
+        np = _np()
         spacing = None
         if (
             self.origin_meta
@@ -544,6 +593,7 @@ class GradCamEngine:
         return affine
 
     def _extract_affine(self, image) -> np.ndarray:
+        np = _np()
         meta = getattr(image, "meta", None)
         if meta is not None:
             affine = meta.get("affine")
@@ -555,12 +605,14 @@ class GradCamEngine:
     def _shift_affine_for_padding(
         affine: np.ndarray, offsets: list[int] | tuple[int, int, int]
     ) -> np.ndarray:
+        np = _np()
         shifted = np.array(affine, dtype=np.float32, copy=True)
         offset_vector = np.array(offsets, dtype=np.float32)
         shifted[:3, 3] -= shifted[:3, :3] @ offset_vector
         return shifted
 
     def _build_display_metadata(self, affine: np.ndarray) -> dict[str, object]:
+        np = _np()
         axis_order = list(self.PERMUTE)
         display_affine = np.eye(4, dtype=np.float32)
         display_affine[:3, :3] = affine[:3, :3][:, axis_order]
@@ -594,6 +646,7 @@ class GradCamEngine:
     def _save_volume(
         self, tensor: torch.Tensor, stem: str, exist_ok: bool = True
     ) -> None:
+        torch = _torch()
         if tensor is None:
             return
         try:

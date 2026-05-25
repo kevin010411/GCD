@@ -5,8 +5,6 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 import numpy as np
-import torch
-import torch.nn.functional as F
 from PyQt6.QtCore import QMimeData, QPoint, QPointF, QRectF, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QDrag, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
@@ -192,6 +190,9 @@ def _sample_slice_with_affine(
     world_grid: np.ndarray,
     inverse_affine: np.ndarray,
 ) -> np.ndarray:
+    import torch
+    import torch.nn.functional as F
+
     homogeneous = world_grid.reshape(-1, 4)
     sample_voxels = homogeneous @ inverse_affine.T
     sample_voxels = sample_voxels[:, :3].reshape(*world_grid.shape[:2], 3)

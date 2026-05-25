@@ -6,7 +6,7 @@ import vtk
 import vtk.util.numpy_support
 
 from src.gcd.presentation.qt.annotation_geometry import has_meaningful_3d_box_drag
-from src.utils import timer
+from src.utils.utils import timer
 
 
 def _vtk_direction_matrix(metadata: dict[str, object]) -> np.ndarray | None:
@@ -70,6 +70,12 @@ def _build_vtk_image_data(data, spacing, origin, metadata: dict[str, object]):
     return np_array, image_data, vtk_spacing, vtk_origin
 
 
+def _abort_vtk_event(obj) -> None:
+    abort = getattr(obj, "AbortFlagOn", None)
+    if callable(abort):
+        abort()
+
+
 class Roi3DInteractionController:
     def __init__(self, renderer: "VtkVolumeRenderer") -> None:
         self.renderer = renderer
@@ -107,13 +113,13 @@ class Roi3DInteractionController:
                                 tuple(float(v) for v in box["min_corner"]),
                                 tuple(float(v) for v in box["max_corner"]),
                             )
-                obj.AbortFlagOn()
+                _abort_vtk_event(obj)
                 return True
             if kind == "point":
                 self.renderer._emit_annotation_event(
                     "select_annotation", {"annotation_id": picked[1]}
                 )
-                obj.AbortFlagOn()
+                _abort_vtk_event(obj)
                 return True
             if kind == "handle":
                 self.renderer._emit_annotation_event(
@@ -123,7 +129,7 @@ class Roi3DInteractionController:
                     self.renderer.dragging_handle = picked
                     self.renderer.dragging_box_id = picked[1]
                     self.renderer.drag_box_corner_index = picked[2]
-                obj.AbortFlagOn()
+                _abort_vtk_event(obj)
                 return True
 
         world = self.renderer._pick_world(x, y)
@@ -132,14 +138,14 @@ class Roi3DInteractionController:
         voxel = self.renderer._clamp_voxel(self.renderer._world_to_voxel(world))
         if self.mode == "point":
             self.renderer._emit_annotation_event("add_point_3d", {"position": voxel})
-            obj.AbortFlagOn()
+            _abort_vtk_event(obj)
             return True
         if self.mode == "box":
             self.renderer.box_creation_start = voxel
             self.renderer.box_creation_active = True
             self.renderer.preview_box = (voxel, voxel)
             self.renderer._update_preview_box()
-            obj.AbortFlagOn()
+            _abort_vtk_event(obj)
             return True
         return False
 
@@ -163,7 +169,7 @@ class Roi3DInteractionController:
                     "position": voxel,
                 },
             )
-            obj.AbortFlagOn()
+            _abort_vtk_event(obj)
             return True
         if (
             self.renderer.dragging_box_id is not None
@@ -181,7 +187,7 @@ class Roi3DInteractionController:
                     "initial_max_corner": self.renderer.dragging_box_initial_bounds[1],
                 },
             )
-            obj.AbortFlagOn()
+            _abort_vtk_event(obj)
             return True
         if (
             self.mode == "box"
@@ -190,7 +196,7 @@ class Roi3DInteractionController:
         ):
             self.renderer.preview_box = (self.renderer.box_creation_start, voxel)
             self.renderer._update_preview_box()
-            obj.AbortFlagOn()
+            _abort_vtk_event(obj)
             return True
         return False
 
@@ -203,13 +209,13 @@ class Roi3DInteractionController:
             self.renderer.drag_box_corner_index = None
             self.renderer.dragging_box_anchor = None
             self.renderer.dragging_box_initial_bounds = None
-            obj.AbortFlagOn()
+            _abort_vtk_event(obj)
             return True
         if self.renderer.dragging_box_anchor is not None:
             self.renderer.dragging_box_id = None
             self.renderer.dragging_box_anchor = None
             self.renderer.dragging_box_initial_bounds = None
-            obj.AbortFlagOn()
+            _abort_vtk_event(obj)
             return True
         if (
             self.mode != "box"
@@ -231,7 +237,7 @@ class Roi3DInteractionController:
             )
         self.renderer._reset_box_creation_state()
         self.renderer.render()
-        obj.AbortFlagOn()
+        _abort_vtk_event(obj)
         return True
 
 
