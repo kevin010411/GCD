@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from copy import deepcopy
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from ..domain import DatasetInput
 from .cam_methods import (
@@ -12,29 +13,9 @@ from .cam_methods import (
     PerturbationOcclusionMethod,
 )
 
-
-def _np():
+if TYPE_CHECKING:
     import numpy as np
-
-    return np
-
-
-def _torch():
     import torch
-
-    return torch
-
-
-def _torch_functional():
-    import torch.nn.functional as F
-
-    return F
-
-
-def _monai_transforms():
-    import monai.transforms as mt
-
-    return mt
 
 
 def _config_from_file(config_path: str):
@@ -112,7 +93,8 @@ class GradCamEngine:
 
     @staticmethod
     def _default_display_metadata() -> dict[str, object]:
-        np = _np()
+        import numpy as np
+
         affine = np.eye(4, dtype=np.float32)
         direction = np.eye(3, dtype=np.float32)
         return {
@@ -186,7 +168,8 @@ class GradCamEngine:
 
     @staticmethod
     def _gradcam_objective(logits: torch.Tensor, target_class: int) -> torch.Tensor:
-        torch = _torch()
+        import torch
+
         if not (0 <= target_class < logits.size(1)):
             raise ValueError(
                 f"target_class={target_class} 超出模型輸出範圍 0..{logits.size(1) - 1}"
@@ -196,8 +179,9 @@ class GradCamEngine:
         return loss
 
     def load_volume(self, input_file: str | None = None) -> list[str]:
-        torch = _torch()
-        mt = _monai_transforms()
+        import monai.transforms as mt
+        import torch
+
         messages: list[str] = []
         if input_file is not None:
             self.file_name = input_file
@@ -270,7 +254,8 @@ class GradCamEngine:
         return messages
 
     def prepare_xai_inputs(self, method: str | None = None) -> None:
-        torch = _torch()
+        import torch
+
         if not self.file_name or self.img1 is None:
             raise ValueError("尚未載入檔案，無法準備 XAI 輸入。")
         cam_method = self._resolve_cam_method(method)
@@ -386,8 +371,9 @@ class GradCamEngine:
         method: str | None = None,
         method_params: dict[str, object] | None = None,
     ) -> str:
-        torch = _torch()
-        F = _torch_functional()
+        import torch
+        import torch.nn.functional as F
+
         if not self.file_name:
             raise ValueError("尚未載入檔案，無法計算 CAM。")
         cam_method = self._resolve_cam_method(method)
@@ -525,8 +511,9 @@ class GradCamEngine:
         return tensor.permute(*inverse)
 
     def _resize(self, volume: torch.Tensor, size) -> torch.Tensor:
-        torch = _torch()
-        F = _torch_functional()
+        import torch
+        import torch.nn.functional as F
+
         mode = (
             "trilinear"
             if volume.dtype in (torch.float32, torch.float16, torch.float64)
@@ -556,7 +543,8 @@ class GradCamEngine:
         )
 
     def _safe_affine(self):
-        np = _np()
+        import numpy as np
+
         spacing = None
         if (
             self.origin_meta
@@ -584,7 +572,8 @@ class GradCamEngine:
         return affine
 
     def _extract_affine(self, image) -> np.ndarray:
-        np = _np()
+        import numpy as np
+
         meta = getattr(image, "meta", None)
         if meta is not None:
             affine = meta.get("affine")
@@ -596,14 +585,16 @@ class GradCamEngine:
     def _shift_affine_for_padding(
         affine: np.ndarray, offsets: list[int] | tuple[int, int, int]
     ) -> np.ndarray:
-        np = _np()
+        import numpy as np
+
         shifted = np.array(affine, dtype=np.float32, copy=True)
         offset_vector = np.array(offsets, dtype=np.float32)
         shifted[:3, 3] -= shifted[:3, :3] @ offset_vector
         return shifted
 
     def _build_display_metadata(self, affine: np.ndarray) -> dict[str, object]:
-        np = _np()
+        import numpy as np
+
         axis_order = list(self.PERMUTE)
         display_affine = np.eye(4, dtype=np.float32)
         display_affine[:3, :3] = affine[:3, :3][:, axis_order]
@@ -637,7 +628,6 @@ class GradCamEngine:
     def _save_volume(
         self, tensor: torch.Tensor, stem: str, exist_ok: bool = True
     ) -> None:
-        torch = _torch()
         if tensor is None:
             return
         try:
