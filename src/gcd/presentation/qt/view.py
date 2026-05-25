@@ -20,13 +20,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .plugins import (
-    CameraControlsPluginPanel,
-    GradCamPluginPanel,
-    PerturbationPluginPanel,
-    RoiAnnotationPluginPanel,
-    TransferVolumePluginPanel,
-)
+from .plugins import DEFAULT_PLUGIN_DEFINITIONS, PluginDefinition
 from .workspace import WorkspaceHost
 
 
@@ -153,12 +147,10 @@ class MainWindowView(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Grad-CAM Plugin Workspace")
+        self.plugin_definitions: tuple[PluginDefinition, ...] = DEFAULT_PLUGIN_DEFINITIONS
         self.plugin_titles = {
-            "camera": "Camera Controls",
-            "gradcam": "Grad-CAM Compute",
-            "perturbation": "Perturbation-based XAI",
-            "roi": "ROI Annotation",
-            "transfer": "Transfer + Volume",
+            definition.plugin_id: definition.title
+            for definition in self.plugin_definitions
         }
 
         self.central_widget = QWidget()
@@ -193,46 +185,17 @@ class MainWindowView(QMainWindow):
         self.plugin_switch_strip = PluginTabStrip(self)
         self.plugin_button_group = QButtonGroup(self)
         self.plugin_button_group.setExclusive(True)
-        self.gradcam_plugin_button = QPushButton("Grad-CAM")
-        self.gradcam_plugin_button.setObjectName("pluginTabButton")
-        self.gradcam_plugin_button.setCheckable(True)
-        self.gradcam_plugin_button.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
-        )
-        self.camera_plugin_button = QPushButton("Camera")
-        self.camera_plugin_button.setObjectName("pluginTabButton")
-        self.camera_plugin_button.setCheckable(True)
-        self.camera_plugin_button.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
-        )
-        self.perturbation_plugin_button = QPushButton("Perturb")
-        self.perturbation_plugin_button.setObjectName("pluginTabButton")
-        self.perturbation_plugin_button.setCheckable(True)
-        self.perturbation_plugin_button.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
-        )
-        self.transfer_plugin_button = QPushButton("Transfer")
-        self.transfer_plugin_button.setObjectName("pluginTabButton")
-        self.transfer_plugin_button.setCheckable(True)
-        self.transfer_plugin_button.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
-        )
-        self.roi_plugin_button = QPushButton("ROI")
-        self.roi_plugin_button.setObjectName("pluginTabButton")
-        self.roi_plugin_button.setCheckable(True)
-        self.roi_plugin_button.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
-        )
-        self.plugin_button_group.addButton(self.gradcam_plugin_button)
-        self.plugin_button_group.addButton(self.camera_plugin_button)
-        self.plugin_button_group.addButton(self.perturbation_plugin_button)
-        self.plugin_button_group.addButton(self.roi_plugin_button)
-        self.plugin_button_group.addButton(self.transfer_plugin_button)
-        self.plugin_switch_strip.add_button(self.gradcam_plugin_button)
-        self.plugin_switch_strip.add_button(self.camera_plugin_button)
-        self.plugin_switch_strip.add_button(self.perturbation_plugin_button)
-        self.plugin_switch_strip.add_button(self.roi_plugin_button)
-        self.plugin_switch_strip.add_button(self.transfer_plugin_button)
+        self.plugin_buttons: dict[str, QPushButton] = {}
+        for definition in self.plugin_definitions:
+            button = QPushButton(definition.button_label)
+            button.setObjectName("pluginTabButton")
+            button.setCheckable(True)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            self.plugin_button_group.addButton(button)
+            self.plugin_switch_strip.add_button(button)
+            self.plugin_buttons[definition.plugin_id] = button
+            setattr(self, f"{definition.plugin_id}_plugin_button", button)
+        self.transfer_plugin_button = self.plugin_buttons["data"]
         header_layout.addWidget(self.plugin_switch_strip)
         inspector_layout.addWidget(self.inspector_header)
         self.plugin_stack = QStackedWidget()
@@ -242,11 +205,7 @@ class MainWindowView(QMainWindow):
         self.inspector_frame.setMaximumWidth(420)
         body.addWidget(self.inspector_frame)
 
-        self._build_gradcam_plugin()
-        self._build_camera_plugin()
-        self._build_perturbation_plugin()
-        self._build_roi_plugin()
-        self._build_transfer_plugin()
+        self._build_registered_plugins()
         self.set_active_plugin("gradcam")
         self.plugin_switch_strip.scroll_to_start()
 
@@ -308,18 +267,25 @@ class MainWindowView(QMainWindow):
 
         self.main_layout.addWidget(toolbar)
 
-    def _build_gradcam_plugin(self) -> None:
-        self.gradcam_plugin_panel = GradCamPluginPanel(self)
+    def _build_registered_plugins(self) -> None:
+        self.plugin_panels: dict[str, QWidget] = {}
+        for definition in self.plugin_definitions:
+            panel = definition.panel_factory(self)
+            self.plugin_panels[definition.plugin_id] = panel
+            setattr(self, f"{definition.plugin_id}_plugin_panel", panel)
+            self._add_plugin_tab(definition.plugin_id, panel)
+        self._expose_registered_plugin_controls()
+
+    def _expose_registered_plugin_controls(self) -> None:
+        self.gradcam_plugin_panel = self.plugin_panels["gradcam"]
         self.class_spinbox = self.gradcam_plugin_panel.class_spinbox
         self.gradcam_dataset_combo = self.gradcam_plugin_panel.dataset_combo
         self.layer_combo = self.gradcam_plugin_panel.layer_combo
         self.method_combo = self.gradcam_plugin_panel.method_combo
         self.feature_widget = self.gradcam_plugin_panel.feature_widget
         self.gradcam_run_button = self.gradcam_plugin_panel.run_button
-        self._add_plugin_tab("gradcam", self.gradcam_plugin_panel)
 
-    def _build_perturbation_plugin(self) -> None:
-        self.perturbation_plugin_panel = PerturbationPluginPanel(self)
+        self.perturbation_plugin_panel = self.plugin_panels["perturbation"]
         self.perturbation_dataset_combo = self.perturbation_plugin_panel.dataset_combo
         self.perturbation_class_spinbox = self.perturbation_plugin_panel.class_spinbox
         self.perturbation_method_combo = self.perturbation_plugin_panel.method_combo
@@ -328,18 +294,16 @@ class MainWindowView(QMainWindow):
         )
         self.perturbation_stride_spinbox = self.perturbation_plugin_panel.stride_spinbox
         self.perturbation_run_button = self.perturbation_plugin_panel.run_button
-        self._add_plugin_tab("perturbation", self.perturbation_plugin_panel)
 
-    def _build_transfer_plugin(self) -> None:
-        self.transfer_plugin_panel = TransferVolumePluginPanel(self)
-        self.volume_list = self.transfer_plugin_panel.volume_list
-        self.reorder_hint_label = self.transfer_plugin_panel.reorder_hint
-        self.overlay_status_label = self.transfer_plugin_panel.overlay_status
-        self.transfer_editor = self.transfer_plugin_panel.transfer_editor
-        self._add_plugin_tab("transfer", self.transfer_plugin_panel)
+        self.data_plugin_panel = self.plugin_panels["data"]
+        self.transfer_plugin_panel = self.data_plugin_panel
+        self.volume_list = self.data_plugin_panel.volume_list
+        self.delete_volume_button = self.data_plugin_panel.delete_button
+        self.reorder_hint_label = self.data_plugin_panel.reorder_hint
+        self.overlay_status_label = self.data_plugin_panel.overlay_status
+        self.transfer_editor = self.data_plugin_panel.transfer_editor
 
-    def _build_roi_plugin(self) -> None:
-        self.roi_plugin_panel = RoiAnnotationPluginPanel(self)
+        self.roi_plugin_panel = self.plugin_panels["roi"]
         self.roi_mode_combo = self.roi_plugin_panel.mode_combo
         self.roi_point_size_slider = self.roi_plugin_panel.point_size_slider
         self.roi_point_size_spinbox = self.roi_plugin_panel.point_size_spinbox
@@ -349,10 +313,8 @@ class MainWindowView(QMainWindow):
         self.roi_delete_selected_button = self.roi_plugin_panel.delete_selected_button
         self.roi_clear_all_button = self.roi_plugin_panel.clear_all_button
         self.roi_annotation_list = self.roi_plugin_panel.annotation_list
-        self._add_plugin_tab("roi", self.roi_plugin_panel)
 
-    def _build_camera_plugin(self) -> None:
-        self.camera_plugin_panel = CameraControlsPluginPanel(self)
+        self.camera_plugin_panel = self.plugin_panels["camera"]
         self.speed_label = self.camera_plugin_panel.speed_label
         self.speed_slider = self.camera_plugin_panel.speed_slider
         self.start_button = self.camera_plugin_panel.start_button
@@ -360,33 +322,28 @@ class MainWindowView(QMainWindow):
         self.replace_camera_button = self.camera_plugin_panel.reset_camera_button
         self.import_camera_button = self.camera_plugin_panel.import_camera_button
         self.export_camera_button = self.camera_plugin_panel.export_camera_button
-        self._add_plugin_tab("camera", self.camera_plugin_panel)
 
     def _add_plugin_tab(self, plugin_id: str, widget: QWidget) -> None:
         index = self.plugin_stack.addWidget(widget)
         setattr(self, f"{plugin_id}_plugin_index", index)
 
     def set_active_plugin(self, plugin_id: str) -> None:
+        if plugin_id == "transfer":
+            plugin_id = "data"
         index = getattr(self, f"{plugin_id}_plugin_index")
         self.plugin_stack.setCurrentIndex(index)
-        self.gradcam_plugin_button.setChecked(plugin_id == "gradcam")
-        self.camera_plugin_button.setChecked(plugin_id == "camera")
-        self.perturbation_plugin_button.setChecked(plugin_id == "perturbation")
-        self.roi_plugin_button.setChecked(plugin_id == "roi")
-        self.transfer_plugin_button.setChecked(plugin_id == "transfer")
-        active_button = {
-            "gradcam": self.gradcam_plugin_button,
-            "camera": self.camera_plugin_button,
-            "perturbation": self.perturbation_plugin_button,
-            "roi": self.roi_plugin_button,
-            "transfer": self.transfer_plugin_button,
-        }[plugin_id]
+        for current_id, button in self.plugin_buttons.items():
+            button.setChecked(current_id == plugin_id)
+        active_button = self.plugin_buttons[plugin_id]
         self.plugin_switch_strip.center_button(active_button)
-        if plugin_id == "roi":
+        definition = next(
+            item for item in self.plugin_definitions if item.plugin_id == plugin_id
+        )
+        if definition.workspace_mode == "roi":
             self.workspace.set_workspace_mode("roi")
-        elif plugin_id in {"gradcam", "camera", "perturbation"}:
+        elif definition.workspace_mode == "standard":
             self.workspace.set_workspace_mode("standard")
-        reorder_enabled = plugin_id == "transfer" and self.workspace.mode.value == "roi"
+        reorder_enabled = plugin_id == "data" and self.workspace.mode.value == "roi"
         self.volume_list.set_reorder_enabled(reorder_enabled)
         self.reorder_hint_label.setText(
             "Drag to reorder ROI drawing priority."

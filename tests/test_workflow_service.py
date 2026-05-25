@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from src.gcd.application.services import WorkflowService
-from src.gcd.domain import TransferFunction
+from src.gcd.domain import DatasetInput, TransferFunction
 
 
 class _FakeEngine:
@@ -48,25 +48,28 @@ class _FakeEngine:
     def default_feature_size(self):
         return 8
 
-    def export_state(self):
-        return {
-            "file_name": "sample.nii.gz",
-            "target_class": self.target_class,
-            "active_method_id": self.active_method_id,
-            "xai_cache_key": self.xai_cache_key,
-            "layers": dict(self.layers),
-        }
-
-    def restore_state(self, state):
-        self.target_class = state["target_class"]
-        self.active_method_id = state["active_method_id"]
-        self.xai_cache_key = state.get("xai_cache_key", "")
-        self.layers = dict(state.get("layers", self.layers))
-        self.patch = (
-            []
-            if not self.xai_cache_key
-            else [{"method": self.active_method_id, "pred": np.zeros((1, 1, 1), dtype=np.float32)}]
+    def dataset_input(self):
+        return DatasetInput(
+            img0=None,
+            img1=np.array([1.0], dtype=np.float32),
+            origin_img=None,
+            origin_meta={},
+            origin_shape=(1,),
+            img1_spacing=self.img1_spacing,
+            display_metadata=dict(self.display_metadata),
+            layers=dict(self.layers),
+            file_name="sample.nii.gz",
+            target_class=self.target_class,
+            active_method_id=self.active_method_id,
+            xai_cache_key=self.xai_cache_key,
         )
+
+    def load_dataset_input(self, dataset_input):
+        self.target_class = dataset_input.target_class
+        self.active_method_id = dataset_input.active_method_id
+        self.xai_cache_key = dataset_input.xai_cache_key
+        self.layers = dict(dataset_input.layers)
+        self.patch = []
 
     def compute_cam(self, *, layer, n1, n2, method=None, method_params=None):
         self.compute_cam_calls.append((layer, n1, n2, method, method_params))
@@ -120,12 +123,7 @@ class WorkflowServiceTests(unittest.TestCase):
         service = WorkflowService(_FakeEngine())
 
         result = service.compute_dataset_result(
-            {
-                "file_name": "sample.nii.gz",
-                "target_class": 1,
-                "active_method_id": "gradcam",
-                "xai_cache_key": "",
-            },
+            service.engine.dataset_input(),
             target_class=1,
             layer="layer-a",
             n1=0,
@@ -148,13 +146,20 @@ class WorkflowServiceTests(unittest.TestCase):
         service = WorkflowService(_FakeEngine())
 
         service.compute_dataset_result(
-            {
-                "file_name": "sample.nii.gz",
-                "target_class": 1,
-                "active_method_id": "gradcam",
-                "xai_cache_key": "cfg.py|1|gradcam",
-                "layers": {"layer-a": 1},
-            },
+            DatasetInput(
+                img0=None,
+                img1=np.array([1.0], dtype=np.float32),
+                origin_img=None,
+                origin_meta={},
+                origin_shape=(1,),
+                img1_spacing=(1.0, 1.0, 1.0),
+                display_metadata={},
+                layers={"layer-a": 1},
+                file_name="sample.nii.gz",
+                target_class=1,
+                active_method_id="gradcam",
+                xai_cache_key="cfg.py|1|gradcam",
+            ),
             target_class=1,
             layer="layer-a",
             n1=0,
@@ -169,13 +174,20 @@ class WorkflowServiceTests(unittest.TestCase):
         service = WorkflowService(_FakeEngine())
 
         service.compute_dataset_result(
-            {
-                "file_name": "sample.nii.gz",
-                "target_class": 1,
-                "active_method_id": "gradcam",
-                "xai_cache_key": "cfg.py|1|gradcam",
-                "layers": {"layer-a": 8},
-            },
+            DatasetInput(
+                img0=None,
+                img1=np.array([1.0], dtype=np.float32),
+                origin_img=None,
+                origin_meta={},
+                origin_shape=(1,),
+                img1_spacing=(1.0, 1.0, 1.0),
+                display_metadata={},
+                layers={"layer-a": 8},
+                file_name="sample.nii.gz",
+                target_class=1,
+                active_method_id="gradcam",
+                xai_cache_key="cfg.py|1|gradcam",
+            ),
             target_class=1,
             layer="layer-z",
             n1=0,

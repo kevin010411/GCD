@@ -4,6 +4,7 @@ import os
 from copy import deepcopy
 from collections.abc import Callable
 
+from ..domain import DatasetInput
 from .cam_methods import (
     CamMethod,
     GradCAMTestMethod,
@@ -53,12 +54,6 @@ def _timer(*args, **kwargs):
     from src.utils.utils import timer
 
     return timer(*args, **kwargs)
-
-
-def _clone_tensor_or_value(value):
-    if hasattr(value, "detach") and hasattr(value, "clone"):
-        return value.detach().clone()
-    return deepcopy(value)
 
 
 class ModelLoadStateDictError(RuntimeError):
@@ -147,43 +142,39 @@ class GradCamEngine:
     def default_feature_size(self) -> int:
         return list(self.layers.values())[0]
 
-    def export_state(self) -> dict[str, object]:
-        return {
-            "cam": _clone_tensor_or_value(self.cam),
-            "volume_data": _clone_tensor_or_value(self.volume_data),
-            "img0": deepcopy(self.img0),
-            "img1": deepcopy(self.img1),
-            "origin_img": deepcopy(self.origin_img),
-            "origin_meta": deepcopy(self.origin_meta),
-            "origin_shape": deepcopy(self.origin_shape),
-            "img1_spacing": deepcopy(self.img1_spacing),
-            "display_metadata": deepcopy(self.display_metadata),
-            "layers": deepcopy(self.layers),
-            "file_name": self.file_name,
-            "patch": deepcopy(self.patch),
-            "target_class": self.target_class,
-            "active_method_id": self.active_method_id,
-            "model_output": deepcopy(getattr(self, "model_output", None)),
-            "xai_cache_key": self.xai_cache_key,
-        }
+    def dataset_input(self) -> DatasetInput:
+        return DatasetInput(
+            img0=deepcopy(self.img0),
+            img1=deepcopy(self.img1),
+            origin_img=deepcopy(self.origin_img),
+            origin_meta=deepcopy(self.origin_meta),
+            origin_shape=deepcopy(self.origin_shape),
+            img1_spacing=deepcopy(self.img1_spacing),
+            display_metadata=deepcopy(self.display_metadata),
+            layers=deepcopy(self.layers),
+            file_name=self.file_name,
+            target_class=self.target_class,
+            active_method_id=self.active_method_id,
+            xai_cache_key=self.xai_cache_key,
+        )
 
-    def restore_state(self, state: dict[str, object]) -> None:
-        self.cam = deepcopy(state["cam"])
-        self.volume_data = deepcopy(state["volume_data"])
-        self.img0 = deepcopy(state["img0"])
-        self.img1 = deepcopy(state["img1"])
-        self.origin_img = deepcopy(state["origin_img"])
-        self.origin_meta = deepcopy(state["origin_meta"])
-        self.origin_shape = deepcopy(state["origin_shape"])
-        self.img1_spacing = deepcopy(state["img1_spacing"])
-        self.display_metadata = deepcopy(state["display_metadata"])
-        self.layers = deepcopy(state["layers"])
-        self.file_name = str(state["file_name"])
-        self.patch = deepcopy(state["patch"])
-        self.target_class = int(state["target_class"])
-        self.active_method_id = str(state["active_method_id"])
-        self.model_output = deepcopy(state.get("model_output"))
-        self.xai_cache_key = str(state.get("xai_cache_key", ""))
+    def load_dataset_input(self, dataset_input: DatasetInput) -> None:
+        self.cam = None
+        self.volume_data = None
+        self.img0 = deepcopy(dataset_input.img0)
+        self.img1 = deepcopy(dataset_input.img1)
+        self.origin_img = deepcopy(dataset_input.origin_img)
+        self.origin_meta = deepcopy(dataset_input.origin_meta)
+        self.origin_shape = deepcopy(dataset_input.origin_shape)
+        self.img1_spacing = deepcopy(dataset_input.img1_spacing)
+        self.display_metadata = deepcopy(dataset_input.display_metadata)
+        self.layers = deepcopy(dataset_input.layers)
+        self.file_name = str(dataset_input.file_name)
+        self.patch = []
+        self.target_class = int(dataset_input.target_class)
+        self.active_method_id = str(dataset_input.active_method_id)
+        self.model_output = None
+        self.xai_cache_key = str(dataset_input.xai_cache_key)
 
     def _resolve_cam_method(self, method: str | None) -> CamMethod:
         requested = (method or self.active_method_id or GradCamMethod.id).strip().lower()

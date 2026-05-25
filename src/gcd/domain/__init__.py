@@ -1,3 +1,37 @@
 from .transfer_function import ControlPoint, DataRange, TransferFunction
+from .workspace_data import (
+    DatasetAdded,
+    DatasetDeleted,
+    DatasetInput,
+    DatasetRecord,
+    SelectionChanged,
+    SelectionState,
+    TransferChanged,
+    VolumeOrderChanged,
+    VolumeRecord,
+    VolumeDeleted,
+    VolumeUpserted,
+    WorkspaceEvent,
+    XaiComputeRequest,
+    XaiComputeResult,
+)
 
-__all__ = ["ControlPoint", "DataRange", "TransferFunction"]
+__all__ = [
+    "ControlPoint",
+    "DataRange",
+    "DatasetAdded",
+    "DatasetDeleted",
+    "DatasetInput",
+    "DatasetRecord",
+    "SelectionChanged",
+    "SelectionState",
+    "TransferChanged",
+    "TransferFunction",
+    "VolumeOrderChanged",
+    "VolumeRecord",
+    "VolumeDeleted",
+    "VolumeUpserted",
+    "WorkspaceEvent",
+    "XaiComputeRequest",
+    "XaiComputeResult",
+]

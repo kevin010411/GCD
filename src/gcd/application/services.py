@@ -5,7 +5,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..domain import ControlPoint, DataRange, TransferFunction
+from ..domain import (
+    ControlPoint,
+    DataRange,
+    DatasetInput,
+    TransferFunction,
+    VolumeRecord,
+    XaiComputeRequest,
+    XaiComputeResult,
+)
 from ..presentation.qt.workspace_models import (
     AnnotationMode,
     AnnotationState,
@@ -135,7 +143,7 @@ class WorkflowService:
         messages = self.engine.load_volume(file_name)
         return {
             "file_name": file_name,
-            "dataset_state": self.engine.export_state(),
+            "dataset_input": self.engine.dataset_input(),
             "layer_names": list(self.engine.layers.keys()),
             "selected_layer": self.engine.cfg["default_layer"],
             "method_options": self.list_cam_methods(),
@@ -151,7 +159,7 @@ class WorkflowService:
 
     def compute_dataset_result(
         self,
-        dataset_state: dict[str, Any],
+        dataset_input: DatasetInput,
         *,
         target_class: int,
         layer: str | None,
@@ -161,82 +169,95 @@ class WorkflowService:
         result_name: str,
         method_params: dict[str, object] | None = None,
     ) -> dict[str, Any]:
-        self.engine.restore_state(dataset_state)
-        self.engine.set_target_class(target_class)
-        cfg_name = str(getattr(self.engine.cfg, "filename", "") or "")
-        desired_cache_key = f"{cfg_name}|{target_class}|{method}"
-        if self._needs_xai_prepare(
-            dataset_state,
-            desired_cache_key=desired_cache_key,
-            method=method,
-            layer=layer,
-        ):
-            self.engine.prepare_xai_inputs(method=method)
+        result = self.compute_xai(
+            dataset_input,
+            XaiComputeRequest(
+                target_class=target_class,
+                layer=layer,
+                n1=n1,
+                n2=n2,
+                method=method,
+                result_name=result_name,
+                method_params=method_params,
+            ),
+        )
+        return {
+            "dataset_input": result.dataset_input,
+            "layer_names": list(result.layer_names),
+            "selected_layer": result.selected_layer,
+            "method_options": list(result.method_options),
+            "selected_method": result.selected_method,
+            "feature_size": result.feature_size,
+            "volume_data_range": result.volume_data_range,
+            "renderable_item": {
+                "name": result.volume.display_name,
+                "source": result.volume.source,
+                "method_id": result.volume.method_id,
+                "data": result.volume.data,
+                "data_range": result.volume.data_range,
+                "transfer_function": result.volume.transfer_function,
+                "spacing": result.volume.spacing,
+                "metadata": result.volume.metadata,
+                "shape": result.volume.shape,
+            },
+        }
+
+    def compute_xai(
+        self, dataset_input: DatasetInput, request: XaiComputeRequest
+    ) -> XaiComputeResult:
+        self.engine.load_dataset_input(dataset_input)
+        self.engine.set_target_class(request.target_class)
+        self.engine.prepare_xai_inputs(method=request.method)
         selected_layer = self.engine.compute_cam(
-            layer=layer,
-            n1=n1,
-            n2=n2,
-            method=method,
-            method_params=method_params,
+            layer=request.layer,
+            n1=request.n1,
+            n2=request.n2,
+            method=request.method,
+            method_params=request.method_params,
         )
         cam_data_range = DataRange.from_data([self.engine.cam], method="minmax")
         volume_data_range = DataRange.from_data([self.engine.volume_data], method="minmax")
         default_transfer = (
             TransferFunction.heatmap_preset()
-            if method.startswith("grad")
+            if request.method.startswith("grad")
             else TransferFunction.overlay_preset()
         )
-        return {
-            "dataset_state": self.engine.export_state(),
-            "layer_names": list(self.engine.layers.keys()),
-            "selected_layer": selected_layer,
-            "method_options": self.engine.available_cam_methods(
-                "perturbation" if method.startswith("perturb") else "grad"
-            ),
-            "selected_method": self.engine.active_method_id,
-            "feature_size": self.engine.layers[selected_layer],
-            "volume_data_range": volume_data_range,
-            "renderable_item": {
-                "name": result_name,
-                "source": "xai",
-                "method_id": method,
-                "data": self.engine.cam,
-                "data_range": cam_data_range,
-                "transfer_function": default_transfer,
-                "spacing": self.engine.img1_spacing,
-                "metadata": {
-                    **self.engine.display_metadata,
+        method_options = self.engine.available_cam_methods(
+            "perturbation" if request.method.startswith("perturb") else "grad"
+        )
+        return XaiComputeResult(
+            dataset_input=self.engine.dataset_input(),
+            layer_names=tuple(self.engine.layers.keys()),
+            selected_layer=selected_layer,
+            method_options=tuple(method_options),
+            selected_method=self.engine.active_method_id,
+            feature_size=int(self.engine.layers[selected_layer]),
+            volume=VolumeRecord(
+                id="",
+                dataset_id="",
+                display_name=request.result_name,
+                source="xai",
+                method_id=request.method,
+                data=self.engine.cam,
+                data_range=cam_data_range,
+                transfer_function=default_transfer,
+                spacing=tuple(float(v) for v in self.engine.img1_spacing),
+                metadata={**self.engine.display_metadata},
+                shape=tuple(int(v) for v in self.engine.cam.shape),
+                source_base_item_id="",
+                source_shape=tuple(int(v) for v in self.engine.cam.shape),
+                source_spacing=tuple(float(v) for v in self.engine.img1_spacing),
+                source_affine=self.engine.display_metadata.get("affine"),
+                plugin_metadata={
+                    "model_name": (request.method_params or {}).get("model_name"),
+                    "requested_layer": request.layer,
+                    "selected_layer": selected_layer,
+                    "target_class": request.target_class,
+                    "method_params": dict(request.method_params or {}),
                 },
-                "shape": tuple(int(v) for v in self.engine.cam.shape),
-            },
-        }
-
-    def _needs_xai_prepare(
-        self,
-        dataset_state: dict[str, Any],
-        *,
-        desired_cache_key: str,
-        method: str,
-        layer: str | None,
-    ) -> bool:
-        if str(dataset_state.get("xai_cache_key", "")) != desired_cache_key:
-            return True
-        patch = getattr(self.engine, "patch", None)
-        if not patch:
-            return True
-        if any(not isinstance(item, dict) or item.get("method") != method for item in patch):
-            return True
-        layers = getattr(self.engine, "layers", {}) or {}
-        default_layer = str(self.engine.cfg["default_layer"])
-        if (
-            len(layers) == 1
-            and default_layer in layers
-            and int(layers.get(default_layer, 0) or 0) <= 1
-        ):
-            return True
-        if layer and layer not in layers:
-            return True
-        return False
+            ),
+            volume_data_range=volume_data_range,
+        )
 
     def compute_cam(
         self,

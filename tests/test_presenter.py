@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from src.gcd.application.presenter import MainWindowPresenter
-from src.gcd.domain import DataRange, TransferFunction
+from src.gcd.domain import DataRange, DatasetInput, TransferFunction, VolumeRecord, XaiComputeResult
 
 
 class _Signal:
@@ -64,11 +64,16 @@ class _VolumeList:
         self.visibility_changed = _Signal()
         self.order_changed = _Signal()
         self.name_changed = _Signal()
+        self.delete_requested = _Signal()
         self.items = []
+        self.selected = None
 
     def set_volumes(self, items, selected):
         self.items = items
         self.selected = selected
+
+    def selected_volume_id(self):
+        return self.selected
 
 
 class _TransferEditor:
@@ -217,6 +222,7 @@ class _FakeView:
         self.save_screenshot_button = _Control()
         self.record_video_button = _Control()
         self.volume_list = _VolumeList()
+        self.delete_volume_button = _Control()
         self.transfer_editor = _TransferEditor()
         self.layout_action_focus = _Control()
         self.layout_action_triple = _Control()
@@ -349,11 +355,22 @@ class _FakeWorkflow:
         self.load_calls.append((file_name, target_class, method))
         return {
             "file_name": file_name,
-            "dataset_state": {
-                "file_name": file_name,
-                "target_class": target_class,
-                "active_method_id": method or "gradcam",
-            },
+            "dataset_input": DatasetInput(
+                img0=None,
+                img1=np.array([1.0], dtype=np.float32),
+                origin_img=None,
+                origin_meta={},
+                origin_shape=(1,),
+                img1_spacing=(1.5, 1.5, 2.0),
+                display_metadata={
+                    "vtk_origin": (1.0, 2.0, 3.0),
+                    "affine": np.eye(4, dtype=np.float32),
+                },
+                layers={"layer-a": 8},
+                file_name=file_name,
+                target_class=target_class,
+                active_method_id=method or "gradcam",
+            ),
             "layer_names": ["layer-a"],
             "selected_layer": "layer-a",
             "method_options": [{"id": "gradcam", "name": "Grad-CAM"}],
@@ -371,33 +388,38 @@ class _FakeWorkflow:
                 "messages": [],
         }
 
-    def compute_dataset_result(self, dataset_state, **kwargs):
-        self.compute_calls.append((dataset_state, kwargs))
-        return {
-            "dataset_state": {
-                **dataset_state,
-                "active_method_id": kwargs["method"],
-            },
-            "layer_names": ["layer-a"],
-            "selected_layer": "layer-a",
-            "method_options": [{"id": kwargs["method"], "name": kwargs["method"]}],
-            "selected_method": kwargs["method"],
-            "feature_size": 8,
-            "renderable_item": {
-                "name": kwargs["result_name"],
-                "source": "xai",
-                "method_id": kwargs["method"],
-                "data": np.array([1, 2, 3], dtype=np.float32),
-                "data_range": DataRange(0.0, 1.0),
-                "transfer_function": TransferFunction.heatmap_preset(),
-                "spacing": (1.0, 1.0, 1.0),
-                "metadata": {
+    def compute_xai(self, dataset_input, request):
+        self.compute_calls.append((dataset_input, request))
+        data = np.array([1, 2, 3], dtype=np.float32)
+        return XaiComputeResult(
+            dataset_input=dataset_input,
+            layer_names=("layer-a",),
+            selected_layer="layer-a",
+            method_options=({"id": request.method, "name": request.method},),
+            selected_method=request.method,
+            feature_size=8,
+            volume=VolumeRecord(
+                id="",
+                dataset_id="",
+                display_name=request.result_name,
+                source="xai",
+                method_id=request.method,
+                data=data,
+                data_range=DataRange(0.0, 1.0),
+                transfer_function=TransferFunction.heatmap_preset(),
+                spacing=(1.0, 1.0, 1.0),
+                metadata={
                     "vtk_origin": (0.0, 0.0, 0.0),
                     "affine": np.eye(4, dtype=np.float32),
                 },
-                "shape": (3,),
-            },
-        }
+                shape=(3,),
+                source_base_item_id="",
+                source_shape=(3,),
+                source_spacing=(1.0, 1.0, 1.0),
+                source_affine=np.eye(4, dtype=np.float32),
+            ),
+            volume_data_range=DataRange(0.0, 1.0),
+        )
 
 
 class _FakeTaskRunner:
@@ -460,8 +482,40 @@ class PresenterMethodTests(unittest.TestCase):
         self.assertEqual(len(workflow.compute_calls), 1)
         self.assertEqual(len(presenter.volume_order), 2)
         self.assertIn(
-            "sample.nii_unet_grad方法",
+            "sample.nii_unet_layer-a_class2",
             presenter.render_items[presenter.volume_order[1]]["display_name"],
+        )
+
+    def test_gradcam_run_adds_new_result_each_time(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+        presenter.on_open_file_requested()
+        dataset_id = presenter.dataset_order[0]
+        view._selected_grad_dataset = dataset_id
+
+        presenter.on_gradcam_run_requested()
+        first_result_id = presenter.volume_order[1]
+        presenter.on_gradcam_run_requested()
+
+        self.assertEqual(len(workflow.compute_calls), 2)
+        self.assertEqual(len(presenter.volume_order), 3)
+        self.assertEqual(presenter.volume_order[1], first_result_id)
+        self.assertNotEqual(presenter.volume_order[2], first_result_id)
+        self.assertEqual(
+            presenter.datasets[dataset_id]["result_ids"],
+            [first_result_id, presenter.volume_order[2]],
+        )
+        self.assertEqual(
+            presenter.render_items[presenter.volume_order[2]]["display_name"],
+            "sample.nii_unet_layer-a_class2_2",
         )
 
     def test_visibility_change_renders_immediately(self) -> None:
@@ -483,6 +537,29 @@ class PresenterMethodTests(unittest.TestCase):
         self.assertGreater(view.workspace.render_calls, 0)
         self.assertEqual(view.workspace.sync_camera_calls, 1)
         self.assertEqual(view.workspace.replace_camera_calls, 0)
+
+    def test_delete_volume_removes_prediction_and_rerenders(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+        presenter.on_open_file_requested()
+        dataset_id = presenter.dataset_order[0]
+        view._selected_grad_dataset = dataset_id
+        presenter.on_gradcam_run_requested()
+        result_id = presenter.volume_order[1]
+
+        presenter.on_volume_delete_requested(result_id)
+
+        self.assertEqual(presenter.volume_order, [presenter.datasets[dataset_id].base_volume_id])
+        self.assertNotIn(result_id, presenter.render_items)
+        self.assertGreater(len(view.workspace.show_volumes_calls), 0)
 
     def test_replace_camera_uses_workspace(self) -> None:
         view = _FakeView()

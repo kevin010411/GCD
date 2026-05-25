@@ -9,16 +9,17 @@ Current plugins:
 - `roi_annotation.py`
   - `RoiAnnotationPluginPanel`
 - `transfer_volume.py`
-  - `TransferVolumePluginPanel`
+  - `TransferVolumePluginPanel` (Data plugin)
 
 These files only define the panel UI and the controls exposed by each plugin.
 Behavior is still connected in:
 
 - `src/gcd/application/presenter.py`
 
-The plugin switch area is still assembled in:
+The plugin switch area is assembled from the registry in:
 
 - `src/gcd/presentation/qt/view.py`
+- `src/gcd/presentation/qt/plugins/registry.py`
 
 ## Current structure
 

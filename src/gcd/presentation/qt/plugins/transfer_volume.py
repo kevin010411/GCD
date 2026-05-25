@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
-from PyQt6.QtWidgets import QLabel, QListWidget, QListWidgetItem
+from PyQt6.QtWidgets import QLabel, QListWidget, QListWidgetItem, QPushButton
 
 from ..widgets.transfer_function_editor import TransferFunctionEditor
 from .base import PluginPanel
@@ -13,6 +13,7 @@ class VolumeListWidget(QListWidget):
     visibility_changed = pyqtSignal(str, bool)
     order_changed = pyqtSignal(list)
     name_changed = pyqtSignal(str, str)
+    delete_requested = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -108,6 +109,11 @@ class VolumeListWidget(QListWidget):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Delete and self.currentItem() is not None:
+            volume_id = str(self.currentItem().data(Qt.ItemDataRole.UserRole))
+            self.delete_requested.emit(volume_id)
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Space and self.currentItem() is not None:
             self._toggle_item_visibility(self.currentItem())
             event.accept()
@@ -160,8 +166,8 @@ class VolumeListWidget(QListWidget):
 class TransferVolumePluginPanel(PluginPanel):
     def __init__(self, parent=None) -> None:
         super().__init__(
-            "Transfer + Volume",
-            "Manage visible volumes, choose one to edit, and reorder ROI drawing priority.",
+            "Data",
+            "Manage loaded data, prediction volumes, visibility, order, and transfer functions.",
             parent,
         )
 
@@ -171,6 +177,10 @@ class TransferVolumePluginPanel(PluginPanel):
         self.volume_list = VolumeListWidget(self)
         self.volume_list.setMinimumHeight(120)
         self.content_layout.addWidget(self.volume_list)
+
+        self.delete_button = QPushButton("Delete")
+        self.content_layout.addWidget(self.delete_button)
+        self.delete_button.clicked.connect(self._emit_delete_selected)
 
         self.reorder_hint = QLabel("Reorder is enabled only in ROI mode.")
         self.content_layout.addWidget(self.reorder_hint)
@@ -184,3 +194,8 @@ class TransferVolumePluginPanel(PluginPanel):
         self.transfer_editor.setMaximumHeight(320)
         self.content_layout.addWidget(self.transfer_editor, 0)
         self.content_layout.addStretch()
+
+    def _emit_delete_selected(self) -> None:
+        volume_id = self.volume_list.selected_volume_id()
+        if volume_id:
+            self.volume_list.delete_requested.emit(volume_id)

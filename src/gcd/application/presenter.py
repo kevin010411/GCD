@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from uuid import uuid4
 
 from ..domain import DataRange, TransferFunction
+from ..domain.workspace_data import WorkspaceEvent, XaiComputeRequest
+from .workspace_store import WorkspaceDataStore
 
 
 class MainWindowPresenter:
@@ -27,16 +28,40 @@ class MainWindowPresenter:
 
         self.is_recording = False
         self.rotation_speed = 0.5
-        self.datasets: dict[str, dict[str, object]] = {}
-        self.dataset_order: list[str] = []
-        self.render_items: dict[str, dict[str, object]] = {}
-        self.volume_order: list[str] = []
-        self.volume_visibility: dict[str, bool] = {}
-        self.selected_transfer_volume_id = ""
+        self.data_store = WorkspaceDataStore()
         self.selected_grad_dataset_id = ""
         self.selected_perturbation_dataset_id = ""
+        self.data_store.subscribe(self._on_store_event)
 
         self._connect_signals()
+
+    @property
+    def datasets(self) -> dict[str, dict[str, object]]:
+        return self.data_store.datasets
+
+    @property
+    def dataset_order(self) -> list[str]:
+        return self.data_store.dataset_order
+
+    @property
+    def render_items(self) -> dict[str, dict[str, object]]:
+        return self.data_store.render_items
+
+    @property
+    def volume_order(self) -> list[str]:
+        return self.data_store.volume_order
+
+    @property
+    def volume_visibility(self) -> dict[str, bool]:
+        return self.data_store.volume_visibility
+
+    @property
+    def selected_transfer_volume_id(self) -> str:
+        return self.data_store.selected_transfer_volume_id
+
+    @selected_transfer_volume_id.setter
+    def selected_transfer_volume_id(self, value: str) -> None:
+        self.data_store.selected_transfer_volume_id = value
 
     def _connect_signals(self) -> None:
         self.view.model_combo.currentIndexChanged.connect(self.on_model_changed)
@@ -79,6 +104,8 @@ class MainWindowPresenter:
         )
         self.view.volume_list.order_changed.connect(self.on_volume_order_changed)
         self.view.volume_list.name_changed.connect(self.on_transfer_item_renamed)
+        if hasattr(self.view.volume_list, "delete_requested"):
+            self.view.volume_list.delete_requested.connect(self.on_volume_delete_requested)
         self.view.transfer_editor.transfer_function_changed.connect(
             self.on_transfer_function_changed
         )
@@ -107,7 +134,7 @@ class MainWindowPresenter:
             lambda: self.view.set_active_plugin("gradcam")
         )
         self.view.transfer_plugin_button.clicked.connect(
-            lambda: self.view.set_active_plugin("transfer")
+            lambda: self.view.set_active_plugin("data")
         )
         self.view.camera_plugin_button.clicked.connect(
             lambda: self.view.set_active_plugin("camera")
@@ -184,58 +211,28 @@ class MainWindowPresenter:
 
     def _on_input_loaded(self, result: dict) -> None:
         dataset_id = f"dataset-{uuid4().hex[:8]}"
-        dataset_name = Path(str(result["file_name"])).stem
-        base_item_id = f"{dataset_id}:base"
-        self.datasets[dataset_id] = {
-            "id": dataset_id,
-            "name": dataset_name,
-            "file_name": result["file_name"],
-            "engine_state": result["dataset_state"],
-            "layer_names": list(result["layer_names"]),
-            "selected_layer": result["selected_layer"],
-            "feature_size": result["feature_size"],
-            "base_item_id": base_item_id,
-            "result_ids": [],
-            "base_shape": tuple(int(v) for v in result["volume_data"].shape),
-            "base_spacing": tuple(float(v) for v in result["spacing"]),
-            "display_metadata": dict(result["display_metadata"]),
-            "xai_cache_key": str(result["dataset_state"].get("xai_cache_key", "")),
-        }
-        self.dataset_order.append(dataset_id)
-        self.render_items[base_item_id] = {
-            "id": base_item_id,
-            "dataset_id": dataset_id,
-            "display_name": dataset_name,
-            "source": "base",
-            "method_id": "base",
-            "data": result["volume_data"],
-            "data_range": result["volume_data_range"],
-            "transfer_function": result["volume_transfer_function"],
-            "spacing": result["spacing"],
-            "metadata": {
-                **result["display_metadata"],
-                "volume_id": base_item_id,
-            },
-            "shape": tuple(int(v) for v in result["volume_data"].shape),
-            "source_base_item_id": base_item_id,
-            "source_shape": tuple(int(v) for v in result["volume_data"].shape),
-            "source_spacing": tuple(float(v) for v in result["spacing"]),
-            "source_affine": result["display_metadata"].get("affine"),
-        }
-        self.volume_order.append(base_item_id)
-        self.volume_visibility[base_item_id] = True
+        self.data_store.add_loaded_dataset(dataset_id, result)
         self.selected_grad_dataset_id = dataset_id
         self.selected_perturbation_dataset_id = dataset_id
-        if not self.selected_transfer_volume_id:
-            self.selected_transfer_volume_id = base_item_id
-        self._sync_dataset_controls()
-        self._sync_gradcam_controls()
-        self._sync_volume_list()
-        self._sync_transfer_editor()
-        self._render_current_items()
         self.view.workspace.sync_camera_to_visible_volumes()
         self.view.workspace.store_initial_camera()
         self.view.set_rotation_running(True)
+
+    def _on_store_event(self, event: WorkspaceEvent) -> None:
+        if event.name in {"dataset_added", "volume_upserted", "dataset_deleted", "volume_deleted"}:
+            self._sync_selected_dataset_ids()
+            self._sync_dataset_controls()
+            self._sync_gradcam_controls()
+            self._sync_volume_list()
+            self._sync_transfer_editor()
+            self._render_current_items()
+        elif event.name in {"volume_order_changed", "transfer_changed"}:
+            self._sync_volume_list()
+            self._render_current_items()
+        elif event.name == "selection_changed":
+            self._sync_transfer_editor()
+            self._sync_volume_list()
+            self.apply_transfer_function_to_renderer()
 
     def _on_background_error(self, exc: Exception) -> None:
         if not getattr(exc, "skip_error_store", False):
@@ -244,9 +241,9 @@ class MainWindowPresenter:
 
     def _render_current_items(self) -> None:
         self.view.workspace.show_volumes(
-            self._ordered_volume_payloads(),
-            self._ordered_volume_spacing(),
-            self._ordered_volume_metadata(),
+            self.data_store.ordered_volume_payloads(),
+            self.data_store.ordered_volume_spacing(),
+            self.data_store.ordered_volume_metadata(),
         )
         self.apply_transfer_function_to_renderer()
         self.refresh_roi_panel()
@@ -268,15 +265,17 @@ class MainWindowPresenter:
         if dataset is None:
             return
         self.task_runner.submit(
-            lambda: self.workflow.compute_dataset_result(
-                dataset["engine_state"],
-                target_class=target_class,
-                layer=layer,
-                n1=n1,
-                n2=n2,
-                method=method,
-                result_name=result_name,
-                method_params=method_params,
+            lambda: self.workflow.compute_xai(
+                dataset.input_state,
+                XaiComputeRequest(
+                    target_class=target_class,
+                    layer=layer,
+                    n1=n1,
+                    n2=n2,
+                    method=method,
+                    result_name=result_name,
+                    method_params=method_params,
+                ),
             ),
             on_success or (lambda result: self._on_xai_result_loaded(dataset_id, result)),
             self._on_background_error,
@@ -297,15 +296,13 @@ class MainWindowPresenter:
     def on_transfer_function_changed(
         self, transfer_function: TransferFunction, data_range: DataRange
     ) -> None:
-        current = self.render_items.get(self._current_transfer_target())
-        if current is None:
+        if not self.data_store.update_current_transfer_state(
+            transfer_function, data_range
+        ):
             return
-        current["transfer_function"] = transfer_function
-        current["data_range"] = data_range
-        self.apply_transfer_function_to_renderer()
 
     def apply_transfer_function_to_renderer(self) -> None:
-        for index, volume_id in enumerate(self.volume_order):
+        for index, volume_id in enumerate(self.data_store.volume_order):
             item = self.render_items.get(volume_id)
             if item is None:
                 continue
@@ -321,19 +318,16 @@ class MainWindowPresenter:
             )
         self.view.workspace.render()
         self.view.workspace.set_workspace_payload(
-            renderable_items=self._workspace_renderable_items()
+            renderable_items=self.data_store.workspace_renderable_items()
         )
         self.view.set_overlay_status_message(self.view.workspace.overlay_status_message())
         self.refresh_roi_panel()
 
     def _current_transfer_target(self) -> str:
-        return self.selected_transfer_volume_id
+        return self.data_store.current_transfer_target()
 
     def _current_transfer_state(self) -> tuple[TransferFunction, DataRange]:
-        current = self.render_items.get(self._current_transfer_target())
-        if current is None:
-            return TransferFunction.base_preset(), DataRange(0.0, 1.0)
-        return current["transfer_function"], current["data_range"]
+        return self.data_store.current_transfer_state()
 
     def _sync_transfer_editor(self) -> None:
         transfer_function, data_range = self._current_transfer_state()
@@ -343,66 +337,51 @@ class MainWindowPresenter:
 
     def _sync_volume_list(self) -> None:
         self.view.volume_list.set_volumes(
-            [
-                {
-                    "id": volume_id,
-                    "display_name": self._volume_display_name(volume_id),
-                    "visible": self._volume_visible(volume_id),
-                }
-                for volume_id in self.volume_order
-            ],
-            self.selected_transfer_volume_id,
+            self.data_store.volume_list_items(),
+            self.data_store.selected_transfer_volume_id,
         )
 
     def _volume_visible(self, volume_id: str) -> bool:
-        return bool(self.volume_visibility.get(volume_id, True))
+        return self.data_store.volume_visible(volume_id)
 
     def _volume_display_name(self, volume_id: str) -> str:
-        item = self.render_items.get(volume_id)
-        if item is None:
-            return volume_id
-        return str(item["display_name"])
+        return self.data_store.volume_display_name(volume_id)
 
     def _ordered_volume_payloads(self) -> list[object]:
-        return [self.render_items[volume_id]["data"] for volume_id in self.volume_order]
+        return self.data_store.ordered_volume_payloads()
 
     def _ordered_volume_spacing(self) -> list[tuple[float, float, float]]:
-        return [self.render_items[volume_id]["spacing"] for volume_id in self.volume_order]
+        return self.data_store.ordered_volume_spacing()
 
     def _ordered_volume_metadata(self) -> list[dict[str, object]]:
-        return [
-            dict(self.render_items[volume_id]["metadata"])
-            for volume_id in self.volume_order
-        ]
+        return self.data_store.ordered_volume_metadata()
 
     def on_transfer_volume_selected(self, volume_id: str) -> None:
-        self.selected_transfer_volume_id = volume_id
-        self._sync_transfer_editor()
+        self.data_store.set_selected_transfer_volume(volume_id)
 
     def on_volume_visibility_changed(self, volume_id: str, visible: bool) -> None:
-        self.volume_visibility[volume_id] = bool(visible)
-        self._sync_volume_list()
-        self.apply_transfer_function_to_renderer()
+        self.data_store.set_volume_visibility(volume_id, visible)
 
     def on_volume_order_changed(self, ordered_ids: list[str]) -> None:
-        if ordered_ids:
-            self.volume_order = list(ordered_ids)
-        self._sync_volume_list()
-        self._render_current_items()
+        self.data_store.set_volume_order(ordered_ids)
 
     def on_transfer_item_renamed(self, volume_id: str, name: str) -> None:
-        item = self.render_items.get(volume_id)
-        if item is None:
+        if not self.data_store.rename_item(volume_id, name):
             return
-        item["display_name"] = name
-        self._sync_volume_list()
+
+    def on_volume_delete_requested(self, volume_id: str) -> None:
+        self.data_store.delete_volume(volume_id)
 
     def on_gradcam_dataset_changed(self, _index: int) -> None:
         self.selected_grad_dataset_id = self.view.selected_gradcam_dataset()
+        self.data_store.set_active_dataset("gradcam", self.selected_grad_dataset_id)
         self._sync_gradcam_controls()
 
     def on_perturbation_dataset_changed(self, _index: int) -> None:
         self.selected_perturbation_dataset_id = self.view.selected_perturbation_dataset()
+        self.data_store.set_active_dataset(
+            "perturbation", self.selected_perturbation_dataset_id
+        )
 
     def on_gradcam_run_requested(self) -> None:
         dataset_id = self.view.selected_gradcam_dataset()
@@ -413,18 +392,30 @@ class MainWindowPresenter:
             return
         method = self.view.selected_method()
         model_name = self._selected_model_name()
-        result_name = f"{dataset['name']}_{model_name}_grad方法"
+        layer = self.view.selected_layer()
+        target_class = self.view.selected_class()
+        result_name = self._prediction_result_name(
+            dataset.name,
+            model_name,
+            layer,
+            target_class,
+        )
         n1, n2 = self.view.feature_range()
-        if int(dataset.get("feature_size", 0) or 0) <= 0 or n2 <= n1:
+        if int(dataset.feature_size or 0) <= 0 or n2 <= n1:
             n1, n2 = 0, 999
         self._run_dataset_method(
             dataset_id,
-            target_class=self.view.selected_class(),
-            layer=self.view.selected_layer(),
+            target_class=target_class,
+            layer=layer,
             n1=n1,
             n2=n2,
             method=method,
             result_name=result_name,
+            method_params={
+                "model_name": model_name,
+                "requested_layer": layer,
+                "target_class": target_class,
+            },
         )
 
     def on_perturbation_run_requested(self) -> None:
@@ -436,76 +427,53 @@ class MainWindowPresenter:
             return
         method = self.view.selected_perturbation_method()
         model_name = self._selected_model_name()
-        result_name = f"{dataset['name']}_{model_name}_perturb方法"
+        target_class = self.view.perturbation_class_spinbox.value()
+        result_name = self._prediction_result_name(
+            dataset.name,
+            model_name,
+            dataset.selected_layer,
+            target_class,
+        )
         self._run_dataset_method(
             dataset_id,
-            target_class=self.view.perturbation_class_spinbox.value(),
-            layer=dataset["selected_layer"],
+            target_class=target_class,
+            layer=dataset.selected_layer,
             n1=0,
-            n2=int(dataset["feature_size"]),
+            n2=int(dataset.feature_size),
             method=method,
             result_name=result_name,
             method_params={
                 "block_size": self.view.perturbation_block_size_spinbox.value(),
                 "stride": self.view.perturbation_stride_spinbox.value(),
+                "model_name": model_name,
+                "requested_layer": dataset.selected_layer,
+                "target_class": target_class,
             },
         )
 
-    def _on_xai_result_loaded(self, dataset_id: str, result: dict) -> None:
-        dataset = self.datasets.get(dataset_id)
-        if dataset is None:
+    def _on_xai_result_loaded(self, dataset_id: str, result) -> None:
+        result_id = self.data_store.upsert_xai_result(dataset_id, result)
+        if result_id is None:
             return
-        dataset["engine_state"] = result["dataset_state"]
-        dataset["layer_names"] = list(result["layer_names"])
-        dataset["selected_layer"] = result["selected_layer"]
-        dataset["feature_size"] = result["feature_size"]
-        dataset["xai_cache_key"] = str(result["dataset_state"].get("xai_cache_key", ""))
-        item_payload = result["renderable_item"]
-        result_id = f"{dataset_id}:{item_payload['method_id']}:{uuid4().hex[:6]}"
-        self.render_items[result_id] = {
-            "id": result_id,
-            "dataset_id": dataset_id,
-            "display_name": item_payload["name"],
-            "source": item_payload["source"],
-            "method_id": item_payload["method_id"],
-            "data": item_payload["data"],
-            "data_range": item_payload["data_range"],
-            "transfer_function": item_payload["transfer_function"],
-            "spacing": item_payload["spacing"],
-            "metadata": {
-                **item_payload["metadata"],
-                "volume_id": result_id,
-            },
-            "shape": tuple(int(v) for v in item_payload["shape"]),
-            "source_base_item_id": dataset["base_item_id"],
-            "source_shape": tuple(dataset["base_shape"]),
-            "source_spacing": tuple(dataset["base_spacing"]),
-            "source_affine": dataset["display_metadata"].get("affine"),
-        }
-        dataset["result_ids"].append(result_id)
-        self.volume_order.append(result_id)
-        self.volume_visibility[result_id] = True
-        self.selected_transfer_volume_id = result_id
-        if item_payload["method_id"].startswith("grad"):
-            self.view.set_method_options(result["method_options"], result["selected_method"])
-            self.view.set_layer_options(result["layer_names"], result["selected_layer"])
-            self.view.set_feature_size(result["feature_size"])
+        method_id = (
+            result.volume.method_id
+            if hasattr(result, "volume")
+            else str(result["renderable_item"]["method_id"])
+        )
+        if method_id.startswith("grad"):
+            self.view.set_method_options(
+                list(result.method_options), result.selected_method
+            )
+            self.view.set_layer_options(list(result.layer_names), result.selected_layer)
+            self.view.set_feature_size(result.feature_size)
         else:
             self.view.set_perturbation_method_options(
-                result["method_options"],
-                result["selected_method"],
+                list(result.method_options),
+                result.selected_method,
             )
-        self._sync_dataset_controls()
-        self._sync_gradcam_controls()
-        self._sync_volume_list()
-        self._sync_transfer_editor()
-        self._render_current_items()
 
     def _sync_dataset_controls(self) -> None:
-        options = [
-            {"id": dataset_id, "name": str(self.datasets[dataset_id]["name"])}
-            for dataset_id in self.dataset_order
-        ]
+        options = self.data_store.dataset_options()
         self.view.set_gradcam_dataset_options(options, self.selected_grad_dataset_id)
         self.view.set_perturbation_dataset_options(
             options, self.selected_perturbation_dataset_id
@@ -517,36 +485,33 @@ class MainWindowPresenter:
             self.view.set_layer_options([], "")
             self.view.set_feature_size(0)
             return
-        self.view.set_layer_options(dataset["layer_names"], dataset["selected_layer"])
-        self.view.set_feature_size(int(dataset["feature_size"]))
+        self.view.set_layer_options(list(dataset.layer_names), dataset.selected_layer)
+        self.view.set_feature_size(int(dataset.feature_size))
+
+    def _sync_selected_dataset_ids(self) -> None:
+        if self.selected_grad_dataset_id not in self.datasets:
+            self.selected_grad_dataset_id = self.data_store.active_dataset_id("gradcam")
+        if self.selected_perturbation_dataset_id not in self.datasets:
+            self.selected_perturbation_dataset_id = self.data_store.active_dataset_id(
+                "perturbation"
+            )
 
     def _workspace_renderable_items(self) -> list[dict[str, object]]:
-        return [
-            {
-                "id": item_id,
-                "dataset_id": self.render_items[item_id]["dataset_id"],
-                "display_name": self.render_items[item_id]["display_name"],
-                "source": self.render_items[item_id]["source"],
-                "method_id": self.render_items[item_id]["method_id"],
-                "data": self.render_items[item_id]["data"],
-                "data_range": self.render_items[item_id]["data_range"],
-                "transfer_function": self.render_items[item_id]["transfer_function"],
-                "visible": self._volume_visible(item_id),
-                "spacing": self.render_items[item_id]["spacing"],
-                "metadata": self.render_items[item_id]["metadata"],
-                "shape": self.render_items[item_id]["shape"],
-                "source_base_item_id": self.render_items[item_id]["source_base_item_id"],
-                "source_shape": self.render_items[item_id]["source_shape"],
-                "source_spacing": self.render_items[item_id]["source_spacing"],
-                "source_affine": self.render_items[item_id]["source_affine"],
-                "is_focus": item_id == self.selected_transfer_volume_id,
-            }
-            for item_id in self.volume_order
-        ]
+        return self.data_store.workspace_renderable_items()
 
     def _selected_model_name(self) -> str:
         path = self.view.selected_model_path()
         return Path(path).stem if path else "model"
+
+    @staticmethod
+    def _prediction_result_name(
+        dataset_name: str,
+        model_name: str,
+        layer: str | None,
+        target_class: int,
+    ) -> str:
+        selected_layer = str(layer or "layer")
+        return f"{dataset_name}_{model_name}_{selected_layer}_class{int(target_class)}"
 
     def on_rotation_speed_changed(self, value: int) -> None:
         self.rotation_speed = min(value / 10.0, 10.0)
@@ -644,12 +609,11 @@ class MainWindowPresenter:
             transfer_function, _loaded_range = self.transfer_service.load(
                 path, canvas_width=width, canvas_height=height
             )
-            current = self.render_items.get(self._current_transfer_target())
-            if current is None:
+            _current_tf, data_range = self._current_transfer_state()
+            if not self.data_store.update_current_transfer_state(
+                transfer_function, data_range
+            ):
                 return
-            current["transfer_function"] = transfer_function
-            self._sync_transfer_editor()
-            self.apply_transfer_function_to_renderer()
         except Exception as exc:
             self.error_store.save(exc, context="load_transfer_function")
 

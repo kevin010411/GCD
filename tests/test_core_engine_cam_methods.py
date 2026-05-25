@@ -53,6 +53,33 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         self.assertGreaterEqual(float(engine.cam.min()), 0.0)
         self.assertLessEqual(float(engine.cam.max()), 1.0)
 
+    def test_dataset_input_omits_large_result_and_patch_payloads(self) -> None:
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine.cam = torch.ones((2, 2, 2), dtype=torch.float32)
+        engine.volume_data = torch.ones((2, 2, 2), dtype=torch.float32)
+        engine.img0 = None
+        engine.img1 = torch.ones((1, 2, 2, 2), dtype=torch.float32)
+        engine.origin_img = None
+        engine.origin_meta = {}
+        engine.origin_shape = (2, 2, 2)
+        engine.img1_spacing = (1.0, 1.0, 1.0)
+        engine.display_metadata = {}
+        engine.layers = {"layer-a": 1}
+        engine.file_name = "sample.nii.gz"
+        engine.patch = [{"method": "gradcam", "layers": {"layer-a": torch.ones(1)}}]
+        engine.target_class = 1
+        engine.active_method_id = "gradcam"
+        engine.model_output = torch.zeros((2, 2, 2), dtype=torch.float32)
+        engine.xai_cache_key = "cfg.py|1|gradcam"
+
+        state = engine.dataset_input()
+
+        self.assertFalse(hasattr(state, "cam"))
+        self.assertFalse(hasattr(state, "volume_data"))
+        self.assertFalse(hasattr(state, "patch"))
+        self.assertFalse(hasattr(state, "model_output"))
+        self.assertIsNotNone(state.img1)
+
 
 if __name__ == "__main__":
     unittest.main()
