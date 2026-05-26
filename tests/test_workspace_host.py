@@ -190,10 +190,10 @@ class WorkspaceHostTests(unittest.TestCase):
         host.mode = WorkspaceMode.STANDARD
         host.layout_changed = types.SimpleNamespace(emit=lambda *_args: None)
 
-        WorkspaceHost.apply_layout(host, "quad")
+        WorkspaceHost.apply_layout(host, "3d_only")
 
-        self.assertEqual(host.standard_workspace.applied_layouts, ["quad"])
-        self.assertEqual(host.roi_workspace.applied_layouts, ["quad"])
+        self.assertEqual(host.standard_workspace.applied_layouts, ["3d_only"])
+        self.assertEqual(host.roi_workspace.applied_layouts, ["3d_only"])
 
     def test_switching_to_roi_uses_standard_workspace_layout(self) -> None:
         host = self._make_host(initialized=False, previous_count=0)

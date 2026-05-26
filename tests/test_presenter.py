@@ -229,7 +229,7 @@ class _FakeView:
         self.transfer_editor = _TransferEditor()
         self.layout_action_focus = _Control()
         self.layout_action_triple = _Control()
-        self.layout_action_quad = _Control()
+        self.layout_action_3d_only = _Control()
         self.layout_action_compare = _Control()
         self.gradcam_plugin_button = _Control()
         self.transfer_plugin_button = _Control()

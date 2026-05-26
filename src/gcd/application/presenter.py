@@ -129,8 +129,8 @@ class MainWindowPresenter:
         self.view.layout_action_triple.triggered.connect(
             lambda: self.view.workspace.apply_layout("triple_slice")
         )
-        self.view.layout_action_quad.triggered.connect(
-            lambda: self.view.workspace.apply_layout("quad")
+        self.view.layout_action_3d_only.triggered.connect(
+            lambda: self.view.workspace.apply_layout("3d_only")
         )
         self.view.layout_action_compare.triggered.connect(
             lambda: self.view.workspace.apply_layout("compare")

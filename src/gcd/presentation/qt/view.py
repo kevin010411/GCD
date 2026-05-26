@@ -244,13 +244,13 @@ class MainWindowView(QMainWindow):
 
         self.layout_action_focus = QAction("Focus 3D", self)
         self.layout_action_triple = QAction("3D + Triple Slice", self)
-        self.layout_action_quad = QAction("Quad", self)
+        self.layout_action_3d_only = QAction("3D Only", self)
         self.layout_action_compare = QAction("Compare", self)
         self.workbench_menu.clear()
         self.workbench_menu.addSection("Layouts")
         self.workbench_menu.addAction(self.layout_action_focus)
         self.workbench_menu.addAction(self.layout_action_triple)
-        self.workbench_menu.addAction(self.layout_action_quad)
+        self.workbench_menu.addAction(self.layout_action_3d_only)
         self.workbench_menu.addAction(self.layout_action_compare)
         layout.addWidget(self.workbench_button)
 

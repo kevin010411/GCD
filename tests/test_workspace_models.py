@@ -15,12 +15,12 @@ class WorkspaceModelTests(unittest.TestCase):
         preset_ids = {preset.id for preset in presets}
         self.assertEqual(
             preset_ids,
-            {"focus_3d", "triple_slice", "quad", "compare"},
+            {"focus_3d", "triple_slice", "3d_only", "compare"},
         )
         slot_counts = {preset.id: len(collect_slots(preset.root_node)) for preset in presets}
         self.assertEqual(slot_counts["focus_3d"], 3)
         self.assertEqual(slot_counts["triple_slice"], 4)
-        self.assertEqual(slot_counts["quad"], 4)
+        self.assertEqual(slot_counts["3d_only"], 1)
         self.assertEqual(slot_counts["compare"], 3)
 
     def test_slice_index_is_clamped_to_orientation_dimension(self):

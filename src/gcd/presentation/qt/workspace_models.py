@@ -97,7 +97,9 @@ class AnnotationState:
 class SharedImagingState:
     renderable_items: list[object] = field(default_factory=list)
     camera_snapshot: dict[str, tuple[float, float, float] | float] | None = None
-    slice_snapshot: dict[str, tuple[SliceOrientation, int]] = field(default_factory=dict)
+    slice_snapshot: dict[str, tuple[SliceOrientation, int]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +131,9 @@ class WorkspaceState:
     tiles: dict[str, ViewerTileState] = field(default_factory=dict)
     slot_assignments: dict[str, str] = field(default_factory=dict)
     splitter_sizes: dict[str, dict[str, list[int]]] = field(default_factory=dict)
-    slot_slice_states: dict[str, dict[str, SliceViewState]] = field(default_factory=dict)
+    slot_slice_states: dict[str, dict[str, SliceViewState]] = field(
+        default_factory=dict
+    )
     active_viewer_id: str | None = None
     volume_shape: tuple[int, int, int] = (0, 0, 0)
     crosshair_position: tuple[int, int, int] = (0, 0, 0)
@@ -208,46 +212,14 @@ def default_layout_presets() -> tuple[LayoutPreset, ...]:
             ),
         ),
         LayoutPreset(
-            id="quad",
-            title="Quad",
+            id="3d_only",
+            title="3D Only",
             root_node=LayoutNode(
-                node_id="quad_root",
-                orientation=SplitterOrientation.VERTICAL,
-                sizes=(50, 50),
+                node_id="3d_only_root",
+                orientation=SplitterOrientation.HORIZONTAL,
+                sizes=(100,),
                 children=(
-                    LayoutNode(
-                        node_id="quad_top",
-                        orientation=SplitterOrientation.HORIZONTAL,
-                        sizes=(50, 50),
-                        children=(
-                            LayoutSlot("slot-3d-main", ViewerType.VOLUME_3D, role="primary_3d"),
-                            LayoutSlot(
-                                "slot-slice-top-right",
-                                ViewerType.SLICE_2D,
-                                default_orientation=SliceOrientation.AXIAL,
-                                role="slice_a",
-                            ),
-                        ),
-                    ),
-                    LayoutNode(
-                        node_id="quad_bottom",
-                        orientation=SplitterOrientation.HORIZONTAL,
-                        sizes=(50, 50),
-                        children=(
-                            LayoutSlot(
-                                "slot-slice-bottom-left",
-                                ViewerType.SLICE_2D,
-                                default_orientation=SliceOrientation.CORONAL,
-                                role="slice_b",
-                            ),
-                            LayoutSlot(
-                                "slot-slice-bottom-right",
-                                ViewerType.SLICE_2D,
-                                default_orientation=SliceOrientation.SAGITTAL,
-                                role="slice_c",
-                            ),
-                        ),
-                    ),
+                    LayoutSlot("slot-3d-main", ViewerType.VOLUME_3D, role="primary_3d"),
                 ),
             ),
         ),
@@ -259,7 +231,6 @@ def default_layout_presets() -> tuple[LayoutPreset, ...]:
                 orientation=SplitterOrientation.VERTICAL,
                 sizes=(64, 36),
                 children=(
-                    LayoutSlot("slot-3d-main", ViewerType.VOLUME_3D, role="primary_3d"),
                     LayoutNode(
                         node_id="compare_slices",
                         orientation=SplitterOrientation.HORIZONTAL,
@@ -279,6 +250,7 @@ def default_layout_presets() -> tuple[LayoutPreset, ...]:
                             ),
                         ),
                     ),
+                    LayoutSlot("slot-3d-main", ViewerType.VOLUME_3D, role="primary_3d"),
                 ),
             ),
         ),

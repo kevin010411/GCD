@@ -191,13 +191,13 @@ STYLESHEET = """
         color: #EFF5FF;
     }
 
-    QComboBox#modelCombo {
+    QComboBox#modelCombo, QComboBox#softCombo {
         background: #121B28;
         border: 1px solid #33465F;
         color: #F3F6FB;
     }
 
-    QComboBox#modelCombo:hover {
+    QComboBox#modelCombo:hover, QComboBox#softCombo:hover {
         background: #162131;
         border: 1px solid #46617F;
     }
