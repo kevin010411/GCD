@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING
 from ..domain import DatasetInput
 from .cam_methods import (
     CamMethod,
+    CamPatchContext,
     GradCAMTestMethod,
     GradCamMethod,
     PerturbationOcclusionMethod,
+    SaliencyMapMethod,
 )
 
 if TYPE_CHECKING:
@@ -74,6 +76,7 @@ class GradCamEngine:
         self.cam_methods: dict[str, CamMethod] = {
             GradCamMethod.id: GradCamMethod(self._gradcam_objective),
             GradCAMTestMethod.id: GradCAMTestMethod(),
+            SaliencyMapMethod.id: SaliencyMapMethod(self._gradcam_objective),
             PerturbationOcclusionMethod.id: PerturbationOcclusionMethod(),
         }
         self.active_method_id = GradCamMethod.id
@@ -115,11 +118,18 @@ class GradCamEngine:
     def set_target_class(self, target_class: int) -> None:
         self.target_class = int(target_class)
 
-    def available_cam_methods(self, category: str | None = None) -> list[dict[str, str]]:
+    def available_cam_methods(self, category: str | None = None) -> list[dict[str, object]]:
         methods = self.cam_methods.values()
         if category is not None:
             methods = [method for method in methods if getattr(method, "category", "") == category]
-        return [{"id": method.id, "name": method.display_name} for method in methods]
+        return [
+            {
+                "id": method.id,
+                "name": method.display_name,
+                "uses_layer_controls": bool(method.uses_layer_controls),
+            }
+            for method in methods
+        ]
 
     def default_feature_size(self) -> int:
         return list(self.layers.values())[0]
@@ -324,16 +334,24 @@ class GradCamEngine:
             ]
             for x, y in tiles:
                 model.zero_grad(set_to_none=True)
-                logits = model(
-                    img2[
-                        ...,
-                        x0 + x : x0 + x + self.SIZE,
-                        y0 + y : y0 + y + self.SIZE,
-                        z0 : z0 + self.SIZE,
-                    ]
+                if img2.grad is not None:
+                    img2.grad = None
+                tile_input = img2[
+                    ...,
+                    x0 + x : x0 + x + self.SIZE,
+                    y0 + y : y0 + y + self.SIZE,
+                    z0 : z0 + self.SIZE,
+                ]
+                tile_input.retain_grad()
+                logits = model(tile_input)
+
+                layers_by_name = (
+                    model.layers
+                    if hasattr(model, "layers") and model.layers
+                    else {}
                 )
 
-                if not hasattr(model, "layers") or not model.layers:
+                if cam_method.uses_layer_controls and not layers_by_name:
                     raise RuntimeError(
                         "model.layers 未填入。請確認模型 forward 在 requires_grad=True 時"
                         "會保留中間層與梯度。"
@@ -341,13 +359,21 @@ class GradCamEngine:
 
                 self.patch.append(
                     cam_method.collect_patch_data(
-                        model.layers,
-                        logits,
-                        self.target_class,
+                        CamPatchContext(
+                            input_tensor=tile_input,
+                            logits=logits,
+                            layers_by_name=layers_by_name,
+                            target_class=self.target_class,
+                            objective=self._gradcam_objective,
+                        )
                     )
                 )
 
-            self.layers = {key: value.size(1) for key, value in model.layers.items()}
+            self.layers = (
+                {key: value.size(1) for key, value in model.layers.items()}
+                if cam_method.uses_layer_controls
+                else {"input": 1}
+            )
             self.model_output = logits.detach().to("cpu")
 
             del model, img2, pth, sd
@@ -390,18 +416,22 @@ class GradCamEngine:
             raise ValueError("目前的 CAM patch payload 與指定 method 不一致。")
         self.active_method_id = cam_method.id
 
-        available_layers = list(self.layers.keys())
-        selected_layer = layer or self.cfg["default_layer"]
-        if selected_layer not in self.layers:
-            fallback_layer = (
-                self.cfg["default_layer"]
-                if self.cfg["default_layer"] in self.layers
-                else (available_layers[0] if available_layers else "")
-            )
-            if not fallback_layer:
-                raise RuntimeError("目前沒有可用的 CAM layer。")
-            selected_layer = fallback_layer
-            self._log(f"指定 layer 不存在，改用可用 layer: {selected_layer}")
+        if cam_method.uses_layer_controls:
+            available_layers = list(self.layers.keys())
+            selected_layer = layer or self.cfg["default_layer"]
+            if selected_layer not in self.layers:
+                fallback_layer = (
+                    self.cfg["default_layer"]
+                    if self.cfg["default_layer"] in self.layers
+                    else (available_layers[0] if available_layers else "")
+                )
+                if not fallback_layer:
+                    raise RuntimeError("目前沒有可用的 CAM layer。")
+                selected_layer = fallback_layer
+                self._log(f"指定 layer 不存在，改用可用 layer: {selected_layer}")
+        else:
+            selected_layer = "input"
+            self.layers = {"input": 1}
 
         with _timer(f"layer={selected_layer} 計算 GradCAM"):
             n2 = min(n2, self.layers[selected_layer])

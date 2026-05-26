@@ -152,6 +152,7 @@ class MainWindowView(QMainWindow):
             definition.plugin_id: definition.title
             for definition in self.plugin_definitions
         }
+        self._method_options_by_id: dict[str, dict[str, object]] = {}
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -372,17 +373,19 @@ class MainWindowView(QMainWindow):
         self.layer_combo.blockSignals(False)
 
     def set_method_options(
-        self, options: list[dict[str, str]], selected: str | None
+        self, options: list[dict[str, object]], selected: str | None
     ) -> None:
         self.method_combo.blockSignals(True)
         self.method_combo.clear()
+        self._method_options_by_id = {str(option["id"]): dict(option) for option in options}
         for option in options:
-            self.method_combo.addItem(option["name"], option["id"])
+            self.method_combo.addItem(str(option["name"]), str(option["id"]))
         if selected:
             index = self.method_combo.findData(selected)
             if index >= 0:
                 self.method_combo.setCurrentIndex(index)
         self.method_combo.blockSignals(False)
+        self.set_gradcam_layer_controls_enabled(self.selected_method_uses_layer_controls())
 
     def set_gradcam_dataset_options(
         self, options: list[dict[str, str]], selected: str | None
@@ -426,6 +429,10 @@ class MainWindowView(QMainWindow):
     def set_feature_size(self, size: int) -> None:
         self.feature_widget.set_size(size)
 
+    def set_gradcam_layer_controls_enabled(self, enabled: bool) -> None:
+        self.layer_combo.setEnabled(enabled)
+        self.feature_widget.setEnabled(enabled)
+
     def set_rotation_speed_label(self, speed: float) -> None:
         self.speed_label.setText(f"Rotation Speed: {speed:.1f}")
 
@@ -448,6 +455,12 @@ class MainWindowView(QMainWindow):
     def selected_method(self) -> str:
         current = self.method_combo.currentData()
         return str(current or "gradcam")
+
+    def selected_method_uses_layer_controls(self) -> bool:
+        option = self._method_options_by_id.get(self.selected_method())
+        if option is None:
+            return True
+        return bool(option.get("uses_layer_controls", True))
 
     def selected_gradcam_dataset(self) -> str:
         current = self.gradcam_dataset_combo.currentData()

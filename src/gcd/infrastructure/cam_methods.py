@@ -1,33 +1,29 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from collections.abc import Callable, Mapping
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-
-def _torch():
+if TYPE_CHECKING:
     import torch
 
-    return torch
 
-
-def _torch_functional():
-    import torch.nn.functional as F
-
-    return F
+@dataclass(frozen=True)
+class CamPatchContext:
+    input_tensor: torch.Tensor
+    logits: torch.Tensor
+    layers_by_name: Mapping[str, torch.Tensor]
+    target_class: int
+    objective: Callable[[torch.Tensor, int], torch.Tensor]
 
 
 class CamMethod(Protocol):
     id: str
     display_name: str
     category: str
+    uses_layer_controls: bool
 
-    def collect_patch_data(
-        self,
-        layers_by_name: Mapping[str, torch.Tensor],
-        logits: torch.Tensor,
-        target_class: int,
-    ) -> dict[str, object]:
-        ...
+    def collect_patch_data(self, context: CamPatchContext) -> dict[str, object]: ...
 
     def build_tile_cam(
         self,
@@ -37,39 +33,38 @@ class CamMethod(Protocol):
         n2: int,
         output_size: tuple[int, int, int],
         method_params: Mapping[str, object] | None = None,
-    ) -> torch.Tensor:
-        ...
+    ) -> torch.Tensor: ...
 
 
 class GradCamMethod:
     id = "gradcam"
     display_name = "Grad-CAM"
     category = "grad"
+    uses_layer_controls = True
 
-    def __init__(
-        self, objective: Callable[[torch.Tensor, int], torch.Tensor]
-    ) -> None:
+    def __init__(self, objective: Callable[[torch.Tensor, int], torch.Tensor]) -> None:
         self._objective = objective
 
-    def collect_patch_data(
-        self,
-        layers_by_name: Mapping[str, torch.Tensor],
-        logits: torch.Tensor,
-        target_class: int,
-    ) -> dict[str, object]:
-        loss = self._objective(logits, target_class)
+    def collect_patch_data(self, context: CamPatchContext) -> dict[str, object]:
+        loss = self._objective(context.logits, context.target_class)
         loss.backward()
         return {
             "method": self.id,
-            "pred": logits.detach().to("cpu"),
+            "pred": context.logits.detach().to("cpu"),
             "layers": {
                 key: {
                     "activation": value.detach().to("cpu"),
-                    "gradient": value.grad.detach().to("cpu"),
+                    "gradient": self._required_gradient(value),
                 }
-                for key, value in layers_by_name.items()
+                for key, value in context.layers_by_name.items()
             },
         }
+
+    @staticmethod
+    def _required_gradient(value: torch.Tensor) -> torch.Tensor:
+        if value.grad is None:
+            raise RuntimeError("CAM layer gradient 未產生，無法建立 Grad-CAM payload。")
+        return value.grad.detach().to("cpu")
 
     def build_tile_cam(
         self,
@@ -80,8 +75,9 @@ class GradCamMethod:
         output_size: tuple[int, int, int],
         method_params: Mapping[str, object] | None = None,
     ) -> torch.Tensor:
-        torch = _torch()
-        F = _torch_functional()
+        import torch
+        import torch.nn.functional as F
+
         layers = patch_payload["layers"]
         if not isinstance(layers, dict) or layer not in layers:
             raise KeyError(f"layer '{layer}' 不存在於 CAM payload 中。")
@@ -95,9 +91,7 @@ class GradCamMethod:
         ):
             raise TypeError("CAM layer payload 缺少 activation/gradient tensor。")
 
-        gradcam = torch.sum(
-            (activation * gradient)[:, n1:n2, ...], dim=1, keepdim=True
-        )
+        gradcam = torch.sum((activation * gradient)[:, n1:n2, ...], dim=1, keepdim=True)
         return F.interpolate(gradcam, size=output_size, mode="trilinear")
 
 
@@ -105,6 +99,7 @@ class GradCAMTestMethod:
     id = "gradcam_test"
     display_name = "Grad-CAM Test"
     category = "grad"
+    uses_layer_controls = True
 
     @staticmethod
     def _objective(logits: torch.Tensor, target_class: int) -> torch.Tensor:
@@ -114,25 +109,26 @@ class GradCAMTestMethod:
             )
         return logits[0, target_class].sum()
 
-    def collect_patch_data(
-        self,
-        layers_by_name: Mapping[str, torch.Tensor],
-        logits: torch.Tensor,
-        target_class: int,
-    ) -> dict[str, object]:
-        loss = self._objective(logits, target_class)
+    def collect_patch_data(self, context: CamPatchContext) -> dict[str, object]:
+        loss = self._objective(context.logits, context.target_class)
         loss.backward()
         return {
             "method": self.id,
-            "pred": logits.detach().to("cpu"),
+            "pred": context.logits.detach().to("cpu"),
             "layers": {
                 key: {
                     "activation": value.detach().to("cpu"),
-                    "gradient": value.grad.detach().to("cpu"),
+                    "gradient": self._required_gradient(value),
                 }
-                for key, value in layers_by_name.items()
+                for key, value in context.layers_by_name.items()
             },
         }
+
+    @staticmethod
+    def _required_gradient(value: torch.Tensor) -> torch.Tensor:
+        if value.grad is None:
+            raise RuntimeError("CAM layer gradient 未產生，無法建立 Grad-CAM payload。")
+        return value.grad.detach().to("cpu")
 
     def build_tile_cam(
         self,
@@ -143,8 +139,9 @@ class GradCAMTestMethod:
         output_size: tuple[int, int, int],
         method_params: Mapping[str, object] | None = None,
     ) -> torch.Tensor:
-        torch = _torch()
-        F = _torch_functional()
+        import torch
+        import torch.nn.functional as F
+
         layers = patch_payload["layers"]
         if not isinstance(layers, dict) or layer not in layers:
             raise KeyError(f"layer '{layer}' 不存在於 CAM payload 中。")
@@ -164,26 +161,66 @@ class GradCAMTestMethod:
         return F.interpolate(test_cam, size=output_size, mode="trilinear")
 
 
+class SaliencyMapMethod:
+    """
+    基於分類的SaliencyMap，拓展於三維分割
+    _objective由外部傳入
+    """
+
+    id = "saliency_map"
+    display_name = "Saliency Map"
+    category = "grad"
+    uses_layer_controls = False
+
+    def __init__(self, objective: Callable[[torch.Tensor, int], torch.Tensor]) -> None:
+        self._objective = objective
+
+    def collect_patch_data(self, context: CamPatchContext) -> dict[str, object]:
+        loss = self._objective(context.logits, context.target_class)
+        loss.backward()
+        if context.input_tensor.grad is None:
+            raise RuntimeError("input gradient 未產生，無法建立 Saliency Map payload。")
+        return {
+            "method": self.id,
+            "pred": context.logits.detach().to("cpu"),
+            "input_gradient": context.input_tensor.grad.detach().to("cpu"),
+        }
+
+    def build_tile_cam(
+        self,
+        patch_payload: dict[str, object],
+        layer: str,
+        n1: int,
+        n2: int,
+        output_size: tuple[int, int, int],
+        method_params: Mapping[str, object] | None = None,
+    ) -> torch.Tensor:
+        import torch
+        import torch.nn.functional as F
+
+        gradient = patch_payload["input_gradient"]
+        if not isinstance(gradient, torch.Tensor):
+            raise TypeError("Saliency Map payload 缺少 input_gradient tensor。")
+
+        saliency = torch.amax(torch.abs(gradient), dim=1, keepdim=True)
+        return F.interpolate(saliency, size=output_size, mode="trilinear")
+
+
 class PerturbationOcclusionMethod:
     id = "perturb_occlusion"
     display_name = "Occlusion"
     category = "perturbation"
+    uses_layer_controls = True
 
-    def collect_patch_data(
-        self,
-        layers_by_name: Mapping[str, torch.Tensor],
-        logits: torch.Tensor,
-        target_class: int,
-    ) -> dict[str, object]:
-        del target_class
+    def collect_patch_data(self, context: CamPatchContext) -> dict[str, object]:
         return {
             "method": self.id,
-            "pred": logits.detach().to("cpu"),
+            "pred": context.logits.detach().to("cpu"),
             "layers": {
                 key: {
                     "activation": value.detach().to("cpu"),
                 }
-                for key, value in layers_by_name.items()
+                for key, value in context.layers_by_name.items()
             },
         }
 
@@ -196,8 +233,9 @@ class PerturbationOcclusionMethod:
         output_size: tuple[int, int, int],
         method_params: Mapping[str, object] | None = None,
     ) -> torch.Tensor:
-        torch = _torch()
-        F = _torch_functional()
+        import torch
+        import torch.nn.functional as F
+
         layers = patch_payload["layers"]
         if not isinstance(layers, dict) or layer not in layers:
             raise KeyError(f"layer '{layer}' 不存在於 CAM payload 中。")

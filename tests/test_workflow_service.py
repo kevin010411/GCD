@@ -28,8 +28,21 @@ class _FakeEngine:
 
     def available_cam_methods(self, category=None):
         if category == "perturbation":
-            return [{"id": "perturb_occlusion", "name": "Occlusion"}]
-        return [{"id": "gradcam", "name": "Grad-CAM"}]
+            return [
+                {
+                    "id": "perturb_occlusion",
+                    "name": "Occlusion",
+                    "uses_layer_controls": True,
+                }
+            ]
+        return [
+            {"id": "gradcam", "name": "Grad-CAM", "uses_layer_controls": True},
+            {
+                "id": "saliency_map",
+                "name": "Saliency Map",
+                "uses_layer_controls": False,
+            },
+        ]
 
     def load_volume(self, file_name):
         self.load_volume_calls.append(file_name)
@@ -39,7 +52,7 @@ class _FakeEngine:
         self.prepare_calls.append(method)
         self.active_method_id = method or "gradcam"
         self.patch = [{"method": self.active_method_id, "pred": np.zeros((1, 1, 1), dtype=np.float32)}]
-        self.layers = dict(self.prepared_layers)
+        self.layers = {"input": 1} if self.active_method_id == "saliency_map" else dict(self.prepared_layers)
         self.xai_cache_key = f"cfg.py|{self.target_class}|{self.active_method_id}"
 
     def set_target_class(self, target_class):
@@ -74,6 +87,9 @@ class _FakeEngine:
     def compute_cam(self, *, layer, n1, n2, method=None, method_params=None):
         self.compute_cam_calls.append((layer, n1, n2, method, method_params))
         self.active_method_id = method or "gradcam"
+        if self.active_method_id == "saliency_map":
+            self.layers = {"input": 1}
+            return "input"
         return "layer-a"
 
 
@@ -98,7 +114,15 @@ class WorkflowServiceTests(unittest.TestCase):
         )
         self.assertEqual(result["selected_method"], "gradcam")
         self.assertEqual(
-            result["method_options"], [{"id": "gradcam", "name": "Grad-CAM"}]
+            result["method_options"],
+            [
+                {"id": "gradcam", "name": "Grad-CAM", "uses_layer_controls": True},
+                {
+                    "id": "saliency_map",
+                    "name": "Saliency Map",
+                    "uses_layer_controls": False,
+                },
+            ],
         )
         self.assertEqual(service.engine.compute_cam_calls, [(None, 0, 8, None, None)])
 
@@ -197,6 +221,29 @@ class WorkflowServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(service.engine.prepare_calls, ["gradcam"])
+
+    def test_compute_dataset_result_uses_input_metadata_for_saliency_map(self) -> None:
+        service = WorkflowService(_FakeEngine())
+
+        result = service.compute_dataset_result(
+            service.engine.dataset_input(),
+            target_class=1,
+            layer="layer-a",
+            n1=0,
+            n2=8,
+            method="saliency_map",
+            result_name="sample_model_saliency",
+        )
+
+        self.assertEqual(service.engine.prepare_calls, ["saliency_map"])
+        self.assertEqual(
+            service.engine.compute_cam_calls,
+            [("layer-a", 0, 8, "saliency_map", None)],
+        )
+        self.assertEqual(result["layer_names"], ["input"])
+        self.assertEqual(result["selected_layer"], "input")
+        self.assertEqual(result["feature_size"], 1)
+        self.assertEqual(result["selected_method"], "saliency_map")
 
 
 if __name__ == "__main__":

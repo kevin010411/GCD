@@ -3,7 +3,11 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from src.gcd.infrastructure.cam_methods import GradCamMethod
+from src.gcd.infrastructure.cam_methods import (
+    CamPatchContext,
+    GradCamMethod,
+    SaliencyMapMethod,
+)
 from src.gcd.infrastructure.core_engine import GradCamEngine
 
 
@@ -13,7 +17,15 @@ class GradCamMethodTests(unittest.TestCase):
         logits = layer.mean(dim=(2, 3, 4))
         method = GradCamMethod(GradCamEngine._gradcam_objective)
 
-        payload = method.collect_patch_data({"layer-a": layer}, logits, 1)
+        payload = method.collect_patch_data(
+            CamPatchContext(
+                input_tensor=layer,
+                logits=logits,
+                layers_by_name={"layer-a": layer},
+                target_class=1,
+                objective=GradCamEngine._gradcam_objective,
+            )
+        )
 
         self.assertEqual(payload["method"], "gradcam")
         self.assertTrue(torch.equal(payload["pred"], logits.detach().cpu()))
@@ -50,6 +62,56 @@ class GradCamMethodTests(unittest.TestCase):
         )
 
         self.assertTrue(torch.allclose(actual, expected))
+
+    def test_saliency_map_uses_absolute_input_gradient_magnitude(self) -> None:
+        input_gradient = torch.tensor(
+            [
+                [
+                    [[[-1.0, 0.5], [2.0, -0.25]], [[0.2, -3.0], [1.5, 0.0]]],
+                    [[[0.5, -2.5], [1.0, -4.0]], [[-1.0, 0.25], [2.5, -0.5]]],
+                ]
+            ],
+            dtype=torch.float32,
+        )
+        payload = {
+            "method": "saliency_map",
+            "input_gradient": input_gradient,
+        }
+        method = SaliencyMapMethod(GradCamEngine._gradcam_objective)
+
+        actual = method.build_tile_cam(payload, "ignored", 1, 3, (4, 4, 4))
+        expected = F.interpolate(
+            torch.amax(torch.abs(input_gradient), dim=1, keepdim=True),
+            size=(4, 4, 4),
+            mode="trilinear",
+        )
+
+        self.assertTrue(torch.allclose(actual, expected))
+
+    def test_saliency_map_collect_patch_data_uses_stable_method_id(self) -> None:
+        input_tensor = torch.randn((1, 1, 2, 2, 2), requires_grad=True)
+        logits = torch.cat(
+            [
+                input_tensor.mean(dim=(2, 3, 4)),
+                input_tensor.sum(dim=(2, 3, 4)),
+            ],
+            dim=1,
+        )
+        method = SaliencyMapMethod(GradCamEngine._gradcam_objective)
+
+        payload = method.collect_patch_data(
+            CamPatchContext(
+                input_tensor=input_tensor,
+                logits=logits,
+                layers_by_name={},
+                target_class=1,
+                objective=GradCamEngine._gradcam_objective,
+            )
+        )
+
+        self.assertEqual(payload["method"], "saliency_map")
+        self.assertNotIn("layers", payload)
+        self.assertEqual(payload["input_gradient"].shape, input_tensor.shape)
 
 
 if __name__ == "__main__":

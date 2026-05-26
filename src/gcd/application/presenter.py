@@ -289,7 +289,12 @@ class MainWindowPresenter:
         return
 
     def on_method_changed(self, _index: int) -> None:
-        return
+        uses_layer_controls = (
+            self.view.selected_method_uses_layer_controls()
+            if hasattr(self.view, "selected_method_uses_layer_controls")
+            else True
+        )
+        self.view.set_gradcam_layer_controls_enabled(uses_layer_controls)
 
     def on_transfer_function_changed(
         self, transfer_function: TransferFunction, data_range: DataRange
@@ -390,7 +395,12 @@ class MainWindowPresenter:
             return
         method = self.view.selected_method()
         model_name = self._selected_model_name()
-        layer = self.view.selected_layer()
+        uses_layer_controls = (
+            self.view.selected_method_uses_layer_controls()
+            if hasattr(self.view, "selected_method_uses_layer_controls")
+            else True
+        )
+        layer = self.view.selected_layer() if uses_layer_controls else "input"
         target_class = self.view.selected_class()
         result_name = self._prediction_result_name(
             dataset.name,
@@ -398,8 +408,8 @@ class MainWindowPresenter:
             layer,
             target_class,
         )
-        n1, n2 = self.view.feature_range()
-        if int(dataset.feature_size or 0) <= 0 or n2 <= n1:
+        n1, n2 = self.view.feature_range() if uses_layer_controls else (0, 1)
+        if uses_layer_controls and (int(dataset.feature_size or 0) <= 0 or n2 <= n1):
             n1, n2 = 0, 999
         self._run_dataset_method(
             dataset_id,
@@ -458,12 +468,13 @@ class MainWindowPresenter:
             if hasattr(result, "volume")
             else str(result["renderable_item"]["method_id"])
         )
-        if method_id.startswith("grad"):
+        if not method_id.startswith("perturb"):
             self.view.set_method_options(
                 list(result.method_options), result.selected_method
             )
             self.view.set_layer_options(list(result.layer_names), result.selected_layer)
             self.view.set_feature_size(result.feature_size)
+            self.on_method_changed(0)
         else:
             self.view.set_perturbation_method_options(
                 list(result.method_options),
@@ -482,9 +493,11 @@ class MainWindowPresenter:
         if dataset is None:
             self.view.set_layer_options([], "")
             self.view.set_feature_size(0)
+            self.on_method_changed(0)
             return
         self.view.set_layer_options(list(dataset.layer_names), dataset.selected_layer)
         self.view.set_feature_size(int(dataset.feature_size))
+        self.on_method_changed(0)
 
     def _sync_selected_dataset_ids(self) -> None:
         if self.selected_grad_dataset_id not in self.datasets:

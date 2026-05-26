@@ -129,7 +129,7 @@ class XaiComputeResult:
     dataset_input: DatasetInput
     layer_names: tuple[str, ...]
     selected_layer: str
-    method_options: tuple[dict[str, str], ...]
+    method_options: tuple[dict[str, object], ...]
     selected_method: str
     feature_size: int
     volume: VolumeRecord

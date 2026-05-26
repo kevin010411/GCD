@@ -24,6 +24,7 @@ class _Control:
         self.toggled = _Signal()
         self._items = []
         self._value = 0
+        self.enabled = True
 
     def blockSignals(self, *_args):
         pass
@@ -52,10 +53,17 @@ class _Control:
     def value(self):
         return self._value
 
+    def setEnabled(self, enabled):
+        self.enabled = enabled
+
 
 class _FeatureWidget:
     def __init__(self) -> None:
         self.apply_requested = _Signal()
+        self.enabled = True
+
+    def setEnabled(self, enabled):
+        self.enabled = enabled
 
 
 class _VolumeList:
@@ -258,12 +266,16 @@ class _FakeView:
         self.overlay_status_messages = []
         self.layer_options_calls = []
         self.feature_size_calls = []
+        self.layer_control_calls = []
 
     def selected_class(self):
         return self._selected_class
 
     def selected_method(self):
         return self._selected_method
+
+    def selected_method_uses_layer_controls(self):
+        return self._selected_method != "saliency_map"
 
     def selected_layer(self):
         return self._selected_layer
@@ -291,6 +303,11 @@ class _FakeView:
 
     def set_feature_size(self, *args):
         self.feature_size_calls.append(args)
+
+    def set_gradcam_layer_controls_enabled(self, enabled):
+        self.layer_control_calls.append(enabled)
+        self.layer_combo.setEnabled(enabled)
+        self.feature_widget.setEnabled(enabled)
 
     def set_rotation_running(self, *_args):
         pass
@@ -346,7 +363,14 @@ class _FakeWorkflow:
         return []
 
     def list_cam_methods(self):
-        return [{"id": "gradcam", "name": "Grad-CAM"}]
+        return [
+            {"id": "gradcam", "name": "Grad-CAM", "uses_layer_controls": True},
+            {
+                "id": "saliency_map",
+                "name": "Saliency Map",
+                "uses_layer_controls": False,
+            },
+        ]
 
     def set_config(self, path):
         self.set_config_calls.append(path)
@@ -373,7 +397,14 @@ class _FakeWorkflow:
             ),
             "layer_names": ["layer-a"],
             "selected_layer": "layer-a",
-            "method_options": [{"id": "gradcam", "name": "Grad-CAM"}],
+            "method_options": [
+                {"id": "gradcam", "name": "Grad-CAM", "uses_layer_controls": True},
+                {
+                    "id": "saliency_map",
+                    "name": "Saliency Map",
+                    "uses_layer_controls": False,
+                },
+            ],
             "selected_method": method or "gradcam",
             "feature_size": 8,
             "volume_data": self.loaded_volume_data,
@@ -393,11 +424,11 @@ class _FakeWorkflow:
         data = np.array([1, 2, 3], dtype=np.float32)
         return XaiComputeResult(
             dataset_input=dataset_input,
-            layer_names=("layer-a",),
-            selected_layer="layer-a",
+            layer_names=("input",) if request.method == "saliency_map" else ("layer-a",),
+            selected_layer="input" if request.method == "saliency_map" else "layer-a",
             method_options=({"id": request.method, "name": request.method},),
             selected_method=request.method,
-            feature_size=8,
+            feature_size=1 if request.method == "saliency_map" else 8,
             volume=VolumeRecord(
                 id="",
                 dataset_id="",
@@ -483,6 +514,56 @@ class PresenterMethodTests(unittest.TestCase):
         self.assertEqual(len(presenter.volume_order), 2)
         self.assertIn(
             "sample.nii_unet_layer-a_class2",
+            presenter.render_items[presenter.volume_order[1]]["display_name"],
+        )
+
+    def test_method_change_disables_layer_controls_for_saliency_map(self) -> None:
+        view = _FakeView()
+        view._selected_method = "saliency_map"
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+
+        presenter.on_method_changed(0)
+
+        self.assertFalse(view.layer_combo.enabled)
+        self.assertFalse(view.feature_widget.enabled)
+
+        view._selected_method = "gradcam"
+        presenter.on_method_changed(0)
+
+        self.assertTrue(view.layer_combo.enabled)
+        self.assertTrue(view.feature_widget.enabled)
+
+    def test_saliency_run_uses_input_layer_and_ignores_feature_range(self) -> None:
+        view = _FakeView()
+        view._selected_method = "saliency_map"
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+        presenter.on_open_file_requested()
+        dataset_id = presenter.dataset_order[0]
+        view._selected_grad_dataset = dataset_id
+
+        presenter.on_gradcam_run_requested()
+
+        request = workflow.compute_calls[-1][1]
+        self.assertEqual(request.layer, "input")
+        self.assertEqual((request.n1, request.n2), (0, 1))
+        self.assertIn(
+            "sample.nii_unet_input_class2",
             presenter.render_items[presenter.volume_order[1]]["display_name"],
         )
 

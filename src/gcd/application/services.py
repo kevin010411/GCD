@@ -130,10 +130,10 @@ class WorkflowService:
     def set_config(self, config_path: str) -> None:
         self.engine.set_config(config_path)
 
-    def list_cam_methods(self) -> list[dict[str, str]]:
+    def list_cam_methods(self) -> list[dict[str, object]]:
         return self.engine.available_cam_methods("grad")
 
-    def list_perturbation_methods(self) -> list[dict[str, str]]:
+    def list_perturbation_methods(self) -> list[dict[str, object]]:
         return self.engine.available_cam_methods("perturbation")
 
     def load_input(
@@ -218,9 +218,9 @@ class WorkflowService:
         cam_data_range = DataRange.from_data([self.engine.cam], method="minmax")
         volume_data_range = DataRange.from_data([self.engine.volume_data], method="minmax")
         default_transfer = (
-            TransferFunction.heatmap_preset()
-            if request.method.startswith("grad")
-            else TransferFunction.overlay_preset()
+            TransferFunction.overlay_preset()
+            if request.method.startswith("perturb")
+            else TransferFunction.heatmap_preset()
         )
         method_options = self.engine.available_cam_methods(
             "perturbation" if request.method.startswith("perturb") else "grad"
