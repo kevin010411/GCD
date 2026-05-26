@@ -36,9 +36,9 @@ class CamMethod(Protocol):
     ) -> torch.Tensor: ...
 
 
-class GradCamMethod:
-    id = "gradcam"
-    display_name = "Grad-CAM"
+class LayerGradientCamMethod:
+    id = ""
+    display_name = ""
     category = "grad"
     uses_layer_controls = True
 
@@ -46,7 +46,7 @@ class GradCamMethod:
         self._objective = objective
 
     def collect_patch_data(self, context: CamPatchContext) -> dict[str, object]:
-        loss = self._objective(context.logits, context.target_class)
+        loss = context.objective(context.logits, context.target_class)
         loss.backward()
         return {
             "method": self.id,
@@ -66,17 +66,12 @@ class GradCamMethod:
             raise RuntimeError("CAM layer gradient 未產生，無法建立 Grad-CAM payload。")
         return value.grad.detach().to("cpu")
 
-    def build_tile_cam(
+    def _layer_tensors(
         self,
         patch_payload: dict[str, object],
         layer: str,
-        n1: int,
-        n2: int,
-        output_size: tuple[int, int, int],
-        method_params: Mapping[str, object] | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         import torch
-        import torch.nn.functional as F
 
         layers = patch_payload["layers"]
         if not isinstance(layers, dict) or layer not in layers:
@@ -90,9 +85,65 @@ class GradCamMethod:
             gradient, torch.Tensor
         ):
             raise TypeError("CAM layer payload 缺少 activation/gradient tensor。")
+        return activation, gradient
 
-        gradcam = torch.sum((activation * gradient)[:, n1:n2, ...], dim=1, keepdim=True)
+    def build_tile_cam(
+        self,
+        patch_payload: dict[str, object],
+        layer: str,
+        n1: int,
+        n2: int,
+        output_size: tuple[int, int, int],
+        method_params: Mapping[str, object] | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class GradCamMethod(LayerGradientCamMethod):
+    id = "gradcam"
+    display_name = "Grad-CAM"
+
+    def build_tile_cam(
+        self,
+        patch_payload: dict[str, object],
+        layer: str,
+        n1: int,
+        n2: int,
+        output_size: tuple[int, int, int],
+        method_params: Mapping[str, object] | None = None,
+    ) -> torch.Tensor:
+        import torch
+        import torch.nn.functional as F
+
+        activation, gradient = self._layer_tensors(patch_payload, layer)
+        activation = activation[:, n1:n2, ...]
+        gradient = gradient[:, n1:n2, ...]
+        weights = torch.mean(gradient, dim=(2, 3, 4), keepdim=True)
+        gradcam = torch.sum(activation * weights, dim=1, keepdim=True)
         return F.interpolate(gradcam, size=output_size, mode="trilinear")
+
+
+class XResCamMethod(LayerGradientCamMethod):
+    id = "xrescam"
+    display_name = "XResCAM"
+
+    def build_tile_cam(
+        self,
+        patch_payload: dict[str, object],
+        layer: str,
+        n1: int,
+        n2: int,
+        output_size: tuple[int, int, int],
+        method_params: Mapping[str, object] | None = None,
+    ) -> torch.Tensor:
+        import torch
+        import torch.nn.functional as F
+
+        activation, gradient = self._layer_tensors(patch_payload, layer)
+        xrescam = torch.sum(
+            (activation * gradient)[:, n1:n2, ...], dim=1, keepdim=True
+        )
+        return F.interpolate(xrescam, size=output_size, mode="trilinear")
 
 
 class GradCAMTestMethod:

@@ -283,6 +283,7 @@ class MainWindowView(QMainWindow):
         self.gradcam_dataset_combo = self.gradcam_plugin_panel.dataset_combo
         self.layer_combo = self.gradcam_plugin_panel.layer_combo
         self.method_combo = self.gradcam_plugin_panel.method_combo
+        self.objective_combo = self.gradcam_plugin_panel.objective_combo
         self.feature_widget = self.gradcam_plugin_panel.feature_widget
         self.gradcam_run_button = self.gradcam_plugin_panel.run_button
 
@@ -387,6 +388,19 @@ class MainWindowView(QMainWindow):
         self.method_combo.blockSignals(False)
         self.set_gradcam_layer_controls_enabled(self.selected_method_uses_layer_controls())
 
+    def set_objective_options(
+        self, options: list[dict[str, object]], selected: str | None
+    ) -> None:
+        self.objective_combo.blockSignals(True)
+        self.objective_combo.clear()
+        for option in options:
+            self.objective_combo.addItem(str(option["name"]), str(option["id"]))
+        if selected:
+            index = self.objective_combo.findData(selected)
+            if index >= 0:
+                self.objective_combo.setCurrentIndex(index)
+        self.objective_combo.blockSignals(False)
+
     def set_gradcam_dataset_options(
         self, options: list[dict[str, str]], selected: str | None
     ) -> None:
@@ -455,6 +469,10 @@ class MainWindowView(QMainWindow):
     def selected_method(self) -> str:
         current = self.method_combo.currentData()
         return str(current or "gradcam")
+
+    def selected_objective(self) -> str:
+        current = self.objective_combo.currentData()
+        return str(current or "predicted_target_mask")
 
     def selected_method_uses_layer_controls(self) -> bool:
         option = self._method_options_by_id.get(self.selected_method())

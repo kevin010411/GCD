@@ -3,7 +3,11 @@ from unittest.mock import patch
 
 import torch
 
-from src.gcd.infrastructure.cam_methods import GradCamMethod, SaliencyMapMethod
+from src.gcd.infrastructure.cam_methods import (
+    GradCamMethod,
+    SaliencyMapMethod,
+    XResCamMethod,
+)
 from src.gcd.infrastructure.core_engine import GradCamEngine
 
 
@@ -58,6 +62,7 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         engine = GradCamEngine.__new__(GradCamEngine)
         engine.cam_methods = {
             "gradcam": GradCamMethod(GradCamEngine._gradcam_objective),
+            "xrescam": XResCamMethod(GradCamEngine._gradcam_objective),
             "saliency_map": SaliencyMapMethod(GradCamEngine._gradcam_objective),
         }
 
@@ -65,7 +70,40 @@ class CoreEngineCamMethodTests(unittest.TestCase):
 
         by_id = {method["id"]: method for method in methods}
         self.assertTrue(by_id["gradcam"]["uses_layer_controls"])
+        self.assertTrue(by_id["xrescam"]["uses_layer_controls"])
+        self.assertEqual(by_id["xrescam"]["name"], "XResCAM")
         self.assertFalse(by_id["saliency_map"]["uses_layer_controls"])
+
+    def test_available_objectives_exposes_loss_reduction_choices(self) -> None:
+        engine = GradCamEngine.__new__(GradCamEngine)
+
+        objectives = engine.available_objectives()
+
+        by_id = {objective["id"]: objective["name"] for objective in objectives}
+        self.assertEqual(by_id["predicted_target_mask"], "Predicted Target Mask")
+        self.assertEqual(by_id["target_logit_sum"], "Target Logit Sum")
+        self.assertEqual(by_id["target_probability_sum"], "Target Probability Sum")
+        self.assertEqual(by_id["target_margin"], "Target Margin")
+
+    def test_target_logit_sum_objective_aggregates_all_target_voxels(self) -> None:
+        logits = torch.tensor(
+            [[[[[1.0, 2.0]]], [[[3.0, 4.0]]], [[[5.0, 1.0]]]]],
+            dtype=torch.float32,
+        )
+
+        loss = GradCamEngine._target_logit_sum_objective(logits, 1)
+
+        self.assertEqual(float(loss), 7.0)
+
+    def test_predicted_target_mask_objective_uses_argmax_mask(self) -> None:
+        logits = torch.tensor(
+            [[[[[5.0, 2.0]]], [[[3.0, 4.0]]], [[[1.0, 3.0]]]]],
+            dtype=torch.float32,
+        )
+
+        loss = GradCamEngine._predicted_target_mask_objective(logits, 1)
+
+        self.assertEqual(float(loss), 4.0)
 
     def test_compute_cam_uses_input_layer_for_saliency_map(self) -> None:
         engine = GradCamEngine.__new__(GradCamEngine)

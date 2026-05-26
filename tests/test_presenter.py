@@ -251,10 +251,12 @@ class _FakeView:
         self.renderer = _FakeRenderer()
         self._selected_class = 2
         self._selected_method = "gradcam"
+        self._selected_objective = "predicted_target_mask"
         self._selected_layer = "layer-a"
         self._feature_range = (0, 8)
         self._selected_model_path = "src/config/model/unet.py"
         self.method_options_calls = []
+        self.objective_options_calls = []
         self.grad_dataset_options_calls = []
         self.perturb_dataset_options_calls = []
         self.transfer_volume_snapshots = []
@@ -268,6 +270,9 @@ class _FakeView:
 
     def selected_method(self):
         return self._selected_method
+
+    def selected_objective(self):
+        return self._selected_objective
 
     def selected_method_uses_layer_controls(self):
         return self._selected_method != "saliency_map"
@@ -283,6 +288,9 @@ class _FakeView:
 
     def set_method_options(self, options, selected):
         self.method_options_calls.append((options, selected))
+
+    def set_objective_options(self, options, selected):
+        self.objective_options_calls.append((options, selected))
 
     def set_gradcam_dataset_options(self, options, selected):
         self.grad_dataset_options_calls.append((options, selected))
@@ -367,6 +375,12 @@ class _FakeWorkflow:
             },
         ]
 
+    def list_objectives(self):
+        return [
+            {"id": "predicted_target_mask", "name": "Predicted Target Mask"},
+            {"id": "target_logit_sum", "name": "Target Logit Sum"},
+        ]
+
     def set_config(self, path):
         self.set_config_calls.append(path)
 
@@ -389,6 +403,7 @@ class _FakeWorkflow:
                 file_name=file_name,
                 target_class=target_class,
                 active_method_id=method or "gradcam",
+                active_objective_id="predicted_target_mask",
             ),
             "layer_names": ["layer-a"],
             "selected_layer": "layer-a",
@@ -401,6 +416,8 @@ class _FakeWorkflow:
                 },
             ],
             "selected_method": method or "gradcam",
+            "objective_options": self.list_objectives(),
+            "selected_objective": "predicted_target_mask",
             "feature_size": 8,
             "volume_data": self.loaded_volume_data,
             "spacing": (1.5, 1.5, 2.0),
@@ -423,6 +440,10 @@ class _FakeWorkflow:
             selected_layer="input" if request.method == "saliency_map" else "layer-a",
             method_options=({"id": request.method, "name": request.method},),
             selected_method=request.method,
+            objective_options=(
+                {"id": request.objective_id, "name": request.objective_id},
+            ),
+            selected_objective=request.objective_id,
             feature_size=1 if request.method == "saliency_map" else 8,
             volume=VolumeRecord(
                 id="",
@@ -558,6 +579,7 @@ class PresenterMethodTests(unittest.TestCase):
         request = workflow.compute_calls[-1][1]
         self.assertEqual(request.layer, "input")
         self.assertEqual((request.n1, request.n2), (0, 1))
+        self.assertEqual(request.objective_id, "predicted_target_mask")
         self.assertIn(
             "sample.nii_unet_input_class2",
             presenter.render_items[presenter.volume_order[1]]["display_name"],

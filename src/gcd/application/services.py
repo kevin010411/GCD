@@ -133,6 +133,9 @@ class WorkflowService:
     def list_cam_methods(self) -> list[dict[str, object]]:
         return self.engine.available_cam_methods("grad")
 
+    def list_objectives(self) -> list[dict[str, object]]:
+        return self.engine.available_objectives()
+
     def list_perturbation_methods(self) -> list[dict[str, object]]:
         return self.engine.available_cam_methods("perturbation")
 
@@ -148,6 +151,8 @@ class WorkflowService:
             "selected_layer": self.engine.cfg["default_layer"],
             "method_options": self.list_cam_methods(),
             "selected_method": method or self.engine.active_method_id,
+            "objective_options": self.list_objectives(),
+            "selected_objective": self.engine.active_objective_id,
             "feature_size": self.engine.default_feature_size(),
             "volume_data": self.engine.volume_data,
             "spacing": self.engine.img1_spacing,
@@ -167,6 +172,7 @@ class WorkflowService:
         n2: int,
         method: str,
         result_name: str,
+        objective_id: str = "predicted_target_mask",
         method_params: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         result = self.compute_xai(
@@ -177,6 +183,7 @@ class WorkflowService:
                 n1=n1,
                 n2=n2,
                 method=method,
+                objective_id=objective_id,
                 result_name=result_name,
                 method_params=method_params,
             ),
@@ -187,6 +194,8 @@ class WorkflowService:
             "selected_layer": result.selected_layer,
             "method_options": list(result.method_options),
             "selected_method": result.selected_method,
+            "objective_options": list(result.objective_options),
+            "selected_objective": result.selected_objective,
             "feature_size": result.feature_size,
             "volume_data_range": result.volume_data_range,
             "renderable_item": {
@@ -207,7 +216,9 @@ class WorkflowService:
     ) -> XaiComputeResult:
         self.engine.load_dataset_input(dataset_input)
         self.engine.set_target_class(request.target_class)
-        self.engine.prepare_xai_inputs(method=request.method)
+        self.engine.prepare_xai_inputs(
+            method=request.method, objective_id=request.objective_id
+        )
         selected_layer = self.engine.compute_cam(
             layer=request.layer,
             n1=request.n1,
@@ -225,12 +236,15 @@ class WorkflowService:
         method_options = self.engine.available_cam_methods(
             "perturbation" if request.method.startswith("perturb") else "grad"
         )
+        objective_options = self.engine.available_objectives()
         return XaiComputeResult(
             dataset_input=self.engine.dataset_input(),
             layer_names=tuple(self.engine.layers.keys()),
             selected_layer=selected_layer,
             method_options=tuple(method_options),
             selected_method=self.engine.active_method_id,
+            objective_options=tuple(objective_options),
+            selected_objective=self.engine.active_objective_id,
             feature_size=int(self.engine.layers[selected_layer]),
             volume=VolumeRecord(
                 id="",
@@ -284,6 +298,8 @@ class WorkflowService:
             "selected_layer": selected_layer,
             "method_options": self.list_cam_methods(),
             "selected_method": self.engine.active_method_id,
+            "objective_options": self.list_objectives(),
+            "selected_objective": self.engine.active_objective_id,
             "feature_size": self.engine.layers[selected_layer],
             "render_request": {
                 "volumes": [self.engine.volume_data, self.engine.cam],

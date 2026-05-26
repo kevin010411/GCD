@@ -21,8 +21,10 @@ class GradCamPluginPanelTests(unittest.TestCase):
 
         self.assertIsNotNone(panel.dataset_combo)
         self.assertIsNotNone(panel.method_combo)
+        self.assertIsNotNone(panel.objective_combo)
         self.assertIn("Data", labels)
         self.assertIn("Answer", labels)
+        self.assertIn("Objective", labels)
         self.assertEqual(panel.method_combo.count(), 1)
         self.assertEqual(panel.method_combo.itemText(0), "Grad-CAM")
         self.assertEqual(panel.method_combo.itemData(0), "gradcam")

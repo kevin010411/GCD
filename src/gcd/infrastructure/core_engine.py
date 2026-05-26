@@ -13,6 +13,7 @@ from .cam_methods import (
     GradCamMethod,
     PerturbationOcclusionMethod,
     SaliencyMapMethod,
+    XResCamMethod,
 )
 
 if TYPE_CHECKING:
@@ -72,11 +73,14 @@ class GradCamEngine:
         self.file_name = ""
         self.patch: list[dict[str, object]] = []
         self.target_class = 1
+        self.active_objective_id = "predicted_target_mask"
         self.xai_cache_key = ""
+        self.objectives = self._default_objectives()
         self.cam_methods: dict[str, CamMethod] = {
-            GradCamMethod.id: GradCamMethod(self._gradcam_objective),
+            GradCamMethod.id: GradCamMethod(self._predicted_target_mask_objective),
+            XResCamMethod.id: XResCamMethod(self._predicted_target_mask_objective),
             GradCAMTestMethod.id: GradCAMTestMethod(),
-            SaliencyMapMethod.id: SaliencyMapMethod(self._gradcam_objective),
+            SaliencyMapMethod.id: SaliencyMapMethod(self._predicted_target_mask_objective),
             PerturbationOcclusionMethod.id: PerturbationOcclusionMethod(),
         }
         self.active_method_id = GradCamMethod.id
@@ -147,6 +151,9 @@ class GradCamEngine:
             file_name=self.file_name,
             target_class=self.target_class,
             active_method_id=self.active_method_id,
+            active_objective_id=getattr(
+                self, "active_objective_id", "predicted_target_mask"
+            ),
             xai_cache_key=self.xai_cache_key,
         )
 
@@ -165,6 +172,9 @@ class GradCamEngine:
         self.patch = []
         self.target_class = int(dataset_input.target_class)
         self.active_method_id = str(dataset_input.active_method_id)
+        self.active_objective_id = str(
+            getattr(dataset_input, "active_objective_id", "predicted_target_mask")
+        )
         self.model_output = None
         self.xai_cache_key = str(dataset_input.xai_cache_key)
 
@@ -177,7 +187,9 @@ class GradCamEngine:
 
 
     @staticmethod
-    def _gradcam_objective(logits: torch.Tensor, target_class: int) -> torch.Tensor:
+    def _predicted_target_mask_objective(
+        logits: torch.Tensor, target_class: int
+    ) -> torch.Tensor:
         import torch
 
         if not (0 <= target_class < logits.size(1)):
@@ -187,6 +199,81 @@ class GradCamEngine:
         index = torch.argmax(logits[0], dim=0)
         loss = (logits[0, target_class] * (index == target_class)).sum()
         return loss
+
+    @staticmethod
+    def _target_logit_sum_objective(logits: torch.Tensor, target_class: int) -> torch.Tensor:
+        if not (0 <= target_class < logits.size(1)):
+            raise ValueError(
+                f"target_class={target_class} 超出模型輸出範圍 0..{logits.size(1) - 1}"
+            )
+        return logits[0, target_class].sum()
+
+    _gradcam_objective = _predicted_target_mask_objective
+
+    @staticmethod
+    def _target_probability_sum_objective(
+        logits: torch.Tensor, target_class: int
+    ) -> torch.Tensor:
+        import torch
+
+        if not (0 <= target_class < logits.size(1)):
+            raise ValueError(
+                f"target_class={target_class} 超出模型輸出範圍 0..{logits.size(1) - 1}"
+            )
+        return torch.softmax(logits[0], dim=0)[target_class].sum()
+
+    @staticmethod
+    def _target_margin_objective(logits: torch.Tensor, target_class: int) -> torch.Tensor:
+        import torch
+
+        if not (0 <= target_class < logits.size(1)):
+            raise ValueError(
+                f"target_class={target_class} 超出模型輸出範圍 0..{logits.size(1) - 1}"
+            )
+        target_logits = logits[0, target_class]
+        other_logits = torch.cat(
+            [logits[0, :target_class], logits[0, target_class + 1 :]], dim=0
+        )
+        return (target_logits - torch.amax(other_logits, dim=0)).sum()
+
+    def available_objectives(self) -> list[dict[str, object]]:
+        if not hasattr(self, "objectives"):
+            self.objectives = self._default_objectives()
+        return [
+            {"id": objective_id, "name": label}
+            for objective_id, (label, _objective) in self.objectives.items()
+        ]
+
+    def _default_objectives(
+        self,
+    ) -> dict[str, tuple[str, Callable[[torch.Tensor, int], torch.Tensor]]]:
+        return {
+            "predicted_target_mask": (
+                "Predicted Target Mask",
+                self._predicted_target_mask_objective,
+            ),
+            "target_logit_sum": ("Target Logit Sum", self._target_logit_sum_objective),
+            "target_probability_sum": (
+                "Target Probability Sum",
+                self._target_probability_sum_objective,
+            ),
+            "target_margin": ("Target Margin", self._target_margin_objective),
+        }
+
+    def _resolve_objective(
+        self, objective_id: str | None
+    ) -> tuple[str, Callable[[torch.Tensor, int], torch.Tensor]]:
+        if not hasattr(self, "objectives"):
+            self.objectives = self._default_objectives()
+        active_objective_id = getattr(
+            self, "active_objective_id", "predicted_target_mask"
+        )
+        requested = (objective_id or active_objective_id).strip().lower()
+        if requested in self.objectives:
+            return requested, self.objectives[requested][1]
+        fallback = "predicted_target_mask"
+        self._log(f"未知 objective '{objective_id}'，改用預設 objective: {fallback}")
+        return fallback, self.objectives[fallback][1]
 
     def load_volume(self, input_file: str | None = None) -> list[str]:
         import monai.transforms as mt
@@ -263,13 +350,17 @@ class GradCamEngine:
             self._log(message)
         return messages
 
-    def prepare_xai_inputs(self, method: str | None = None) -> None:
+    def prepare_xai_inputs(
+        self, method: str | None = None, objective_id: str | None = None
+    ) -> None:
         import torch
 
         if not self.file_name or self.img1 is None:
             raise ValueError("尚未載入檔案，無法準備 XAI 輸入。")
         cam_method = self._resolve_cam_method(method)
+        selected_objective_id, objective = self._resolve_objective(objective_id)
         self.active_method_id = cam_method.id
+        self.active_objective_id = selected_objective_id
         self.patch = []
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -364,7 +455,7 @@ class GradCamEngine:
                             logits=logits,
                             layers_by_name=layers_by_name,
                             target_class=self.target_class,
-                            objective=self._gradcam_objective,
+                            objective=objective,
                         )
                     )
                 )
@@ -380,7 +471,9 @@ class GradCamEngine:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         cfg_name = str(getattr(self.cfg, "filename", "") or "")
-        self.xai_cache_key = f"{cfg_name}|{self.target_class}|{cam_method.id}"
+        self.xai_cache_key = (
+            f"{cfg_name}|{self.target_class}|{cam_method.id}|{selected_objective_id}"
+        )
 
     def load_and_process_input(
         self, input_file: str | None = None, method: str | None = None

@@ -18,6 +18,7 @@ class _FakeEngine:
         self.layers = {"layer-a": 8}
         self.cfg = {"default_layer": "layer-a"}
         self.active_method_id = "gradcam"
+        self.active_objective_id = "predicted_target_mask"
         self.compute_cam_calls = []
         self.load_volume_calls = []
         self.prepare_calls = []
@@ -44,16 +45,26 @@ class _FakeEngine:
             },
         ]
 
+    def available_objectives(self):
+        return [
+            {"id": "predicted_target_mask", "name": "Predicted Target Mask"},
+            {"id": "target_logit_sum", "name": "Target Logit Sum"},
+        ]
+
     def load_volume(self, file_name):
         self.load_volume_calls.append(file_name)
         return ["ok"]
 
-    def prepare_xai_inputs(self, method=None):
-        self.prepare_calls.append(method)
+    def prepare_xai_inputs(self, method=None, objective_id=None):
+        self.prepare_calls.append((method, objective_id))
         self.active_method_id = method or "gradcam"
+        self.active_objective_id = objective_id or "predicted_target_mask"
         self.patch = [{"method": self.active_method_id, "pred": np.zeros((1, 1, 1), dtype=np.float32)}]
         self.layers = {"input": 1} if self.active_method_id == "saliency_map" else dict(self.prepared_layers)
-        self.xai_cache_key = f"cfg.py|{self.target_class}|{self.active_method_id}"
+        self.xai_cache_key = (
+            f"cfg.py|{self.target_class}|{self.active_method_id}|"
+            f"{self.active_objective_id}"
+        )
 
     def set_target_class(self, target_class):
         self.target_class = target_class
@@ -74,12 +85,14 @@ class _FakeEngine:
             file_name="sample.nii.gz",
             target_class=self.target_class,
             active_method_id=self.active_method_id,
+            active_objective_id=self.active_objective_id,
             xai_cache_key=self.xai_cache_key,
         )
 
     def load_dataset_input(self, dataset_input):
         self.target_class = dataset_input.target_class
         self.active_method_id = dataset_input.active_method_id
+        self.active_objective_id = dataset_input.active_objective_id
         self.xai_cache_key = dataset_input.xai_cache_key
         self.layers = dict(dataset_input.layers)
         self.patch = []
@@ -113,6 +126,7 @@ class WorkflowServiceTests(unittest.TestCase):
             TransferFunction.base_preset().control_points,
         )
         self.assertEqual(result["selected_method"], "gradcam")
+        self.assertEqual(result["selected_objective"], "predicted_target_mask")
         self.assertEqual(
             result["method_options"],
             [
@@ -161,7 +175,7 @@ class WorkflowServiceTests(unittest.TestCase):
             service.engine.compute_cam_calls,
             [("layer-a", 0, 8, "perturb_occlusion", {"block_size": 16})],
         )
-        self.assertEqual(service.engine.prepare_calls, ["perturb_occlusion"])
+        self.assertEqual(service.engine.prepare_calls, [("perturb_occlusion", "predicted_target_mask")])
         self.assertEqual(result["renderable_item"]["name"], "sample_model_perturb方法")
         self.assertEqual(result["renderable_item"]["source"], "xai")
         self.assertEqual(result["selected_method"], "perturb_occlusion")
@@ -192,7 +206,7 @@ class WorkflowServiceTests(unittest.TestCase):
             result_name="sample_model_grad方法",
         )
 
-        self.assertEqual(service.engine.prepare_calls, ["gradcam"])
+        self.assertEqual(service.engine.prepare_calls, [("gradcam", "predicted_target_mask")])
 
     def test_compute_dataset_result_prepares_when_requested_layer_is_missing(self) -> None:
         service = WorkflowService(_FakeEngine())
@@ -220,7 +234,7 @@ class WorkflowServiceTests(unittest.TestCase):
             result_name="sample_model_grad方法",
         )
 
-        self.assertEqual(service.engine.prepare_calls, ["gradcam"])
+        self.assertEqual(service.engine.prepare_calls, [("gradcam", "predicted_target_mask")])
 
     def test_compute_dataset_result_uses_input_metadata_for_saliency_map(self) -> None:
         service = WorkflowService(_FakeEngine())
@@ -235,7 +249,7 @@ class WorkflowServiceTests(unittest.TestCase):
             result_name="sample_model_saliency",
         )
 
-        self.assertEqual(service.engine.prepare_calls, ["saliency_map"])
+        self.assertEqual(service.engine.prepare_calls, [("saliency_map", "predicted_target_mask")])
         self.assertEqual(
             service.engine.compute_cam_calls,
             [("layer-a", 0, 8, "saliency_map", None)],

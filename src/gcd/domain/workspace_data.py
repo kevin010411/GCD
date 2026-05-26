@@ -19,6 +19,7 @@ class DatasetInput:
     file_name: str
     target_class: int
     active_method_id: str
+    active_objective_id: str = "predicted_target_mask"
     xai_cache_key: str = ""
 
 
@@ -121,6 +122,7 @@ class XaiComputeRequest:
     n2: int
     method: str
     result_name: str
+    objective_id: str = "predicted_target_mask"
     method_params: dict[str, object] | None = None
 
 
@@ -131,6 +133,8 @@ class XaiComputeResult:
     selected_layer: str
     method_options: tuple[dict[str, object], ...]
     selected_method: str
+    objective_options: tuple[dict[str, object], ...]
+    selected_objective: str
     feature_size: int
     volume: VolumeRecord
     volume_data_range: DataRange

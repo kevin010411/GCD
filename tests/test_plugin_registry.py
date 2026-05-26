@@ -21,7 +21,7 @@ class PluginRegistryTests(unittest.TestCase):
 
         self.assertEqual(
             plugin_ids,
-            ["data", "gradcam", "camera", "perturbation", "roi"],
+            ["data", "camera", "gradcam", "perturbation", "roi"],
         )
         self.assertEqual(button_labels[0], "Data")
 

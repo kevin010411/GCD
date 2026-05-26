@@ -7,6 +7,7 @@ from src.gcd.infrastructure.cam_methods import (
     CamPatchContext,
     GradCamMethod,
     SaliencyMapMethod,
+    XResCamMethod,
 )
 from src.gcd.infrastructure.core_engine import GradCamEngine
 
@@ -34,7 +35,7 @@ class GradCamMethodTests(unittest.TestCase):
         self.assertEqual(layer_payload["activation"].shape, layer.shape)
         self.assertEqual(layer_payload["gradient"].shape, layer.shape)
 
-    def test_build_tile_cam_matches_previous_gradcam_formula(self) -> None:
+    def test_build_tile_cam_uses_standard_gradcam_channel_weights(self) -> None:
         activation = torch.arange(24, dtype=torch.float32).reshape(1, 3, 2, 2, 2)
         gradient = torch.linspace(0.5, 2.8, 24, dtype=torch.float32).reshape(
             1, 3, 2, 2, 2
@@ -49,6 +50,34 @@ class GradCamMethodTests(unittest.TestCase):
             },
         }
         method = GradCamMethod(GradCamEngine._gradcam_objective)
+
+        actual = method.build_tile_cam(payload, "layer-a", 1, 3, (4, 4, 4))
+        selected_activation = activation[:, 1:3, ...]
+        selected_gradient = gradient[:, 1:3, ...]
+        weights = torch.mean(selected_gradient, dim=(2, 3, 4), keepdim=True)
+        expected = F.interpolate(
+            torch.sum(selected_activation * weights, dim=1, keepdim=True),
+            size=(4, 4, 4),
+            mode="trilinear",
+        )
+
+        self.assertTrue(torch.allclose(actual, expected))
+
+    def test_xrescam_build_tile_cam_matches_previous_formula(self) -> None:
+        activation = torch.arange(24, dtype=torch.float32).reshape(1, 3, 2, 2, 2)
+        gradient = torch.linspace(0.5, 2.8, 24, dtype=torch.float32).reshape(
+            1, 3, 2, 2, 2
+        )
+        payload = {
+            "method": "xrescam",
+            "layers": {
+                "layer-a": {
+                    "activation": activation,
+                    "gradient": gradient,
+                }
+            },
+        }
+        method = XResCamMethod(GradCamEngine._gradcam_objective)
 
         actual = method.build_tile_cam(payload, "layer-a", 1, 3, (4, 4, 4))
         expected = F.interpolate(

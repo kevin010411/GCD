@@ -48,6 +48,13 @@ class GradCamPluginPanel(PluginPanel):
         method_layout.addWidget(self.method_combo, 1)
         self.content_layout.addLayout(method_layout)
 
+        objective_layout = QHBoxLayout()
+        objective_layout.addWidget(QLabel("Objective"))
+        self.objective_combo = QComboBox()
+        _apply_soft_combo_style(self.objective_combo)
+        objective_layout.addWidget(self.objective_combo, 1)
+        self.content_layout.addLayout(objective_layout)
+
         self.feature_widget = FeatureRangeWidget()
         self.content_layout.addWidget(self.feature_widget)
 

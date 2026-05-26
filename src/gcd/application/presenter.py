@@ -174,6 +174,9 @@ class MainWindowPresenter:
         options = self.workflow.list_model_configs()
         self.view.set_model_options(options)
         self.view.set_method_options(self.workflow.list_cam_methods(), "gradcam")
+        self.view.set_objective_options(
+            self.workflow.list_objectives(), "predicted_target_mask"
+        )
         self.view.set_perturbation_method_options(
             self.workflow.list_perturbation_methods(),
             "perturb_occlusion",
@@ -306,6 +309,7 @@ class MainWindowPresenter:
         n2: int,
         method: str,
         result_name: str,
+        objective_id: str = "predicted_target_mask",
         method_params: dict[str, object] | None = None,
         on_success=None,
     ) -> None:
@@ -321,6 +325,7 @@ class MainWindowPresenter:
                     n1=n1,
                     n2=n2,
                     method=method,
+                    objective_id=objective_id,
                     result_name=result_name,
                     method_params=method_params,
                 ),
@@ -474,6 +479,7 @@ class MainWindowPresenter:
         if dataset is None:
             return
         method = self.view.selected_method()
+        objective_id = self.view.selected_objective()
         model_name = self._selected_model_name()
         uses_layer_controls = (
             self.view.selected_method_uses_layer_controls()
@@ -498,11 +504,13 @@ class MainWindowPresenter:
             n1=n1,
             n2=n2,
             method=method,
+            objective_id=objective_id,
             result_name=result_name,
             method_params={
                 "model_name": model_name,
                 "requested_layer": layer,
                 "target_class": target_class,
+                "objective_id": objective_id,
             },
         )
 
@@ -551,6 +559,9 @@ class MainWindowPresenter:
         if not method_id.startswith("perturb"):
             self.view.set_method_options(
                 list(result.method_options), result.selected_method
+            )
+            self.view.set_objective_options(
+                list(result.objective_options), result.selected_objective
             )
             self.view.set_layer_options(list(result.layer_names), result.selected_layer)
             self.view.set_feature_size(result.feature_size)
