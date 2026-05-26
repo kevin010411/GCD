@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QSpinBox
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+)
 
 from ..widgets.feature_range import FeatureRangeWidget
 from .base import PluginPanel
@@ -34,13 +42,6 @@ class GradCamPluginPanel(PluginPanel):
         class_layout.addWidget(self.class_spinbox, 1)
         self.content_layout.addLayout(class_layout)
 
-        layer_layout = QHBoxLayout()
-        layer_layout.addWidget(QLabel("Layer"))
-        self.layer_combo = QComboBox()
-        _apply_soft_combo_style(self.layer_combo)
-        layer_layout.addWidget(self.layer_combo, 1)
-        self.content_layout.addLayout(layer_layout)
-
         method_layout = QHBoxLayout()
         method_layout.addWidget(QLabel("Method"))
         self.method_combo = QComboBox()
@@ -55,8 +56,21 @@ class GradCamPluginPanel(PluginPanel):
         objective_layout.addWidget(self.objective_combo, 1)
         self.content_layout.addLayout(objective_layout)
 
+        self.layer_feature_group = QGroupBox("Layer / Feature")
+        layer_feature_layout = QVBoxLayout(self.layer_feature_group)
+
+        layer_layout = QHBoxLayout()
+        layer_layout.addWidget(QLabel("Layer"))
+        self.layer_combo = QComboBox()
+        _apply_soft_combo_style(self.layer_combo)
+        layer_layout.addWidget(self.layer_combo, 1)
+        layer_feature_layout.addLayout(layer_layout)
+
         self.feature_widget = FeatureRangeWidget()
-        self.content_layout.addWidget(self.feature_widget)
+        layer_feature_layout.addWidget(self.feature_widget)
+        self.layer_feature_group.setEnabled(False)
+        self.content_layout.addWidget(self.layer_feature_group)
+
 
         self.run_button = QPushButton("Run")
         self.content_layout.addWidget(self.run_button)

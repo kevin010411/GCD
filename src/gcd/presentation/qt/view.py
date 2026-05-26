@@ -153,6 +153,7 @@ class MainWindowView(QMainWindow):
             for definition in self.plugin_definitions
         }
         self._method_options_by_id: dict[str, dict[str, object]] = {}
+        self._gradcam_feature_size = 0
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -282,6 +283,7 @@ class MainWindowView(QMainWindow):
         self.class_spinbox = self.gradcam_plugin_panel.class_spinbox
         self.gradcam_dataset_combo = self.gradcam_plugin_panel.dataset_combo
         self.layer_combo = self.gradcam_plugin_panel.layer_combo
+        self.layer_feature_group = self.gradcam_plugin_panel.layer_feature_group
         self.method_combo = self.gradcam_plugin_panel.method_combo
         self.objective_combo = self.gradcam_plugin_panel.objective_combo
         self.feature_widget = self.gradcam_plugin_panel.feature_widget
@@ -372,6 +374,7 @@ class MainWindowView(QMainWindow):
         self.layer_combo.addItems(layer_names)
         self.layer_combo.setCurrentText(selected)
         self.layer_combo.blockSignals(False)
+        self.set_gradcam_layer_controls_enabled(self.selected_method_uses_layer_controls())
 
     def set_method_options(
         self, options: list[dict[str, object]], selected: str | None
@@ -441,11 +444,19 @@ class MainWindowView(QMainWindow):
         self.perturbation_method_combo.blockSignals(False)
 
     def set_feature_size(self, size: int) -> None:
+        self._gradcam_feature_size = max(0, int(size))
         self.feature_widget.set_size(size)
+        self.set_gradcam_layer_controls_enabled(self.selected_method_uses_layer_controls())
 
     def set_gradcam_layer_controls_enabled(self, enabled: bool) -> None:
-        self.layer_combo.setEnabled(enabled)
-        self.feature_widget.setEnabled(enabled)
+        can_adjust = (
+            bool(enabled)
+            and self.layer_combo.count() > 0
+            and self._gradcam_feature_size > 0
+        )
+        self.layer_feature_group.setEnabled(can_adjust)
+        self.layer_combo.setEnabled(can_adjust)
+        self.feature_widget.setEnabled(can_adjust)
 
     def set_rotation_speed_label(self, speed: float) -> None:
         self.speed_label.setText(f"Rotation Speed: {speed:.1f}")
