@@ -1792,6 +1792,7 @@ class WorkspaceHost(QWidget):
         self.shared_state = SharedImagingState()
         self._scene_initialized = False
         self._scene_signature: tuple[tuple[str, tuple[int, ...]], ...] = ()
+        self._visible_volume_count = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1909,8 +1910,14 @@ class WorkspaceHost(QWidget):
         volumes: list[object],
         spacing: list[tuple[float, float, float]],
         metadata: list[dict[str, object] | None] | None = None,
+        *,
+        render_settings: list[dict[str, object]] | None = None,
+        camera_policy: str = "preserve",
     ) -> None:
         metadata_items = metadata if metadata is not None else [None] * len(volumes)
+        setting_items = (
+            render_settings if render_settings is not None else [{} for _ in volumes]
+        )
         scene_signature = tuple(
             (
                 str((meta or {}).get("volume_id", index)),
@@ -1918,16 +1925,49 @@ class WorkspaceHost(QWidget):
             )
             for index, (volume, meta) in enumerate(zip(volumes, metadata_items))
         )
-        self.standard_workspace.renderer.show_volumes(volumes, spacing, metadata)
-        self.roi_workspace.renderer.show_volumes(volumes, spacing, metadata)
-        first_scene = not self._scene_initialized
-        if first_scene:
+        next_visible_count = sum(
+            1
+            for volume, space, settings in zip(volumes, spacing, setting_items)
+            if volume is not None
+            and space is not None
+            and bool(settings.get("visible", True))
+        )
+        reset_camera = camera_policy == "reset" or (
+            camera_policy == "reset_if_first_or_empty"
+            and (not self._scene_initialized or self._visible_volume_count == 0)
+            and next_visible_count > 0
+        )
+        preserved_snapshot = None
+        if camera_policy == "preserve":
+            capture = getattr(
+                self.standard_workspace.renderer, "capture_camera_state", None
+            )
+            if callable(capture):
+                preserved_snapshot = capture()
+            if preserved_snapshot is None:
+                preserved_snapshot = self.shared_state.camera_snapshot
+
+        self.standard_workspace.renderer.show_volumes(
+            volumes, spacing, metadata, render_settings=render_settings
+        )
+        self.roi_workspace.renderer.show_volumes(
+            volumes, spacing, metadata, render_settings=render_settings
+        )
+        if reset_camera:
             self.sync_camera_to_visible_volumes()
             self._scene_initialized = True
+        elif preserved_snapshot:
+            self.shared_state.camera_snapshot = preserved_snapshot
+            self._apply_shared_snapshot_to(self.standard_workspace)
+            self._apply_shared_snapshot_to(self.roi_workspace)
         elif self.shared_state.camera_snapshot:
             self._apply_shared_snapshot_to(self.standard_workspace)
             self._apply_shared_snapshot_to(self.roi_workspace)
+        else:
+            self._scene_initialized = self._scene_initialized or next_visible_count > 0
+        self._scene_initialized = self._scene_initialized or next_visible_count > 0
         self._scene_signature = scene_signature
+        self._visible_volume_count = next_visible_count
         self.standard_workspace.renderer.render()
         self.roi_workspace.renderer.render()
 
@@ -1940,15 +1980,33 @@ class WorkspaceHost(QWidget):
         visible: bool | None = None,
         render: bool = True,
     ) -> None:
+        previous_visible = self._volume_visible_at(index)
         self.standard_workspace.renderer.set_volume_transfer_functions(
             index, color_points, opacity_points, visible=visible, render=False
         )
         self.roi_workspace.renderer.set_volume_transfer_functions(
             index, color_points, opacity_points, visible=visible, render=False
         )
+        if visible is not None and previous_visible is not None:
+            next_visible = bool(visible)
+            if previous_visible != next_visible:
+                self._visible_volume_count += 1 if next_visible else -1
+                self._visible_volume_count = max(0, self._visible_volume_count)
         if render:
             self.standard_workspace.renderer.render()
             self.roi_workspace.renderer.render()
+
+    def _volume_visible_at(self, index: int) -> bool | None:
+        volumes = getattr(self.standard_workspace.renderer, "volumes", [])
+        if not (0 <= index < len(volumes)):
+            return None
+        volume = volumes[index]
+        if "visible" in volume:
+            return bool(volume.get("visible", True))
+        prop = volume.get("volume")
+        if prop is not None and hasattr(prop, "GetVisibility"):
+            return bool(prop.GetVisibility())
+        return True
 
     def set_rotation_speed(self, speed: float) -> None:
         self.standard_workspace.renderer.set_rotation_speed(speed)
@@ -1965,6 +2023,7 @@ class WorkspaceHost(QWidget):
         self.roi_workspace.renderer.clear_volumes()
         self._scene_initialized = False
         self._scene_signature = ()
+        self._visible_volume_count = 0
 
     def render(self) -> None:
         self.standard_workspace.renderer.render()
@@ -1972,10 +2031,6 @@ class WorkspaceHost(QWidget):
 
     def overlay_status_message(self) -> str:
         return self.active_workspace.overlay_status_message()
-
-    def store_initial_camera(self) -> None:
-        self.standard_workspace.renderer.store_initial_camera()
-        self.roi_workspace.renderer.store_initial_camera()
 
     def replace_camera(self) -> None:
         self.sync_camera_to_visible_volumes()

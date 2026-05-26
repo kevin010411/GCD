@@ -157,6 +157,21 @@ class VolumeUpserted(WorkspaceEvent):
 
 
 @dataclass(frozen=True)
+class VolumeVisibilityChanged(WorkspaceEvent):
+    def __init__(self, volume_id: str, visible: bool) -> None:
+        super().__init__(
+            "volume_visibility_changed",
+            {"volume_id": volume_id, "visible": bool(visible)},
+        )
+
+
+@dataclass(frozen=True)
+class VolumeRenamed(WorkspaceEvent):
+    def __init__(self, volume_id: str) -> None:
+        super().__init__("volume_renamed", {"volume_id": volume_id})
+
+
+@dataclass(frozen=True)
 class VolumeDeleted(WorkspaceEvent):
     def __init__(self, volume_id: str, dataset_id: str) -> None:
         super().__init__(

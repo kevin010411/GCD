@@ -31,6 +31,7 @@ class MainWindowPresenter:
         self.data_store = WorkspaceDataStore()
         self.selected_grad_dataset_id = ""
         self.selected_perturbation_dataset_id = ""
+        self._last_scene_signature: tuple[tuple[str, tuple[int, ...]], ...] = ()
         self.data_store.subscribe(self._on_store_event)
 
         self._connect_signals()
@@ -109,6 +110,10 @@ class MainWindowPresenter:
         self.view.transfer_editor.transfer_function_changed.connect(
             self.on_transfer_function_changed
         )
+        if hasattr(self.view.transfer_editor, "transfer_function_change_finished"):
+            self.view.transfer_editor.transfer_function_change_finished.connect(
+                self.on_transfer_function_change_finished
+            )
         self.view.transfer_editor.load_requested.connect(
             self.on_load_transfer_requested
         )
@@ -183,7 +188,6 @@ class MainWindowPresenter:
         self.view.renderer.show_volumes([], [], [])
         self.view.renderer.start_rotation()
         self._sync_volume_list()
-        self.apply_transfer_function_to_renderer()
         self.view.workspace.set_workspace_payload(renderable_items=[])
         self.view.set_overlay_status_message("")
         self._sync_transfer_editor()
@@ -217,34 +221,80 @@ class MainWindowPresenter:
         self.view.set_rotation_running(True)
 
     def _on_store_event(self, event: WorkspaceEvent) -> None:
-        if event.name in {"dataset_added", "volume_upserted", "dataset_deleted", "volume_deleted"}:
+        if event.name == "dataset_added":
             self._sync_selected_dataset_ids()
             self._sync_dataset_controls()
             self._sync_gradcam_controls()
             self._sync_volume_list()
             self._sync_transfer_editor()
-            self._render_current_items()
-        elif event.name in {"volume_order_changed", "transfer_changed"}:
+            self._render_current_items(camera_policy="reset_if_first_or_empty")
+        elif event.name == "volume_upserted":
+            self._sync_selected_dataset_ids()
+            self._sync_dataset_controls()
+            self._sync_gradcam_controls()
             self._sync_volume_list()
-            self._render_current_items()
+            self._sync_transfer_editor()
+            if self._scene_signature() != self._last_scene_signature:
+                self._render_current_items(camera_policy="preserve")
+            else:
+                self._sync_workspace_payload()
+        elif event.name in {"dataset_deleted", "volume_deleted"}:
+            self._sync_selected_dataset_ids()
+            self._sync_dataset_controls()
+            self._sync_gradcam_controls()
+            self._sync_volume_list()
+            self._sync_transfer_editor()
+            if self._scene_signature() != self._last_scene_signature:
+                self._render_current_items(camera_policy="preserve")
+            else:
+                self._sync_workspace_payload()
+        elif event.name == "volume_order_changed":
+            self._sync_volume_list()
+            if self._scene_signature() != self._last_scene_signature:
+                self._render_current_items(camera_policy="preserve")
+            else:
+                self._sync_workspace_payload()
+        elif event.name == "volume_visibility_changed":
+            self._sync_volume_list()
+            self._apply_transfer_change(
+                str(event.payload.get("volume_id", "")), sync_payload=True
+            )
+        elif event.name == "volume_renamed":
+            self._sync_volume_list()
+            self._sync_workspace_payload()
+        elif event.name == "transfer_changed":
+            self._sync_volume_list()
+            self._apply_transfer_change(str(event.payload.get("volume_id", "")))
         elif event.name == "selection_changed":
             self._sync_transfer_editor()
             self._sync_volume_list()
-            self.apply_transfer_function_to_renderer()
+            self._sync_workspace_payload()
 
     def _on_background_error(self, exc: Exception) -> None:
         if not getattr(exc, "skip_error_store", False):
             self.error_store.save(exc, context="background_task")
         self.view.set_rotation_running(False)
 
-    def _render_current_items(self) -> None:
+    def _render_current_items(self, *, camera_policy: str = "preserve") -> None:
         self.view.workspace.show_volumes(
             self.data_store.ordered_volume_payloads(),
             self.data_store.ordered_volume_spacing(),
             self.data_store.ordered_volume_metadata(),
+            render_settings=self._ordered_render_settings(),
+            camera_policy=camera_policy,
         )
-        self.apply_transfer_function_to_renderer()
-        self.refresh_roi_panel()
+        self._last_scene_signature = self._scene_signature()
+        self._sync_workspace_payload()
+
+    def _scene_signature(self) -> tuple[tuple[str, tuple[int, ...]], ...]:
+        return tuple(
+            (
+                volume_id,
+                tuple(int(v) for v in self.data_store.volumes[volume_id].shape),
+            )
+            for volume_id in self.data_store.volume_order
+            if volume_id in self.data_store.volumes
+        )
 
     def _run_dataset_method(
         self,
@@ -304,27 +354,57 @@ class MainWindowPresenter:
         ):
             return
 
-    def apply_transfer_function_to_renderer(self) -> None:
-        for index, volume_id in enumerate(self.data_store.volume_order):
-            item = self.render_items.get(volume_id)
-            if item is None:
-                continue
-            transfer_function = item["transfer_function"]
-            data_range = item["data_range"]
-            colors, opacities = transfer_function.renderer_points(data_range)
-            self.view.workspace.set_volume_transfer_functions(
-                index,
-                colors,
-                opacities,
-                visible=self._volume_visible(volume_id),
-                render=False,
-            )
-        self.view.workspace.render()
+    def on_transfer_function_change_finished(
+        self, _transfer_function: TransferFunction, _data_range: DataRange
+    ) -> None:
+        self._sync_workspace_payload()
+
+    def _sync_workspace_payload(self) -> None:
         self.view.workspace.set_workspace_payload(
             renderable_items=self.data_store.workspace_renderable_items()
         )
         self.view.set_overlay_status_message(self.view.workspace.overlay_status_message())
         self.refresh_roi_panel()
+
+    def _ordered_render_settings(self) -> list[dict[str, object]]:
+        settings = []
+        render_items = self.render_items
+        for volume_id in self.data_store.volume_order:
+            item = render_items.get(volume_id)
+            if item is None:
+                continue
+            transfer_function = item["transfer_function"]
+            data_range = item["data_range"]
+            colors, opacities = transfer_function.renderer_points(data_range)
+            settings.append(
+                {
+                    "color": colors,
+                    "opacity": opacities,
+                    "visible": self._volume_visible(volume_id),
+                }
+            )
+        return settings
+
+    def _apply_transfer_change(self, volume_id: str, *, sync_payload: bool = False) -> None:
+        try:
+            index = self.data_store.volume_order.index(volume_id)
+        except ValueError:
+            return
+        item = self.render_items.get(volume_id)
+        if item is None:
+            return
+        transfer_function = item["transfer_function"]
+        data_range = item["data_range"]
+        colors, opacities = transfer_function.renderer_points(data_range)
+        self.view.workspace.set_volume_transfer_functions(
+            index,
+            colors,
+            opacities,
+            visible=self._volume_visible(volume_id),
+            render=True,
+        )
+        if sync_payload:
+            self._sync_workspace_payload()
 
     def _current_transfer_target(self) -> str:
         return self.data_store.current_transfer_target()

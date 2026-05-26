@@ -9,6 +9,9 @@ class VolumeRenderer(Protocol):
         volumes: list[object],
         spacing: list[tuple[float, float, float]],
         metadata: list[dict[str, object] | None] | None = None,
+        *,
+        render_settings: list[dict[str, object]] | None = None,
+        camera_policy: str = "preserve",
     ) -> None:
         ...
 

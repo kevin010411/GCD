@@ -314,8 +314,10 @@ class VtkVolumeRenderer:
         spacing,
         color_settings=None,
         opacity_settings=None,
+        visible: bool = True,
         origin=(0.0, 0.0, 0.0),
         metadata: dict[str, object] | None = None,
+        render: bool = True,
     ) -> int:
         metadata = metadata or {}
         np_array, image_data, vtk_spacing, vtk_origin = _build_vtk_image_data(
@@ -342,6 +344,7 @@ class VtkVolumeRenderer:
         self._apply_transfer_functions_to_property(prop, cset, oset)
 
         port = len(self.volumes)
+        volume.SetVisibility(1 if visible else 0)
         self.renderer.AddVolume(volume)
 
         self.volumes.append(
@@ -367,10 +370,11 @@ class VtkVolumeRenderer:
         self.renderer.ResetCameraClippingRange()
         self.store_initial_camera()
         self._rebuild_annotation_actors()
-        self.render()
+        if render:
+            self.render()
         return port
 
-    def clear_volumes(self) -> None:
+    def clear_volumes(self, *, render: bool = True) -> None:
         self.renderer.RemoveAllViewProps()
         self.add_axes_indicator()
         self.volumes = []
@@ -378,20 +382,39 @@ class VtkVolumeRenderer:
         self.annotation_box_actors = {}
         self.annotation_handle_actors = {}
         self.annotation_actor_map = {}
-        self.render()
+        if render:
+            self.render()
 
     def show_volumes(
         self,
         volumes: list[object],
         spacing: list[tuple[float, float, float]],
         metadata: list[dict[str, object] | None] | None = None,
+        *,
+        render_settings: list[dict[str, object]] | None = None,
     ) -> None:
         with timer("渲染"):
-            self.clear_volumes()
+            self.clear_volumes(render=False)
             metadata_items = metadata if metadata is not None else [None] * len(volumes)
-            for data, space, meta in zip(volumes, spacing, metadata_items):
+            setting_items = (
+                render_settings
+                if render_settings is not None
+                else [{} for _ in volumes]
+            )
+            for data, space, meta, settings in zip(
+                volumes, spacing, metadata_items, setting_items
+            ):
                 if data is not None and space is not None:
-                    self.add_volume_data(data, space, metadata=meta)
+                    self.add_volume_data(
+                        data,
+                        space,
+                        color_settings=settings.get("color"),
+                        opacity_settings=settings.get("opacity"),
+                        visible=bool(settings.get("visible", True)),
+                        metadata=meta,
+                        render=False,
+                    )
+            self.render()
 
     def set_volume_transfer_functions(
         self,
@@ -954,21 +977,36 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         volumes: list[object],
         spacing: list[tuple[float, float, float]],
         metadata: list[dict[str, object] | None] | None = None,
+        *,
+        render_settings: list[dict[str, object]] | None = None,
     ) -> None:
+        setting_items = (
+            render_settings if render_settings is not None else [{} for _ in volumes]
+        )
         valid_items = [
-            (data, space, meta)
-            for data, space, meta in zip(
+            (data, space, meta, settings)
+            for data, space, meta, settings in zip(
                 volumes,
                 spacing,
                 metadata if metadata is not None else [None] * len(volumes),
+                setting_items,
             )
             if data is not None and space is not None
         ]
         with timer("渲染"):
-            self.clear_volumes()
-            for data, space, meta in valid_items:
-                self.add_volume_data(data, space, metadata=meta)
-            self._ensure_single_volume_multi_input()
+            self.clear_volumes(render=False)
+            for data, space, meta, settings in valid_items:
+                self.add_volume_data(
+                    data,
+                    space,
+                    color_settings=settings.get("color"),
+                    opacity_settings=settings.get("opacity"),
+                    visible=bool(settings.get("visible", True)),
+                    metadata=meta,
+                    render=False,
+                )
+            self._rebuild_visible_multi_volume()
+            self.render()
 
     def add_volume_data(
         self,
@@ -976,8 +1014,10 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         spacing,
         color_settings=None,
         opacity_settings=None,
+        visible: bool = True,
         origin=(0.0, 0.0, 0.0),
         metadata: dict[str, object] | None = None,
+        render: bool = True,
     ) -> int:
         metadata = metadata or {}
         np_array, image_data, vtk_spacing, vtk_origin = _build_vtk_image_data(
@@ -1023,7 +1063,7 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
                 ),
                 "inverse_affine": None,
                 "volume_id": str(metadata.get("volume_id", port)),
-                "visible": True,
+                "visible": bool(visible),
                 "render_port": port,
             }
         )
@@ -1036,10 +1076,11 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         self.renderer.ResetCameraClippingRange()
         self.store_initial_camera()
         self.multi_volume.Modified()
-        self.render()
+        if render:
+            self.render()
         return port
 
-    def clear_volumes(self) -> None:
+    def clear_volumes(self, *, render: bool = True) -> None:
         self.renderer.RemoveAllViewProps()
         self.add_axes_indicator()
         self._reset_multi_volume_backend()
@@ -1048,7 +1089,8 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         self.annotation_box_actors = {}
         self.annotation_handle_actors = {}
         self.annotation_actor_map = {}
-        self.render()
+        if render:
+            self.render()
 
     def _visible_multi_volume_items(self):
         return [
@@ -1138,15 +1180,19 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         volume = self.volumes[index]
         volume["color"] = list(color_settings or [])
         volume["opacity"] = list(opacity_settings or [])
+        visibility_changed = False
         if visible is not None:
-            volume["visible"] = bool(visible)
-            volume["volume"].SetVisibility(1 if visible else 0)
-            volume["volume"].Modified()
+            next_visible = bool(visible)
+            visibility_changed = bool(volume.get("visible", True)) != next_visible
+            volume["visible"] = next_visible
+            if visibility_changed:
+                volume["volume"].SetVisibility(1 if next_visible else 0)
+                volume["volume"].Modified()
         self._apply_transfer_functions_to_property(
             volume["prop"], volume["color"], volume["opacity"]
         )
         volume["prop"].Modified()
-        if visible is not None:
+        if visibility_changed:
             self._rebuild_visible_multi_volume()
         else:
             render_port = volume.get("render_port")
@@ -1154,6 +1200,7 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
                 self.multi_volume.SetVolume(volume["volume"], int(render_port))
                 self.multi_volume.Modified()
                 self.multi_mapper.Modified()
-        self._rebuild_annotation_actors()
+        if visibility_changed:
+            self._rebuild_annotation_actors()
         if render:
             self.render()

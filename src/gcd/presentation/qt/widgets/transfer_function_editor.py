@@ -77,6 +77,7 @@ class ValueAxis(QWidget):
 
 class TransferFunctionCanvas(QWidget):
     transfer_function_changed = pyqtSignal(object, object)
+    transfer_function_change_finished = pyqtSignal(object, object)
     HANDLE_RADIUS = 5
     PLOT_PADDING = HANDLE_RADIUS + 3
 
@@ -88,6 +89,7 @@ class TransferFunctionCanvas(QWidget):
         self.transfer_function = TransferFunction.overlay_preset()
         self.data_range = DataRange(0.0, 1.0)
         self.selected_index: int | None = None
+        self._dragging_point = False
 
     def _plot_rect(self) -> tuple[float, float, float, float]:
         left = float(self.PLOT_PADDING)
@@ -192,6 +194,9 @@ class TransferFunctionCanvas(QWidget):
         self.transfer_function = self.transfer_function.add_point(new_point)
         self.selected_index = self.transfer_function.control_points.index(new_point)
         self.transfer_function_changed.emit(self.transfer_function, self.data_range)
+        self.transfer_function_change_finished.emit(
+            self.transfer_function, self.data_range
+        )
         self.update()
         self.setFocus()
 
@@ -215,6 +220,9 @@ class TransferFunctionCanvas(QWidget):
         self.transfer_function = self.transfer_function.update_point(index, updated)
         self.selected_index = index
         self.transfer_function_changed.emit(self.transfer_function, self.data_range)
+        self.transfer_function_change_finished.emit(
+            self.transfer_function, self.data_range
+        )
         self.update()
 
     def mouseMoveEvent(self, event) -> None:
@@ -240,8 +248,19 @@ class TransferFunctionCanvas(QWidget):
         opacity = max(0.0, min(1.0 - ((event.position().y() - top) / height), 1.0))
         points[self.selected_index] = replace(current, position=position, opacity=opacity)
         self.transfer_function = TransferFunction.from_iterable(points)
-        self.transfer_function_changed.emit(self.transfer_function, self.data_range)
         self.update()
+        self._dragging_point = True
+        self.transfer_function_changed.emit(self.transfer_function, self.data_range)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging_point:
+            self._dragging_point = False
+            self.transfer_function_change_finished.emit(
+                self.transfer_function, self.data_range
+            )
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event) -> None:
         if event.key() != Qt.Key.Key_Delete or self.selected_index is None:
@@ -249,11 +268,15 @@ class TransferFunctionCanvas(QWidget):
         self.transfer_function = self.transfer_function.remove_point(self.selected_index)
         self.selected_index = None
         self.transfer_function_changed.emit(self.transfer_function, self.data_range)
+        self.transfer_function_change_finished.emit(
+            self.transfer_function, self.data_range
+        )
         self.update()
 
 
 class TransferFunctionEditor(QWidget):
     transfer_function_changed = pyqtSignal(object, object)
+    transfer_function_change_finished = pyqtSignal(object, object)
     load_requested = pyqtSignal()
     save_requested = pyqtSignal()
     export_png_requested = pyqtSignal()
@@ -265,6 +288,9 @@ class TransferFunctionEditor(QWidget):
         self.axis.set_horizontal_padding(self.canvas.PLOT_PADDING)
         self.axis.set_range(0.0, 1.0)
         self.canvas.transfer_function_changed.connect(self._on_transfer_function_changed)
+        self.canvas.transfer_function_change_finished.connect(
+            self._on_transfer_function_change_finished
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -297,6 +323,12 @@ class TransferFunctionEditor(QWidget):
     ) -> None:
         self.axis.set_range(data_range.min_value, data_range.max_value)
         self.transfer_function_changed.emit(transfer_function, data_range)
+
+    def _on_transfer_function_change_finished(
+        self, transfer_function: TransferFunction, data_range: DataRange
+    ) -> None:
+        self.axis.set_range(data_range.min_value, data_range.max_value)
+        self.transfer_function_change_finished.emit(transfer_function, data_range)
 
     def set_transfer_function(
         self, transfer_function: TransferFunction, data_range: DataRange

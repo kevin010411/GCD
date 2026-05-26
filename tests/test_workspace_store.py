@@ -146,7 +146,7 @@ class WorkspaceDataStoreTests(unittest.TestCase):
             [
                 "dataset_added",
                 "volume_upserted",
-                "volume_upserted",
+                "volume_visibility_changed",
                 "volume_order_changed",
             ],
         )

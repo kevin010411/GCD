@@ -10,13 +10,17 @@ class _FakeRenderer:
         self.volumes = [{} for _ in range(volume_count)]
         self.render_calls = 0
         self.applied_snapshots = []
+        self.show_volumes_calls = []
 
-    def show_volumes(self, volumes, spacing, metadata=None) -> None:
-        del spacing, metadata
+    def show_volumes(self, volumes, spacing, metadata=None, **kwargs) -> None:
+        self.show_volumes_calls.append((volumes, spacing, metadata, kwargs))
         self.volumes = [{} for _ in volumes]
 
     def render(self) -> None:
         self.render_calls += 1
+
+    def capture_camera_state(self):
+        return {"position": (9.0, 9.0, 9.0)}
 
     def apply_camera_state(self, snapshot) -> None:
         self.applied_snapshots.append(snapshot)
@@ -73,6 +77,7 @@ class WorkspaceHostTests(unittest.TestCase):
         )
         host._scene_initialized = initialized
         host._scene_signature = scene_signature
+        host._visible_volume_count = previous_count
         host.apply_shared_calls = 0
         host.sync_camera_calls = 0
 
@@ -84,12 +89,21 @@ class WorkspaceHostTests(unittest.TestCase):
 
         host._apply_shared_snapshot_to = _apply_shared_snapshot_to
         host.sync_camera_to_visible_volumes = sync_camera_to_visible_volumes
+        host._volume_visible_at = lambda index: WorkspaceHost._volume_visible_at(
+            host, index
+        )
         return host
 
     def test_show_volumes_first_load_syncs_camera(self) -> None:
         host = self._make_host(initialized=False, previous_count=0, snapshot={"position": (9, 9, 9)})
 
-        WorkspaceHost.show_volumes(host, [object()], [(1.0, 1.0, 1.0)], [None])
+        WorkspaceHost.show_volumes(
+            host,
+            [object()],
+            [(1.0, 1.0, 1.0)],
+            [None],
+            camera_policy="reset_if_first_or_empty",
+        )
 
         self.assertEqual(host.sync_camera_calls, 1)
         self.assertEqual(host.apply_shared_calls, 0)
@@ -103,7 +117,13 @@ class WorkspaceHostTests(unittest.TestCase):
             scene_signature=(("0", ()),),
         )
 
-        WorkspaceHost.show_volumes(host, [object()], [(1.0, 1.0, 1.0)], [None])
+        WorkspaceHost.show_volumes(
+            host,
+            [object()],
+            [(1.0, 1.0, 1.0)],
+            [None],
+            camera_policy="preserve",
+        )
 
         self.assertEqual(host.sync_camera_calls, 0)
         self.assertEqual(host.apply_shared_calls, 2)
@@ -116,11 +136,54 @@ class WorkspaceHostTests(unittest.TestCase):
             scene_signature=(("old", (10, 10, 10)),),
         )
 
-        WorkspaceHost.show_volumes(host, [object()], [(1.0, 1.0, 1.0)], [{"volume_id": "new"}])
+        WorkspaceHost.show_volumes(
+            host,
+            [object()],
+            [(1.0, 1.0, 1.0)],
+            [{"volume_id": "new"}],
+            camera_policy="preserve",
+        )
 
         self.assertEqual(host.sync_camera_calls, 0)
         self.assertEqual(host.apply_shared_calls, 2)
         self.assertEqual(host._scene_signature, (("new", ()),))
+
+    def test_show_volumes_resets_when_previous_scene_had_no_visible_volumes(self) -> None:
+        host = self._make_host(
+            initialized=True,
+            previous_count=0,
+            snapshot={"position": (9, 9, 9)},
+            scene_signature=(),
+        )
+
+        WorkspaceHost.show_volumes(
+            host,
+            [object()],
+            [(1.0, 1.0, 1.0)],
+            [None],
+            render_settings=[{"visible": True}],
+            camera_policy="reset_if_first_or_empty",
+        )
+
+        self.assertEqual(host.sync_camera_calls, 1)
+        self.assertEqual(host.apply_shared_calls, 0)
+
+    def test_visibility_update_tracks_empty_visible_scene_for_next_load(self) -> None:
+        host = self._make_host(initialized=True, previous_count=1)
+
+        WorkspaceHost.set_volume_transfer_functions(
+            host, 0, [], [], visible=False, render=False
+        )
+        WorkspaceHost.show_volumes(
+            host,
+            [object()],
+            [(1.0, 1.0, 1.0)],
+            [None],
+            render_settings=[{"visible": True}],
+            camera_policy="reset_if_first_or_empty",
+        )
+
+        self.assertEqual(host.sync_camera_calls, 1)
 
     def test_apply_layout_updates_standard_and_roi_workspaces(self) -> None:
         host = self._make_host(initialized=False, previous_count=0)

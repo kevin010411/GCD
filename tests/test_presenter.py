@@ -87,6 +87,7 @@ class _VolumeList:
 class _TransferEditor:
     def __init__(self) -> None:
         self.transfer_function_changed = _Signal()
+        self.transfer_function_change_finished = _Signal()
         self.load_requested = _Signal()
         self.save_requested = _Signal()
         self.export_png_requested = _Signal()
@@ -113,7 +114,6 @@ class _Workspace:
         self._overlay_status = ""
         self.replace_camera_calls = 0
         self.sync_camera_calls = 0
-        self.store_initial_camera_calls = 0
         self.transfer_calls = []
         self.render_calls = 0
         self.show_volumes_calls = []
@@ -121,14 +121,16 @@ class _Workspace:
     def set_workspace_payload(self, **kwargs):
         self.payloads.append(kwargs)
 
-    def show_volumes(self, *args):
-        self.show_volumes_calls.append(args)
+    def show_volumes(self, *args, **kwargs):
+        self.show_volumes_calls.append((args, kwargs))
 
     def overlay_status_message(self):
         return self._overlay_status
 
     def set_volume_transfer_functions(self, *args, **kwargs):
         self.transfer_calls.append((args, kwargs))
+        if kwargs.get("render"):
+            self.render()
 
     def render(self):
         self.render_calls += 1
@@ -138,9 +140,6 @@ class _Workspace:
 
     def sync_camera_to_visible_volumes(self):
         self.sync_camera_calls += 1
-
-    def store_initial_camera(self):
-        self.store_initial_camera_calls += 1
 
     def export_annotations(self):
         class _State:
@@ -174,15 +173,14 @@ class _Workspace:
 
 class _FakeRenderer:
     def __init__(self) -> None:
-        self.last_show_volumes = None
         self.render_calls = 0
         self.transfer_calls = []
 
     def set_rotation_speed(self, _value):
         pass
 
-    def show_volumes(self, *args, **_kwargs):
-        self.last_show_volumes = args
+    def show_volumes(self, *_args, **_kwargs):
+        pass
 
     def start_rotation(self):
         pass
@@ -200,9 +198,6 @@ class _FakeRenderer:
         pass
 
     def clear_volumes(self):
-        pass
-
-    def store_initial_camera(self):
         pass
 
 
@@ -488,10 +483,11 @@ class PresenterMethodTests(unittest.TestCase):
         np.testing.assert_array_equal(base_item["data"], workflow.loaded_volume_data)
         self.assertEqual(base_item["spacing"], (1.5, 1.5, 2.0))
         self.assertEqual(base_item["metadata"]["vtk_origin"], (1.0, 2.0, 3.0))
-        np.testing.assert_array_equal(view.workspace.show_volumes_calls[-1][0][0], workflow.loaded_volume_data)
+        args, kwargs = view.workspace.show_volumes_calls[-1]
+        np.testing.assert_array_equal(args[0][0], workflow.loaded_volume_data)
+        self.assertEqual(kwargs["camera_policy"], "reset_if_first_or_empty")
         self.assertEqual(workflow.compute_calls, [])
         self.assertEqual(view.workspace.sync_camera_calls, 0)
-        self.assertEqual(view.workspace.store_initial_camera_calls, 0)
 
     def test_gradcam_run_creates_transfer_item_after_load(self) -> None:
         view = _FakeView()
@@ -618,6 +614,7 @@ class PresenterMethodTests(unittest.TestCase):
         self.assertGreater(view.workspace.render_calls, 0)
         self.assertEqual(view.workspace.sync_camera_calls, 0)
         self.assertEqual(view.workspace.replace_camera_calls, 0)
+        self.assertEqual(len(view.workspace.show_volumes_calls), 1)
 
     def test_delete_volume_removes_prediction_and_rerenders(self) -> None:
         view = _FakeView()
@@ -641,6 +638,8 @@ class PresenterMethodTests(unittest.TestCase):
         self.assertEqual(presenter.volume_order, [presenter.datasets[dataset_id].base_volume_id])
         self.assertNotIn(result_id, presenter.render_items)
         self.assertGreater(len(view.workspace.show_volumes_calls), 0)
+        _args, kwargs = view.workspace.show_volumes_calls[-1]
+        self.assertEqual(kwargs["camera_policy"], "preserve")
 
     def test_replace_camera_uses_workspace(self) -> None:
         view = _FakeView()
@@ -673,6 +672,58 @@ class PresenterMethodTests(unittest.TestCase):
         presenter.on_open_file_requested()
 
         self.assertGreater(len(view.workspace.show_volumes_calls), 0)
+        _args, kwargs = view.workspace.show_volumes_calls[-1]
+        self.assertIn("render_settings", kwargs)
+
+    def test_transfer_change_updates_renderer_without_rebuilding_volumes(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+        presenter.on_open_file_requested()
+        show_count = len(view.workspace.show_volumes_calls)
+        transfer_count = len(view.workspace.transfer_calls)
+
+        presenter.on_transfer_function_changed(
+            TransferFunction.heatmap_preset(), DataRange(0.0, 1.0)
+        )
+
+        self.assertEqual(len(view.workspace.show_volumes_calls), show_count)
+        self.assertEqual(len(view.workspace.transfer_calls), transfer_count + 1)
+        _args, kwargs = view.workspace.transfer_calls[-1]
+        self.assertTrue(kwargs["render"])
+
+    def test_transfer_drag_change_defers_workspace_payload_sync(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+        presenter.on_open_file_requested()
+        payload_count = len(view.workspace.payloads)
+
+        presenter.on_transfer_function_changed(
+            TransferFunction.heatmap_preset(), DataRange(0.0, 1.0)
+        )
+
+        self.assertEqual(len(view.workspace.payloads), payload_count)
+
+        presenter.on_transfer_function_change_finished(
+            TransferFunction.heatmap_preset(), DataRange(0.0, 1.0)
+        )
+
+        self.assertEqual(len(view.workspace.payloads), payload_count + 1)
 
     def test_transfer_item_rename_updates_presenter_state(self) -> None:
         view = _FakeView()

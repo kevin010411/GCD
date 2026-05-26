@@ -16,9 +16,11 @@ from ..domain.workspace_data import (
     SelectionState,
     TransferChanged,
     VolumeOrderChanged,
+    VolumeRenamed,
     VolumeRecord,
     VolumeDeleted,
     VolumeUpserted,
+    VolumeVisibilityChanged,
     WorkspaceEvent,
     XaiComputeResult,
 )
@@ -170,7 +172,7 @@ class WorkspaceDataStore:
         if volume is None:
             return
         self.volumes[volume_id] = replace(volume, visible=bool(visible))
-        self._emit(VolumeUpserted(volume_id, volume.dataset_id))
+        self._emit(VolumeVisibilityChanged(volume_id, bool(visible)))
 
     def set_volume_order(self, ordered_ids: list[str]) -> None:
         if not ordered_ids:
@@ -187,7 +189,7 @@ class WorkspaceDataStore:
         if volume is None:
             return False
         self.volumes[volume_id] = replace(volume, display_name=name)
-        self._emit(VolumeUpserted(volume_id, volume.dataset_id))
+        self._emit(VolumeRenamed(volume_id))
         return True
 
     def set_selected_transfer_volume(self, volume_id: str) -> None:
