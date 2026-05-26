@@ -21,7 +21,7 @@ class GradCamPluginPanel(PluginPanel):
         self.content_layout.addLayout(dataset_layout)
 
         class_layout = QHBoxLayout()
-        class_layout.addWidget(QLabel("Answer"))
+        class_layout.addWidget(QLabel("Class"))
         self.class_spinbox = QSpinBox()
         self.class_spinbox.setRange(0, 100)
         class_layout.addWidget(self.class_spinbox, 1)

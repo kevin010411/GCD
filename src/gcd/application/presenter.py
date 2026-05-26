@@ -214,8 +214,6 @@ class MainWindowPresenter:
         self.data_store.add_loaded_dataset(dataset_id, result)
         self.selected_grad_dataset_id = dataset_id
         self.selected_perturbation_dataset_id = dataset_id
-        self.view.workspace.sync_camera_to_visible_volumes()
-        self.view.workspace.store_initial_camera()
         self.view.set_rotation_running(True)
 
     def _on_store_event(self, event: WorkspaceEvent) -> None:

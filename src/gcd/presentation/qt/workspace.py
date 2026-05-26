@@ -1920,16 +1920,14 @@ class WorkspaceHost(QWidget):
         )
         self.standard_workspace.renderer.show_volumes(volumes, spacing, metadata)
         self.roi_workspace.renderer.show_volumes(volumes, spacing, metadata)
-        scene_changed = (
-            not self._scene_initialized
-        ) or scene_signature != self._scene_signature
-        if scene_changed:
+        first_scene = not self._scene_initialized
+        if first_scene:
             self.sync_camera_to_visible_volumes()
             self._scene_initialized = True
-            self._scene_signature = scene_signature
         elif self.shared_state.camera_snapshot:
             self._apply_shared_snapshot_to(self.standard_workspace)
             self._apply_shared_snapshot_to(self.roi_workspace)
+        self._scene_signature = scene_signature
         self.standard_workspace.renderer.render()
         self.roi_workspace.renderer.render()
 

@@ -108,6 +108,20 @@ class WorkspaceHostTests(unittest.TestCase):
         self.assertEqual(host.sync_camera_calls, 0)
         self.assertEqual(host.apply_shared_calls, 2)
 
+    def test_show_volumes_reuses_snapshot_when_scene_shape_changes(self) -> None:
+        host = self._make_host(
+            initialized=True,
+            previous_count=1,
+            snapshot={"position": (9, 9, 9)},
+            scene_signature=(("old", (10, 10, 10)),),
+        )
+
+        WorkspaceHost.show_volumes(host, [object()], [(1.0, 1.0, 1.0)], [{"volume_id": "new"}])
+
+        self.assertEqual(host.sync_camera_calls, 0)
+        self.assertEqual(host.apply_shared_calls, 2)
+        self.assertEqual(host._scene_signature, (("new", ()),))
+
     def test_apply_layout_updates_standard_and_roi_workspaces(self) -> None:
         host = self._make_host(initialized=False, previous_count=0)
         host.mode = WorkspaceMode.STANDARD

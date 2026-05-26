@@ -459,8 +459,8 @@ class PresenterMethodTests(unittest.TestCase):
         self.assertEqual(base_item["metadata"]["vtk_origin"], (1.0, 2.0, 3.0))
         np.testing.assert_array_equal(view.workspace.show_volumes_calls[-1][0][0], workflow.loaded_volume_data)
         self.assertEqual(workflow.compute_calls, [])
-        self.assertEqual(view.workspace.sync_camera_calls, 1)
-        self.assertEqual(view.workspace.store_initial_camera_calls, 1)
+        self.assertEqual(view.workspace.sync_camera_calls, 0)
+        self.assertEqual(view.workspace.store_initial_camera_calls, 0)
 
     def test_gradcam_run_creates_transfer_item_after_load(self) -> None:
         view = _FakeView()
@@ -535,7 +535,7 @@ class PresenterMethodTests(unittest.TestCase):
         presenter.on_volume_visibility_changed(base_item_id, False)
 
         self.assertGreater(view.workspace.render_calls, 0)
-        self.assertEqual(view.workspace.sync_camera_calls, 1)
+        self.assertEqual(view.workspace.sync_camera_calls, 0)
         self.assertEqual(view.workspace.replace_camera_calls, 0)
 
     def test_delete_volume_removes_prediction_and_rerenders(self) -> None:

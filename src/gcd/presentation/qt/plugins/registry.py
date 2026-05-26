@@ -11,7 +11,6 @@ from .perturbation import PerturbationPluginPanel
 from .roi_annotation import RoiAnnotationPluginPanel
 from .transfer_volume import TransferVolumePluginPanel
 
-
 PanelFactory = Callable[[QWidget | None], QWidget]
 
 
@@ -34,17 +33,17 @@ DEFAULT_PLUGIN_DEFINITIONS: tuple[PluginDefinition, ...] = (
         "current",
     ),
     PluginDefinition(
-        "gradcam",
-        "Grad-CAM Compute",
-        "Grad-CAM",
-        GradCamPluginPanel,
-        "standard",
-    ),
-    PluginDefinition(
         "camera",
         "Camera Controls",
         "Camera",
         CameraControlsPluginPanel,
+        "standard",
+    ),
+    PluginDefinition(
+        "gradcam",
+        "Gradient-Based XAI",
+        "Grad-CAM",
+        GradCamPluginPanel,
         "standard",
     ),
     PluginDefinition(
