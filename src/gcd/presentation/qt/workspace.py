@@ -20,10 +20,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
 from ...domain import DataRange, TransferFunction
-from ...infrastructure.renderer import StandardMultiVolumeRenderer, VtkVolumeRenderer
 from .annotation_geometry import move_rect, normalize_rect, resize_rect_with_handle
 from .workspace_models import (
     AnnotationMode,
@@ -872,9 +870,16 @@ class ViewerWorkspace(QWidget):
     annotations_changed = pyqtSignal()
     volume_view_title = "3d view"
 
-    def __init__(self, parent=None, *, enable_annotations: bool = True) -> None:
+    def __init__(
+        self,
+        parent=None,
+        *,
+        enable_annotations: bool = True,
+        initialize_3d_on_idle: bool = True,
+    ) -> None:
         super().__init__(parent)
         self.enable_annotations = enable_annotations
+        self.initialize_3d_on_idle = initialize_3d_on_idle
         self.state = WorkspaceState()
         self.presets = {preset.id: preset for preset in default_layout_presets()}
         self.payload = ViewerPayload()
@@ -887,6 +892,8 @@ class ViewerWorkspace(QWidget):
         self.splitters: dict[str, QSplitter] = {}
         self.current_preset = self.presets[self.state.active_layout_id]
         self.layout_root_widget: QWidget | None = None
+        self._renderer = None
+        self.vtk_widget = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -899,11 +906,19 @@ class ViewerWorkspace(QWidget):
         layout.addWidget(self.workspace_frame, 1)
 
         self._create_viewers()
-        if self.enable_annotations:
-            self.renderer.set_annotation_event_handler(
-                self._handle_renderer_annotation_event
-            )
         self.apply_layout(self.state.active_layout_id)
+        if self.initialize_3d_on_idle:
+            QTimer.singleShot(50, self.ensure_3d_viewer)
+
+    @property
+    def renderer(self):
+        self.ensure_3d_viewer()
+        return self._renderer
+
+    def ensure_3d_viewer(self) -> None:
+        if self._renderer is not None:
+            return
+        self._initialize_3d_viewer()
 
     def _create_viewers(self) -> None:
         self._create_3d_viewer()
@@ -915,12 +930,7 @@ class ViewerWorkspace(QWidget):
         content_layout = QVBoxLayout(self.volume_content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
-        self.vtk_widget = QVTKRenderWindowInteractor(self.volume_content)
-        self.vtk_widget.setObjectName("volumeViewport")
-        content_layout.addWidget(self.vtk_widget, 1)
-        self.renderer = self._create_renderer(self.vtk_widget)
-        self.vtk_widget.Initialize()
-        self.vtk_widget.Start()
+        self.volume_content_layout = content_layout
         self.state.tiles["viewer-3d"] = ViewerTileState(
             "viewer-3d", ViewerType.VOLUME_3D, self.volume_view_title
         )
@@ -929,7 +939,30 @@ class ViewerWorkspace(QWidget):
         tile.selected.connect(self._on_viewer_selected)
         self.tile_widgets["viewer-3d"] = tile
 
+    def _initialize_3d_viewer(self) -> None:
+        # VTK's umbrella module performs runtime initialization that QVTK and
+        # GPU volume rendering need on Windows. Keep it here so app startup
+        # remains lazy, but run it before importing QVTK.
+        import vtk  # noqa: F401
+
+        from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+
+        self.vtk_widget = QVTKRenderWindowInteractor(self.volume_content)
+        self.vtk_widget.setObjectName("volumeViewport")
+        self.volume_content_layout.addWidget(self.vtk_widget, 1)
+        self.vtk_widget.Initialize()
+        self.vtk_widget.Start()
+        self._renderer = self._create_renderer(self.vtk_widget)
+        if self.enable_annotations:
+            self._renderer.set_annotation_event_handler(
+                self._handle_renderer_annotation_event
+            )
+            self._refresh_renderer_annotations()
+        self._refresh_3d_view()
+
     def _create_renderer(self, vtk_widget):
+        from ...infrastructure.renderer import StandardMultiVolumeRenderer
+
         return StandardMultiVolumeRenderer(vtk_widget)
 
     def _create_slice_viewer(self, viewer_id: str) -> None:
@@ -1335,7 +1368,7 @@ class ViewerWorkspace(QWidget):
             )
 
     def _refresh_3d_view(self) -> None:
-        if not hasattr(self, "vtk_widget"):
+        if self.vtk_widget is None or self._renderer is None:
             return
         self.volume_content.show()
         self.vtk_widget.show()
@@ -1346,8 +1379,8 @@ class ViewerWorkspace(QWidget):
         QTimer.singleShot(0, self._refresh_3d_tile_chrome)
         QTimer.singleShot(25, self._refresh_3d_tile_chrome)
         QTimer.singleShot(100, self._refresh_3d_tile_chrome)
-        QTimer.singleShot(0, self.renderer.render)
-        QTimer.singleShot(25, self.renderer.render)
+        QTimer.singleShot(0, self._renderer.render)
+        QTimer.singleShot(25, self._renderer.render)
 
     def _refresh_3d_tile_chrome(self) -> None:
         tile = self.tile_widgets.get("viewer-3d")
@@ -1367,20 +1400,20 @@ class ViewerWorkspace(QWidget):
         tile.header.title_label.update()
 
     def shutdown(self) -> None:
-        if hasattr(self, "renderer"):
-            self.renderer.shutdown()
+        if self._renderer is not None:
+            self._renderer.shutdown()
 
     def _refresh_renderer_annotations(self) -> None:
-        if not hasattr(self, "renderer"):
+        if self._renderer is None:
             return
         if not self.enable_annotations:
-            self.renderer.set_annotation_mode(AnnotationMode.OFF.value)
-            self.renderer.set_annotations(
+            self._renderer.set_annotation_mode(AnnotationMode.OFF.value)
+            self._renderer.set_annotations(
                 [], [], None, None, self.state.annotations.point_size
             )
             return
-        self.renderer.set_annotation_mode(self.state.annotations.mode.value)
-        self.renderer.set_annotations(
+        self._renderer.set_annotation_mode(self.state.annotations.mode.value)
+        self._renderer.set_annotations(
             self.state.annotations.points,
             self.state.annotations.boxes_3d,
             self.state.annotations.selected_annotation_id,
@@ -1769,16 +1802,18 @@ class ViewerWorkspace(QWidget):
 
 class StandardWorkspace(ViewerWorkspace):
     def __init__(self, parent=None) -> None:
-        super().__init__(parent, enable_annotations=False)
+        super().__init__(parent, enable_annotations=False, initialize_3d_on_idle=False)
 
 
 class RoiWorkspace(ViewerWorkspace):
     volume_view_title = "Interactive 3D"
 
     def __init__(self, parent=None) -> None:
-        super().__init__(parent, enable_annotations=True)
+        super().__init__(parent, enable_annotations=True, initialize_3d_on_idle=False)
 
     def _create_renderer(self, vtk_widget):
+        from ...infrastructure.renderer import VtkVolumeRenderer
+
         return VtkVolumeRenderer(vtk_widget)
 
 
@@ -1793,6 +1828,9 @@ class WorkspaceHost(QWidget):
         self._scene_initialized = False
         self._scene_signature: tuple[tuple[str, tuple[int, ...]], ...] = ()
         self._visible_volume_count = 0
+        self._last_volume_render_request = None
+        self._rotation_speed = 0.5
+        self._rotation_requested = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1812,6 +1850,7 @@ class WorkspaceHost(QWidget):
         self.roi_workspace.annotations_changed.connect(self.annotations_changed.emit)
 
         self.stack.setCurrentWidget(self.standard_workspace)
+        QTimer.singleShot(0, self.standard_workspace.ensure_3d_viewer)
 
     @property
     def active_workspace(self) -> ViewerWorkspace:
@@ -1842,11 +1881,16 @@ class WorkspaceHost(QWidget):
         self.mode = target_mode
         if self.mode == WorkspaceMode.ROI:
             self.stack.setCurrentWidget(self.roi_workspace)
+            if hasattr(self.roi_workspace, "ensure_3d_viewer"):
+                self.roi_workspace.ensure_3d_viewer()
+            WorkspaceHost._sync_last_scene_to_workspace(self, self.roi_workspace)
             if (
                 self.roi_workspace.current_preset.id
                 != self.standard_workspace.current_preset.id
             ):
-                self.roi_workspace.apply_layout(self.standard_workspace.current_preset.id)
+                self.roi_workspace.apply_layout(
+                    self.standard_workspace.current_preset.id
+                )
             self._apply_shared_snapshot_to(self.roi_workspace)
         else:
             self.stack.setCurrentWidget(self.standard_workspace)
@@ -1857,7 +1901,32 @@ class WorkspaceHost(QWidget):
 
     def _apply_shared_snapshot_to(self, workspace: ViewerWorkspace) -> None:
         workspace.apply_slice_snapshot(self.shared_state.slice_snapshot)
+        if not WorkspaceHost._workspace_has_renderer(workspace):
+            return
         workspace.renderer.apply_camera_state(self.shared_state.camera_snapshot)
+
+    @staticmethod
+    def _workspace_has_renderer(workspace) -> bool:
+        if hasattr(workspace, "_renderer"):
+            return workspace._renderer is not None
+        return hasattr(workspace, "renderer")
+
+    def _initialized_workspaces(self) -> list[ViewerWorkspace]:
+        return [
+            workspace
+            for workspace in (self.standard_workspace, self.roi_workspace)
+            if WorkspaceHost._workspace_has_renderer(workspace)
+        ]
+
+    def _sync_last_scene_to_workspace(self, workspace: ViewerWorkspace) -> None:
+        if getattr(self, "_last_volume_render_request", None) is None:
+            return
+        volumes, spacing, metadata, render_settings = self._last_volume_render_request
+        workspace.renderer.show_volumes(
+            volumes, spacing, metadata, render_settings=render_settings
+        )
+        if self.shared_state.camera_snapshot:
+            workspace.renderer.apply_camera_state(self.shared_state.camera_snapshot)
 
     def apply_layout(self, preset_id: str) -> None:
         self.standard_workspace.apply_layout(preset_id)
@@ -1918,6 +1987,12 @@ class WorkspaceHost(QWidget):
         setting_items = (
             render_settings if render_settings is not None else [{} for _ in volumes]
         )
+        self._last_volume_render_request = (
+            volumes,
+            spacing,
+            metadata,
+            render_settings,
+        )
         scene_signature = tuple(
             (
                 str((meta or {}).get("volume_id", index)),
@@ -1937,6 +2012,14 @@ class WorkspaceHost(QWidget):
             and (not self._scene_initialized or self._visible_volume_count == 0)
             and next_visible_count > 0
         )
+        if next_visible_count == 0 and not WorkspaceHost._workspace_has_renderer(
+            self.standard_workspace
+        ):
+            self._scene_initialized = False
+            self._scene_signature = scene_signature
+            self._visible_volume_count = 0
+            return
+
         preserved_snapshot = None
         if camera_policy == "preserve":
             capture = getattr(
@@ -1950,26 +2033,27 @@ class WorkspaceHost(QWidget):
         self.standard_workspace.renderer.show_volumes(
             volumes, spacing, metadata, render_settings=render_settings
         )
-        self.roi_workspace.renderer.show_volumes(
-            volumes, spacing, metadata, render_settings=render_settings
-        )
+        if WorkspaceHost._workspace_has_renderer(self.roi_workspace):
+            self.roi_workspace.renderer.show_volumes(
+                volumes, spacing, metadata, render_settings=render_settings
+            )
         if reset_camera:
             self.sync_camera_to_visible_volumes()
             self._scene_initialized = True
         elif preserved_snapshot:
             self.shared_state.camera_snapshot = preserved_snapshot
-            self._apply_shared_snapshot_to(self.standard_workspace)
-            self._apply_shared_snapshot_to(self.roi_workspace)
+            for workspace in WorkspaceHost._initialized_workspaces(self):
+                self._apply_shared_snapshot_to(workspace)
         elif self.shared_state.camera_snapshot:
-            self._apply_shared_snapshot_to(self.standard_workspace)
-            self._apply_shared_snapshot_to(self.roi_workspace)
+            for workspace in WorkspaceHost._initialized_workspaces(self):
+                self._apply_shared_snapshot_to(workspace)
         else:
             self._scene_initialized = self._scene_initialized or next_visible_count > 0
         self._scene_initialized = self._scene_initialized or next_visible_count > 0
         self._scene_signature = scene_signature
         self._visible_volume_count = next_visible_count
-        self.standard_workspace.renderer.render()
-        self.roi_workspace.renderer.render()
+        for workspace in WorkspaceHost._initialized_workspaces(self):
+            workspace.renderer.render()
 
     def set_volume_transfer_functions(
         self,
@@ -1981,20 +2065,44 @@ class WorkspaceHost(QWidget):
         render: bool = True,
     ) -> None:
         previous_visible = self._volume_visible_at(index)
+        if getattr(self, "_last_volume_render_request", None) is not None:
+            volumes, spacing, metadata, render_settings = (
+                self._last_volume_render_request
+            )
+            settings = (
+                list(render_settings)
+                if render_settings is not None
+                else [{} for _ in volumes]
+            )
+            if 0 <= index < len(settings):
+                settings[index] = {
+                    **settings[index],
+                    "color": color_points,
+                    "opacity": opacity_points,
+                }
+                if visible is not None:
+                    settings[index]["visible"] = bool(visible)
+                self._last_volume_render_request = (
+                    volumes,
+                    spacing,
+                    metadata,
+                    settings,
+                )
         self.standard_workspace.renderer.set_volume_transfer_functions(
             index, color_points, opacity_points, visible=visible, render=False
         )
-        self.roi_workspace.renderer.set_volume_transfer_functions(
-            index, color_points, opacity_points, visible=visible, render=False
-        )
+        if WorkspaceHost._workspace_has_renderer(self.roi_workspace):
+            self.roi_workspace.renderer.set_volume_transfer_functions(
+                index, color_points, opacity_points, visible=visible, render=False
+            )
         if visible is not None and previous_visible is not None:
             next_visible = bool(visible)
             if previous_visible != next_visible:
                 self._visible_volume_count += 1 if next_visible else -1
                 self._visible_volume_count = max(0, self._visible_volume_count)
         if render:
-            self.standard_workspace.renderer.render()
-            self.roi_workspace.renderer.render()
+            for workspace in WorkspaceHost._initialized_workspaces(self):
+                workspace.renderer.render()
 
     def _volume_visible_at(self, index: int) -> bool | None:
         volumes = getattr(self.standard_workspace.renderer, "volumes", [])
@@ -2009,25 +2117,34 @@ class WorkspaceHost(QWidget):
         return True
 
     def set_rotation_speed(self, speed: float) -> None:
-        self.standard_workspace.renderer.set_rotation_speed(speed)
-        self.roi_workspace.renderer.set_rotation_speed(speed)
+        self._rotation_speed = float(speed)
+        if WorkspaceHost._workspace_has_renderer(self.standard_workspace):
+            self.standard_workspace.renderer.set_rotation_speed(speed)
+        if WorkspaceHost._workspace_has_renderer(self.roi_workspace):
+            self.roi_workspace.renderer.set_rotation_speed(speed)
 
     def start_rotation(self) -> None:
-        self.active_workspace.renderer.start_rotation()
+        self._rotation_requested = True
+        if WorkspaceHost._workspace_has_renderer(self.active_workspace):
+            self.active_workspace.renderer.start_rotation()
 
     def stop_rotation(self) -> None:
-        self.active_workspace.renderer.stop_rotation()
+        self._rotation_requested = False
+        if WorkspaceHost._workspace_has_renderer(self.active_workspace):
+            self.active_workspace.renderer.stop_rotation()
 
     def clear_volumes(self) -> None:
         self.standard_workspace.renderer.clear_volumes()
-        self.roi_workspace.renderer.clear_volumes()
+        if WorkspaceHost._workspace_has_renderer(self.roi_workspace):
+            self.roi_workspace.renderer.clear_volumes()
         self._scene_initialized = False
         self._scene_signature = ()
         self._visible_volume_count = 0
+        self._last_volume_render_request = None
 
     def render(self) -> None:
-        self.standard_workspace.renderer.render()
-        self.roi_workspace.renderer.render()
+        for workspace in WorkspaceHost._initialized_workspaces(self):
+            workspace.renderer.render()
 
     def overlay_status_message(self) -> str:
         return self.active_workspace.overlay_status_message()
@@ -2036,16 +2153,16 @@ class WorkspaceHost(QWidget):
         self.sync_camera_to_visible_volumes()
 
     def sync_camera_to_visible_volumes(self) -> None:
-        snapshot = self.roi_workspace.renderer.camera_state_for_visible_volumes()
-        if snapshot is None:
-            snapshot = (
-                self.standard_workspace.renderer.camera_state_for_visible_volumes()
-            )
+        snapshot = None
+        for workspace in WorkspaceHost._initialized_workspaces(self):
+            snapshot = workspace.renderer.camera_state_for_visible_volumes()
+            if snapshot is not None:
+                break
         if snapshot is None:
             return
         self.shared_state.camera_snapshot = snapshot
-        self.standard_workspace.renderer.apply_camera_state(snapshot)
-        self.roi_workspace.renderer.apply_camera_state(snapshot)
+        for workspace in WorkspaceHost._initialized_workspaces(self):
+            workspace.renderer.apply_camera_state(snapshot)
 
     def capture_camera_state(self):
         snapshot = self.active_workspace.renderer.capture_camera_state()
@@ -2054,8 +2171,8 @@ class WorkspaceHost(QWidget):
 
     def apply_camera_state(self, snapshot) -> None:
         self.shared_state.camera_snapshot = snapshot
-        self.standard_workspace.renderer.apply_camera_state(snapshot)
-        self.roi_workspace.renderer.apply_camera_state(snapshot)
+        for workspace in WorkspaceHost._initialized_workspaces(self):
+            workspace.renderer.apply_camera_state(snapshot)
 
     def save_screenshot(self, filename: str) -> None:
         self.active_workspace.renderer.save_screenshot(filename)

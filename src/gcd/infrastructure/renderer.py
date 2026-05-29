@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import imageio
 import numpy as np
-import vtk
-import vtk.util.numpy_support
 
 from src.gcd.presentation.qt.annotation_geometry import has_meaningful_3d_box_drag
 from src.utils.utils import timer
@@ -29,7 +26,9 @@ def _direction_user_matrix(
 ):
     if direction_matrix is None:
         return None
-    matrix = vtk.vtkMatrix4x4()
+    from vtkmodules.vtkCommonMath import vtkMatrix4x4
+
+    matrix = vtkMatrix4x4()
     matrix.Identity()
     origin_vector = np.asarray(origin, dtype=np.float32)
     translation = origin_vector - direction_matrix @ origin_vector
@@ -51,15 +50,19 @@ def _apply_vtk_direction(volume, origin, metadata: dict[str, object]) -> np.ndar
 
 
 def _build_vtk_image_data(data, spacing, origin, metadata: dict[str, object]):
+    from vtkmodules.vtkCommonCore import VTK_FLOAT
+    from vtkmodules.vtkCommonDataModel import vtkImageData
+    from vtkmodules.util import numpy_support
+
     if hasattr(data, "detach"):
         np_array = np.ascontiguousarray(data.detach().cpu().numpy())
     else:
         np_array = np.ascontiguousarray(np.array(data))
 
-    vtk_array = vtk.util.numpy_support.numpy_to_vtk(
-        np_array.ravel(order="C"), deep=True, array_type=vtk.VTK_FLOAT
+    vtk_array = numpy_support.numpy_to_vtk(
+        np_array.ravel(order="C"), deep=True, array_type=VTK_FLOAT
     )
-    image_data = vtk.vtkImageData()
+    image_data = vtkImageData()
     dims = (int(np_array.shape[2]), int(np_array.shape[1]), int(np_array.shape[0]))
     image_data.SetDimensions(*dims)
     vtk_spacing = tuple(metadata.get("vtk_spacing", spacing))
@@ -243,13 +246,22 @@ class Roi3DInteractionController:
 
 class VtkVolumeRenderer:
     def __init__(self, vtk_widget) -> None:
+        from vtkmodules.vtkInteractionStyle import (
+            vtkInteractorStyleTrackballCamera,
+            vtkInteractorStyleUser,
+        )
+        from vtkmodules.vtkRenderingCore import vtkRenderer
+
+        import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
+        import vtkmodules.vtkRenderingVolumeOpenGL2  # noqa: F401
+
         self.vtk_widget = vtk_widget
-        self.renderer = vtk.vtkRenderer()
+        self.renderer = vtkRenderer()
         self.render_window = self.vtk_widget.GetRenderWindow()
         self.render_window.AddRenderer(self.renderer)
         self.interactor = self.render_window.GetInteractor()
-        self.camera_interactor_style = vtk.vtkInteractorStyleTrackballCamera()
-        self.annotation_interactor_style = vtk.vtkInteractorStyleUser()
+        self.camera_interactor_style = vtkInteractorStyleTrackballCamera()
+        self.annotation_interactor_style = vtkInteractorStyleUser()
         self.interactor.SetInteractorStyle(self.camera_interactor_style)
 
         self.volumes = []
@@ -292,7 +304,10 @@ class VtkVolumeRenderer:
         )
 
     def add_axes_indicator(self) -> None:
-        axes = vtk.vtkAxesActor()
+        from vtkmodules.vtkInteractionWidgets import vtkOrientationMarkerWidget
+        from vtkmodules.vtkRenderingAnnotation import vtkAxesActor
+
+        axes = vtkAxesActor()
         axes.SetTotalLength(1.0, 1.0, 1.0)
         axes.SetShaftTypeToCylinder()
         axes.SetCylinderRadius(0.02)
@@ -301,7 +316,7 @@ class VtkVolumeRenderer:
         axes.SetYAxisLabelText("Y")
         axes.SetZAxisLabelText("Z")
 
-        self.orientation_widget = vtk.vtkOrientationMarkerWidget()
+        self.orientation_widget = vtkOrientationMarkerWidget()
         self.orientation_widget.SetOrientationMarker(axes)
         self.orientation_widget.SetInteractor(self.interactor)
         self.orientation_widget.SetViewport(0.8, 0.0, 1.0, 0.2)
@@ -319,22 +334,25 @@ class VtkVolumeRenderer:
         metadata: dict[str, object] | None = None,
         render: bool = True,
     ) -> int:
+        from vtkmodules.vtkRenderingCore import vtkVolume, vtkVolumeProperty
+        from vtkmodules.vtkRenderingVolume import vtkGPUVolumeRayCastMapper
+
         metadata = metadata or {}
         np_array, image_data, vtk_spacing, vtk_origin = _build_vtk_image_data(
             data, spacing, origin, metadata
         )
 
-        prop = vtk.vtkVolumeProperty()
+        prop = vtkVolumeProperty()
         prop.ShadeOn()
         prop.SetInterpolationTypeToLinear()
         prop.SetAmbient(0.4)
         prop.SetDiffuse(0.6)
         prop.SetSpecular(0.4)
 
-        mapper = vtk.vtkGPUVolumeRayCastMapper()
+        mapper = vtkGPUVolumeRayCastMapper()
         mapper.SetInputData(image_data)
 
-        volume = vtk.vtkVolume()
+        volume = vtkVolume()
         volume.SetProperty(prop)
         volume.SetMapper(mapper)
         vtk_direction = _apply_vtk_direction(volume, vtk_origin, metadata)
@@ -441,12 +459,15 @@ class VtkVolumeRenderer:
     def _apply_transfer_functions_to_property(
         self, prop, color_settings, opacity_settings
     ) -> None:
-        pwf = vtk.vtkPiecewiseFunction()
+        from vtkmodules.vtkCommonDataModel import vtkPiecewiseFunction
+        from vtkmodules.vtkRenderingCore import vtkColorTransferFunction
+
+        pwf = vtkPiecewiseFunction()
         for value, opacity in opacity_settings:
             pwf.AddPoint(float(value), float(opacity))
         prop.SetScalarOpacity(pwf)
 
-        ctf = vtk.vtkColorTransferFunction()
+        ctf = vtkColorTransferFunction()
         for value, red, green, blue in color_settings:
             ctf.AddRGBPoint(float(value), float(red), float(green), float(blue))
         prop.SetColor(ctf)
@@ -473,7 +494,7 @@ class VtkVolumeRenderer:
         ]
         visible_bounds_found = False
         for volume in self.volumes:
-            if hasattr(volume["volume"], "GetVisibility") and not volume["volume"].GetVisibility():
+            if not self._volume_is_visible(volume):
                 continue
             bounds = self._volume_bounds(volume)
             visible_bounds_found = True
@@ -518,7 +539,53 @@ class VtkVolumeRenderer:
             bounds = prop.GetBounds()
             if bounds is not None and VtkVolumeRenderer._bounds_are_valid(bounds):
                 return tuple(float(v) for v in bounds)
-        return tuple(float(v) for v in volume["image"].GetBounds())
+        image_bounds = tuple(float(v) for v in volume["image"].GetBounds())
+        if prop is not None and hasattr(prop, "GetUserMatrix"):
+            matrix = prop.GetUserMatrix()
+            if matrix is not None:
+                return VtkVolumeRenderer._transform_bounds(image_bounds, matrix)
+        return image_bounds
+
+    @staticmethod
+    def _transform_bounds(
+        bounds: tuple[float, float, float, float, float, float], matrix
+    ) -> tuple[float, float, float, float, float, float]:
+        corners = np.array(
+            [
+                [x, y, z, 1.0]
+                for x in (bounds[0], bounds[1])
+                for y in (bounds[2], bounds[3])
+                for z in (bounds[4], bounds[5])
+            ],
+            dtype=np.float64,
+        )
+        transform = np.array(
+            [
+                [float(matrix.GetElement(row, col)) for col in range(4)]
+                for row in range(4)
+            ],
+            dtype=np.float64,
+        )
+        points = corners @ transform.T
+        mins = np.min(points[:, :3], axis=0)
+        maxs = np.max(points[:, :3], axis=0)
+        return (
+            float(mins[0]),
+            float(maxs[0]),
+            float(mins[1]),
+            float(maxs[1]),
+            float(mins[2]),
+            float(maxs[2]),
+        )
+
+    @staticmethod
+    def _volume_is_visible(volume) -> bool:
+        if "visible" in volume:
+            return bool(volume.get("visible", True))
+        prop = volume.get("volume")
+        if prop is not None and hasattr(prop, "GetVisibility"):
+            return bool(prop.GetVisibility())
+        return True
 
     @staticmethod
     def _bounds_are_valid(bounds) -> bool:
@@ -558,8 +625,10 @@ class VtkVolumeRenderer:
         self.render()
 
     def store_initial_camera(self) -> None:
+        from vtkmodules.vtkRenderingCore import vtkCamera
+
         camera = self.renderer.GetActiveCamera()
-        self.initial_camera = vtk.vtkCamera()
+        self.initial_camera = vtkCamera()
         self.initial_camera.DeepCopy(camera)
 
     def render(self) -> None:
@@ -695,14 +764,17 @@ class VtkVolumeRenderer:
             return np.linalg.pinv(affine)
 
     def _build_point_actor(self, voxel_position, size: int):
+        from vtkmodules.vtkFiltersSources import vtkSphereSource
+        from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper
+
         world = self._voxel_to_world(voxel_position)
-        sphere = vtk.vtkSphereSource()
+        sphere = vtkSphereSource()
         sphere.SetCenter(*world)
         scale = max(self.volumes[0]["image"].GetSpacing()) if self.volumes else 1.0
         sphere.SetRadius(max(0.5, size / 8.0) * scale)
-        mapper = vtk.vtkPolyDataMapper()
+        mapper = vtkPolyDataMapper()
         mapper.SetInputConnection(sphere.GetOutputPort())
-        actor = vtk.vtkActor()
+        actor = vtkActor()
         actor.SetMapper(mapper)
         actor.GetProperty().SetColor(0.95, 0.35, 0.2)
         return actor
@@ -710,7 +782,10 @@ class VtkVolumeRenderer:
     def _build_box_actor(
         self, min_corner, max_corner, *, highlight: bool, selected: bool
     ):
-        source = vtk.vtkOutlineSource()
+        from vtkmodules.vtkFiltersSources import vtkOutlineSource
+        from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper
+
+        source = vtkOutlineSource()
         world_min = self._voxel_to_world(min_corner)
         world_max = self._voxel_to_world(max_corner)
         source.SetBounds(
@@ -721,9 +796,9 @@ class VtkVolumeRenderer:
             world_min[2],
             world_max[2],
         )
-        mapper = vtk.vtkPolyDataMapper()
+        mapper = vtkPolyDataMapper()
         mapper.SetInputConnection(source.GetOutputPort())
-        actor = vtk.vtkActor()
+        actor = vtkActor()
         actor.SetMapper(mapper)
         if highlight:
             actor.GetProperty().SetColor(0.95, 0.78, 0.2)
@@ -737,6 +812,9 @@ class VtkVolumeRenderer:
         return actor
 
     def _add_box_handles(self, box) -> None:
+        from vtkmodules.vtkFiltersSources import vtkSphereSource
+        from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper
+
         min_corner = box.min_corner
         max_corner = box.max_corner
         corners = [
@@ -751,12 +829,12 @@ class VtkVolumeRenderer:
         ]
         scale = max(self.volumes[0]["image"].GetSpacing()) if self.volumes else 1.0
         for index, corner in enumerate(corners):
-            sphere = vtk.vtkSphereSource()
+            sphere = vtkSphereSource()
             sphere.SetCenter(*self._voxel_to_world(corner))
             sphere.SetRadius(1.5 * scale)
-            mapper = vtk.vtkPolyDataMapper()
+            mapper = vtkPolyDataMapper()
             mapper.SetInputConnection(sphere.GetOutputPort())
-            actor = vtk.vtkActor()
+            actor = vtkActor()
             actor.SetMapper(mapper)
             actor.GetProperty().SetColor(0.95, 0.95, 0.2)
             self.annotation_handle_actors[(box.id, index)] = actor
@@ -772,7 +850,9 @@ class VtkVolumeRenderer:
     def _pick_world(self, x: int, y: int):
         if not self.volumes:
             return None
-        volume_picker = vtk.vtkVolumePicker()
+        from vtkmodules.vtkRenderingVolume import vtkVolumePicker
+
+        volume_picker = vtkVolumePicker()
         volume_picker.SetTolerance(0.0005)
         if volume_picker.Pick(x, y, 0, self.renderer):
             picked_volume = volume_picker.GetVolume()
@@ -801,7 +881,9 @@ class VtkVolumeRenderer:
         return None
 
     def _pick_annotation_actor(self, x: int, y: int):
-        picker = vtk.vtkPropPicker()
+        from vtkmodules.vtkRenderingCore import vtkPropPicker
+
+        picker = vtkPropPicker()
         if picker.Pick(x, y, 0, self.renderer):
             actor = picker.GetActor()
             return self.annotation_actor_map.get(actor)
@@ -905,15 +987,22 @@ class VtkVolumeRenderer:
             pass
 
     def save_screenshot(self, filename: str) -> None:
-        window_to_image_filter = vtk.vtkWindowToImageFilter()
+        from vtkmodules.vtkIOImage import vtkPNGWriter
+        from vtkmodules.vtkRenderingCore import vtkWindowToImageFilter
+
+        window_to_image_filter = vtkWindowToImageFilter()
         window_to_image_filter.SetInput(self.render_window)
         window_to_image_filter.Update()
-        writer = vtk.vtkPNGWriter()
+        writer = vtkPNGWriter()
         writer.SetFileName(f"{filename}.png")
         writer.SetInputConnection(window_to_image_filter.GetOutputPort())
         writer.Write()
 
     def record_rotation_video(self, filename: str, rotation_speed: float) -> None:
+        import imageio
+        from vtkmodules.vtkRenderingCore import vtkWindowToImageFilter
+        from vtkmodules.util import numpy_support
+
         if len(self.volumes) == 0 or rotation_speed <= 0:
             return
         total_rotation = 360
@@ -928,7 +1017,7 @@ class VtkVolumeRenderer:
             filename += ".mp4"
         writer = imageio.get_writer(filename, fps=fps, codec="libx264", quality=8)
         self.render_window.SetSize(1328, 960)
-        window_to_image_filter = vtk.vtkWindowToImageFilter()
+        window_to_image_filter = vtkWindowToImageFilter()
         window_to_image_filter.SetInput(self.render_window)
         window_to_image_filter.SetScale(1)
 
@@ -945,7 +1034,7 @@ class VtkVolumeRenderer:
             width, height, _ = vtk_image.GetDimensions()
             vtk_array = vtk_image.GetPointData().GetScalars()
             numpy_array = np.flipud(
-                vtk.util.numpy_support.vtk_to_numpy(vtk_array).reshape(height, width, 3)
+                numpy_support.vtk_to_numpy(vtk_array).reshape(height, width, 3)
             )
             writer.append_data(numpy_array)
 
@@ -960,8 +1049,13 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         self._reset_multi_volume_backend()
 
     def _reset_multi_volume_backend(self) -> None:
-        self.multi_mapper = vtk.vtkGPUVolumeRayCastMapper()
-        self.multi_volume = vtk.vtkMultiVolume()
+        from vtkmodules.vtkRenderingVolume import (
+            vtkGPUVolumeRayCastMapper,
+            vtkMultiVolume,
+        )
+
+        self.multi_mapper = vtkGPUVolumeRayCastMapper()
+        self.multi_volume = vtkMultiVolume()
         self.multi_volume.SetMapper(self.multi_mapper)
         self.multi_volume_added = False
         self.multi_volume_dummy_port = None
@@ -1019,19 +1113,21 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         metadata: dict[str, object] | None = None,
         render: bool = True,
     ) -> int:
+        from vtkmodules.vtkRenderingCore import vtkVolume, vtkVolumeProperty
+
         metadata = metadata or {}
         np_array, image_data, vtk_spacing, vtk_origin = _build_vtk_image_data(
             data, spacing, origin, metadata
         )
 
-        prop = vtk.vtkVolumeProperty()
+        prop = vtkVolumeProperty()
         prop.ShadeOn()
         prop.SetInterpolationTypeToLinear()
         prop.SetAmbient(0.4)
         prop.SetDiffuse(0.6)
         prop.SetSpecular(0.4)
 
-        child_volume = vtk.vtkVolume()
+        child_volume = vtkVolume()
         child_volume.SetProperty(prop)
         vtk_direction = _apply_vtk_direction(child_volume, vtk_origin, metadata)
 
@@ -1102,23 +1198,30 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
     def _add_single_volume_dummy_input(self, source_volume, port: int) -> None:
         if self.multi_volume_dummy_port is not None:
             return
+        from vtkmodules.vtkCommonDataModel import vtkPiecewiseFunction
+        from vtkmodules.vtkCommonMath import vtkMatrix4x4
+        from vtkmodules.vtkRenderingCore import (
+            vtkColorTransferFunction,
+            vtkVolume,
+            vtkVolumeProperty,
+        )
 
-        dummy_prop = vtk.vtkVolumeProperty()
+        dummy_prop = vtkVolumeProperty()
         dummy_prop.SetInterpolationTypeToLinear()
-        opacity = vtk.vtkPiecewiseFunction()
+        opacity = vtkPiecewiseFunction()
         opacity.AddPoint(0.0, 0.0)
         opacity.AddPoint(1.0, 0.0)
         dummy_prop.SetScalarOpacity(opacity)
-        color = vtk.vtkColorTransferFunction()
+        color = vtkColorTransferFunction()
         color.AddRGBPoint(0.0, 0.0, 0.0, 0.0)
         color.AddRGBPoint(1.0, 0.0, 0.0, 0.0)
         dummy_prop.SetColor(color)
 
-        dummy_volume = vtk.vtkVolume()
+        dummy_volume = vtkVolume()
         dummy_volume.SetProperty(dummy_prop)
         source_matrix = source_volume["volume"].GetUserMatrix()
         if source_matrix is not None:
-            matrix = vtk.vtkMatrix4x4()
+            matrix = vtkMatrix4x4()
             matrix.DeepCopy(source_matrix)
             dummy_volume.SetUserMatrix(matrix)
 

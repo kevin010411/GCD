@@ -15,6 +15,38 @@ class _FakeVolume:
         self.modified_calls += 1
 
 
+class _FakeBoundVolume:
+    def __init__(self, bounds, visible=True, user_matrix=None) -> None:
+        self._bounds = bounds
+        self._visible = visible
+        self._user_matrix = user_matrix
+
+    def GetBounds(self):
+        return self._bounds
+
+    def GetVisibility(self):
+        return self._visible
+
+    def GetUserMatrix(self):
+        return self._user_matrix
+
+
+class _FakeImage:
+    def __init__(self, bounds=(0.0, 1.0, 0.0, 1.0, 0.0, 1.0)) -> None:
+        self._bounds = bounds
+
+    def GetBounds(self):
+        return self._bounds
+
+
+class _FakeMatrix:
+    def __init__(self, values) -> None:
+        self.values = values
+
+    def GetElement(self, row, col):
+        return self.values[row][col]
+
+
 class _FakeProperty:
     def __init__(self) -> None:
         self.modified_calls = 0
@@ -134,6 +166,49 @@ class StandardMultiVolumeTransferTests(unittest.TestCase):
         self.assertEqual(kwargs["opacity_settings"], [(0.0, 0.25)])
         self.assertFalse(kwargs["visible"])
         self.assertFalse(kwargs["render"])
+
+    def test_camera_reset_uses_visible_volume_flags(self) -> None:
+        renderer = object.__new__(StandardMultiVolumeRenderer)
+        renderer.volumes = [
+            {
+                "volume": _FakeBoundVolume(
+                    (-100.0, 100.0, -100.0, 100.0, -100.0, 100.0)
+                ),
+                "image": _FakeImage(),
+                "visible": False,
+            },
+            {
+                "volume": _FakeBoundVolume((10.0, 20.0, 30.0, 50.0, 2.0, 6.0)),
+                "image": _FakeImage(),
+                "visible": True,
+            },
+        ]
+
+        snapshot = renderer.camera_state_for_visible_volumes()
+
+        self.assertEqual(snapshot["focal_point"], (15.0, 40.0, 4.0))
+        self.assertEqual(snapshot["parallel_scale"], 10.0)
+
+    def test_volume_bounds_fallback_applies_user_matrix(self) -> None:
+        matrix = _FakeMatrix(
+            (
+                (0.0, 0.0, -1.0, 40.0),
+                (0.0, 1.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0, 20.0),
+                (0.0, 0.0, 0.0, 1.0),
+            )
+        )
+        volume = {
+            "volume": _FakeBoundVolume(
+                (1.0, -1.0, 1.0, -1.0, 1.0, -1.0),
+                user_matrix=matrix,
+            ),
+            "image": _FakeImage((10.0, 16.0, 20.0, 26.0, 30.0, 34.0)),
+        }
+
+        bounds = StandardMultiVolumeRenderer._volume_bounds(volume)
+
+        self.assertEqual(bounds, (6.0, 10.0, 20.0, 26.0, 30.0, 36.0))
 
 
 if __name__ == "__main__":
