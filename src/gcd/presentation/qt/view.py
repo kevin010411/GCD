@@ -3,6 +3,7 @@ from __future__ import annotations
 from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtGui import QAction, QColor, QLinearGradient, QPainter
 from PyQt6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QComboBox,
     QFileDialog,
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .plugins import DEFAULT_PLUGIN_DEFINITIONS, PluginDefinition
+from .styles import CLASSIC_STYLESHEET, DARK_STYLESHEET
 from .workspace import WorkspaceHost
 
 
@@ -28,8 +30,13 @@ class _ScrollFade(QWidget):
     def __init__(self, edge: str, parent=None) -> None:
         super().__init__(parent)
         self.edge = edge
+        self.base_color = QColor("#151F2F")
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setFixedWidth(26)
+
+    def set_base_color(self, color: str) -> None:
+        self.base_color = QColor(color)
+        self.update()
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
@@ -38,7 +45,7 @@ class _ScrollFade(QWidget):
             gradient = QLinearGradient(self.width(), 0, 0, 0)
         else:
             gradient = QLinearGradient(0, 0, self.width(), 0)
-        base = QColor("#151F2F")
+        base = QColor(self.base_color)
         transparent = QColor(base)
         transparent.setAlpha(0)
         gradient.setColorAt(0.0, base)
@@ -113,6 +120,10 @@ class PluginTabStrip(QWidget):
         scrollbar.setValue(scrollbar.minimum())
         self._update_fades()
 
+    def set_fade_color(self, color: str) -> None:
+        self.left_fade.set_base_color(color)
+        self.right_fade.set_base_color(color)
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         height = self.scroll.height()
@@ -152,6 +163,7 @@ class MainWindowView(QMainWindow):
             definition.plugin_id: definition.title
             for definition in self.plugin_definitions
         }
+        self._classic_theme_enabled = False
         self._method_options_by_id: dict[str, dict[str, object]] = {}
         self._gradcam_feature_size = 0
 
@@ -267,7 +279,33 @@ class MainWindowView(QMainWindow):
         layout.addWidget(self.save_screenshot_button)
         layout.addWidget(self.record_video_button)
 
+        self.theme_toggle_button = QToolButton()
+        self.theme_toggle_button.setObjectName("themeToggleButton")
+        self.theme_toggle_button.setText("☾")
+        self.theme_toggle_button.setToolTip("Switch to classic style")
+        self.theme_toggle_button.clicked.connect(self.toggle_style_theme)
+        layout.addWidget(self.theme_toggle_button)
+
         self.main_layout.addWidget(toolbar)
+
+    def toggle_style_theme(self, _checked: bool = False) -> None:
+        self._classic_theme_enabled = not self._classic_theme_enabled
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(
+                CLASSIC_STYLESHEET
+                if self._classic_theme_enabled
+                else DARK_STYLESHEET
+            )
+        self.theme_toggle_button.setText("☀" if self._classic_theme_enabled else "☾")
+        self.theme_toggle_button.setToolTip(
+            "Switch to dark style"
+            if self._classic_theme_enabled
+            else "Switch to classic style"
+        )
+        self.plugin_switch_strip.set_fade_color(
+            "#F0F0F0" if self._classic_theme_enabled else "#151F2F"
+        )
 
     def _build_registered_plugins(self) -> None:
         self.plugin_panels: dict[str, QWidget] = {}
