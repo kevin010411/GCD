@@ -25,7 +25,7 @@ class GradCamPluginPanelTests(unittest.TestCase):
         self.assertIsNotNone(panel.objective_combo)
         self.assertIsNotNone(panel.layer_feature_group)
         self.assertIn("Data", labels)
-        self.assertIn("Answer", labels)
+        self.assertIn("Class", labels)
         self.assertIn("Objective", labels)
         self.assertFalse(panel.layer_feature_group.isEnabled())
         self.assertEqual(panel.method_combo.count(), 1)
