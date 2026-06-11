@@ -14,6 +14,8 @@ from .cam_methods import (
     PerturbationOcclusionMethod,
     SaliencyMapMethod,
     XResCamMethod,
+    XaiLayerSelection,
+    XaiMethodRegistry,
 )
 
 if TYPE_CHECKING:
@@ -76,13 +78,10 @@ class GradCamEngine:
         self.active_objective_id = "predicted_target_mask"
         self.xai_cache_key = ""
         self.objectives = self._default_objectives()
-        self.cam_methods: dict[str, CamMethod] = {
-            GradCamMethod.id: GradCamMethod(self._predicted_target_mask_objective),
-            XResCamMethod.id: XResCamMethod(self._predicted_target_mask_objective),
-            GradCAMTestMethod.id: GradCAMTestMethod(),
-            SaliencyMapMethod.id: SaliencyMapMethod(self._predicted_target_mask_objective),
-            PerturbationOcclusionMethod.id: PerturbationOcclusionMethod(),
-        }
+        self.xai_method_registry = XaiMethodRegistry.default(
+            self._predicted_target_mask_objective
+        )
+        self.cam_methods: dict[str, CamMethod] = self.xai_method_registry.methods_by_id
         self.active_method_id = GradCamMethod.id
 
         self.save_dir = save_dir
@@ -123,17 +122,38 @@ class GradCamEngine:
         self.target_class = int(target_class)
 
     def available_cam_methods(self, category: str | None = None) -> list[dict[str, object]]:
-        methods = self.cam_methods.values()
-        if category is not None:
-            methods = [method for method in methods if getattr(method, "category", "") == category]
-        return [
-            {
-                "id": method.id,
-                "name": method.display_name,
-                "uses_layer_controls": bool(method.uses_layer_controls),
-            }
-            for method in methods
-        ]
+        family = "gradient" if category == "grad" else category
+        if not hasattr(self, "xai_method_registry"):
+            methods = self.cam_methods.values()
+            if family is not None:
+                methods = [
+                    method
+                    for method in methods
+                    if getattr(method, "family", getattr(method, "category", "")) == family
+                    or getattr(method, "category", "") == category
+                ]
+            return [
+                {
+                    "id": method.id,
+                    "name": method.display_name,
+                    "uses_layer_controls": bool(method.uses_layer_controls),
+                    "uses_objective": bool(getattr(method, "uses_objective", True)),
+                    "parameters": [
+                        parameter.to_dict()
+                        for parameter in getattr(method, "parameter_schema", lambda: ())()
+                    ],
+                }
+                for method in methods
+            ]
+        return self.xai_method_registry.available_methods(family)
+
+    def available_xai_method_families(self) -> list[dict[str, object]]:
+        return self.xai_method_registry.available_families()
+
+    def available_xai_methods(
+        self, family: str | None = None
+    ) -> list[dict[str, object]]:
+        return self.xai_method_registry.available_methods(family)
 
     def default_feature_size(self) -> int:
         return list(self.layers.values())[0]
@@ -181,8 +201,12 @@ class GradCamEngine:
     def _resolve_cam_method(self, method: str | None) -> CamMethod:
         requested = (method or self.active_method_id or GradCamMethod.id).strip().lower()
         if requested in self.cam_methods:
+            if hasattr(self, "xai_method_registry"):
+                return self.xai_method_registry.resolve(requested)
             return self.cam_methods[requested]
         self._log(f"未知 CAM method '{method}'，改用預設方法: {GradCamMethod.id}")
+        if hasattr(self, "xai_method_registry"):
+            return self.xai_method_registry.resolve(GradCamMethod.id)
         return self.cam_methods[GradCamMethod.id]
 
 
@@ -554,10 +578,12 @@ class GradCamEngine:
             for index, (x, y) in enumerate(tiles):
                 q = cam_method.build_tile_cam(
                     self.patch[index],
-                    selected_layer,
-                    n1,
-                    n2,
-                    (self.SIZE, self.SIZE, self.SIZE),
+                    XaiLayerSelection(
+                        selected_layer,
+                        n1,
+                        n2,
+                        (self.SIZE, self.SIZE, self.SIZE),
+                    ),
                     method_params=method_params,
                 )
 

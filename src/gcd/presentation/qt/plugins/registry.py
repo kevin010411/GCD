@@ -41,7 +41,7 @@ DEFAULT_PLUGIN_DEFINITIONS: tuple[PluginDefinition, ...] = (
     ),
     PluginDefinition(
         "gradcam",
-        "Gradient-Based XAI",
+        "Gradient XAI",
         "Gradient",
         GradCamPluginPanel,
         "standard",

@@ -165,6 +165,7 @@ class MainWindowView(QMainWindow):
         }
         self._classic_theme_enabled = False
         self._method_options_by_id: dict[str, dict[str, object]] = {}
+        self._xai_method_options_by_family: dict[str, dict[str, dict[str, object]]] = {}
         self._gradcam_feature_size = 0
 
         self.central_widget = QWidget()
@@ -318,6 +319,10 @@ class MainWindowView(QMainWindow):
 
     def _expose_registered_plugin_controls(self) -> None:
         self.gradcam_plugin_panel = self.plugin_panels["gradcam"]
+        self.xai_family_panels = {
+            "gradient": self.gradcam_plugin_panel,
+            "perturbation": self.plugin_panels["perturbation"],
+        }
         self.class_spinbox = self.gradcam_plugin_panel.class_spinbox
         self.gradcam_dataset_combo = self.gradcam_plugin_panel.dataset_combo
         self.layer_combo = self.gradcam_plugin_panel.layer_combo
@@ -331,10 +336,6 @@ class MainWindowView(QMainWindow):
         self.perturbation_dataset_combo = self.perturbation_plugin_panel.dataset_combo
         self.perturbation_class_spinbox = self.perturbation_plugin_panel.class_spinbox
         self.perturbation_method_combo = self.perturbation_plugin_panel.method_combo
-        self.perturbation_block_size_spinbox = (
-            self.perturbation_plugin_panel.block_size_spinbox
-        )
-        self.perturbation_stride_spinbox = self.perturbation_plugin_panel.stride_spinbox
         self.perturbation_run_button = self.perturbation_plugin_panel.run_button
 
         self.data_plugin_panel = self.plugin_panels["data"]
@@ -407,94 +408,114 @@ class MainWindowView(QMainWindow):
         self.model_combo.blockSignals(False)
 
     def set_layer_options(self, layer_names: list[str], selected: str) -> None:
-        self.layer_combo.blockSignals(True)
-        self.layer_combo.clear()
-        self.layer_combo.addItems(layer_names)
-        self.layer_combo.setCurrentText(selected)
-        self.layer_combo.blockSignals(False)
-        self.set_gradcam_layer_controls_enabled(self.selected_method_uses_layer_controls())
+        if "xai_family_panels" not in self.__dict__:
+            self.layer_combo.blockSignals(True)
+            self.layer_combo.clear()
+            self.layer_combo.addItems(layer_names)
+            self.layer_combo.setCurrentText(selected)
+            self.layer_combo.blockSignals(False)
+            self.set_gradcam_layer_controls_enabled(
+                self.selected_method_uses_layer_controls()
+            )
+            return
+        self.set_xai_layer_options("gradient", layer_names, selected, self._gradcam_feature_size)
 
     def set_method_options(
         self, options: list[dict[str, object]], selected: str | None
     ) -> None:
-        self.method_combo.blockSignals(True)
-        self.method_combo.clear()
+        self.set_xai_method_options("gradient", options, selected)
+
+    def set_xai_method_options(
+        self, family_id: str, options: list[dict[str, object]], selected: str | None
+    ) -> None:
+        if "xai_family_panels" not in self.__dict__:
+            self.method_combo.blockSignals(True)
+            self.method_combo.clear()
+            self._method_options_by_id = {
+                str(option["id"]): dict(option) for option in options
+            }
+            for option in options:
+                self.method_combo.addItem(str(option["name"]), str(option["id"]))
+            if selected:
+                index = self.method_combo.findData(selected)
+                if index >= 0:
+                    self.method_combo.setCurrentIndex(index)
+            self.method_combo.blockSignals(False)
+            self.set_gradcam_layer_controls_enabled(
+                self.selected_method_uses_layer_controls()
+            )
+            return
+        panel = self.xai_family_panels[family_id]
         self._method_options_by_id = {str(option["id"]): dict(option) for option in options}
-        for option in options:
-            self.method_combo.addItem(str(option["name"]), str(option["id"]))
-        if selected:
-            index = self.method_combo.findData(selected)
-            if index >= 0:
-                self.method_combo.setCurrentIndex(index)
-        self.method_combo.blockSignals(False)
-        self.set_gradcam_layer_controls_enabled(self.selected_method_uses_layer_controls())
+        self._xai_method_options_by_family[family_id] = {
+            str(option["id"]): dict(option) for option in options
+        }
+        panel.set_method_options(options, selected)
 
     def set_objective_options(
         self, options: list[dict[str, object]], selected: str | None
     ) -> None:
-        self.objective_combo.blockSignals(True)
-        self.objective_combo.clear()
-        for option in options:
-            self.objective_combo.addItem(str(option["name"]), str(option["id"]))
-        if selected:
-            index = self.objective_combo.findData(selected)
-            if index >= 0:
-                self.objective_combo.setCurrentIndex(index)
-        self.objective_combo.blockSignals(False)
+        for panel in self.xai_family_panels.values():
+            panel.set_objective_options(options, selected)
 
     def set_gradcam_dataset_options(
         self, options: list[dict[str, str]], selected: str | None
     ) -> None:
-        self.gradcam_dataset_combo.blockSignals(True)
-        self.gradcam_dataset_combo.clear()
-        for option in options:
-            self.gradcam_dataset_combo.addItem(option["name"], option["id"])
-        if selected:
-            index = self.gradcam_dataset_combo.findData(selected)
-            if index >= 0:
-                self.gradcam_dataset_combo.setCurrentIndex(index)
-        self.gradcam_dataset_combo.blockSignals(False)
+        self.set_xai_dataset_options("gradient", options, selected)
 
     def set_perturbation_dataset_options(
         self, options: list[dict[str, str]], selected: str | None
     ) -> None:
-        self.perturbation_dataset_combo.blockSignals(True)
-        self.perturbation_dataset_combo.clear()
-        for option in options:
-            self.perturbation_dataset_combo.addItem(option["name"], option["id"])
-        if selected:
-            index = self.perturbation_dataset_combo.findData(selected)
-            if index >= 0:
-                self.perturbation_dataset_combo.setCurrentIndex(index)
-        self.perturbation_dataset_combo.blockSignals(False)
+        self.set_xai_dataset_options("perturbation", options, selected)
+
+    def set_xai_dataset_options(
+        self, family_id: str, options: list[dict[str, str]], selected: str | None
+    ) -> None:
+        self.xai_family_panels[family_id].set_dataset_options(options, selected)
 
     def set_perturbation_method_options(
         self, options: list[dict[str, str]], selected: str | None
     ) -> None:
-        self.perturbation_method_combo.blockSignals(True)
-        self.perturbation_method_combo.clear()
-        for option in options:
-            self.perturbation_method_combo.addItem(option["name"], option["id"])
-        if selected:
-            index = self.perturbation_method_combo.findData(selected)
-            if index >= 0:
-                self.perturbation_method_combo.setCurrentIndex(index)
-        self.perturbation_method_combo.blockSignals(False)
+        self.set_xai_method_options("perturbation", options, selected)
 
     def set_feature_size(self, size: int) -> None:
         self._gradcam_feature_size = max(0, int(size))
-        self.feature_widget.set_size(size)
-        self.set_gradcam_layer_controls_enabled(self.selected_method_uses_layer_controls())
+        if "xai_family_panels" not in self.__dict__:
+            self.feature_widget.set_size(size)
+            self.set_gradcam_layer_controls_enabled(
+                self.selected_method_uses_layer_controls()
+            )
+            return
+        self.set_xai_layer_options(
+            "gradient",
+            [self.layer_combo.itemText(index) for index in range(self.layer_combo.count())],
+            self.layer_combo.currentText(),
+            self._gradcam_feature_size,
+        )
+
+    def set_xai_layer_options(
+        self,
+        family_id: str,
+        layer_names: list[str],
+        selected: str,
+        feature_size: int,
+    ) -> None:
+        self.xai_family_panels[family_id].set_layer_options(
+            layer_names, selected, feature_size
+        )
 
     def set_gradcam_layer_controls_enabled(self, enabled: bool) -> None:
-        can_adjust = (
-            bool(enabled)
-            and self.layer_combo.count() > 0
-            and self._gradcam_feature_size > 0
-        )
-        self.layer_feature_group.setEnabled(can_adjust)
-        self.layer_combo.setEnabled(can_adjust)
-        self.feature_widget.setEnabled(can_adjust)
+        if "gradcam_plugin_panel" not in self.__dict__:
+            can_adjust = (
+                bool(enabled)
+                and self.layer_combo.count() > 0
+                and self._gradcam_feature_size > 0
+            )
+            self.layer_feature_group.setEnabled(can_adjust)
+            self.layer_combo.setEnabled(can_adjust)
+            self.feature_widget.setEnabled(can_adjust)
+            return
+        self.gradcam_plugin_panel._sync_capability_controls()
 
     def set_rotation_speed_label(self, speed: float) -> None:
         self.speed_label.setText(f"Rotation Speed: {speed:.1f}")
@@ -524,10 +545,12 @@ class MainWindowView(QMainWindow):
         return str(current or "predicted_target_mask")
 
     def selected_method_uses_layer_controls(self) -> bool:
-        option = self._method_options_by_id.get(self.selected_method())
-        if option is None:
-            return True
-        return bool(option.get("uses_layer_controls", True))
+        if "gradcam_plugin_panel" not in self.__dict__:
+            option = self._method_options_by_id.get(self.selected_method())
+            if option is None:
+                return True
+            return bool(option.get("uses_layer_controls", True))
+        return self.gradcam_plugin_panel.selected_method_uses_layer_controls()
 
     def selected_gradcam_dataset(self) -> str:
         current = self.gradcam_dataset_combo.currentData()
@@ -538,11 +561,37 @@ class MainWindowView(QMainWindow):
         return str(current or "")
 
     def selected_perturbation_method(self) -> str:
-        current = self.perturbation_method_combo.currentData()
-        return str(current or "perturb_occlusion")
+        return self.selected_xai_method("perturbation") or "perturb_occlusion"
 
     def feature_range(self) -> tuple[int, int]:
         return self.feature_widget.get_range()
+
+    def selected_xai_dataset(self, family_id: str) -> str:
+        return self.xai_family_panels[family_id].selected_dataset()
+
+    def selected_xai_method(self, family_id: str) -> str:
+        return self.xai_family_panels[family_id].selected_method()
+
+    def selected_xai_objective(self, family_id: str) -> str:
+        return self.xai_family_panels[family_id].selected_objective()
+
+    def selected_xai_class(self, family_id: str) -> int:
+        return self.xai_family_panels[family_id].selected_class()
+
+    def selected_xai_layer(self, family_id: str) -> str:
+        return self.xai_family_panels[family_id].selected_layer()
+
+    def selected_xai_feature_range(self, family_id: str) -> tuple[int, int]:
+        return self.xai_family_panels[family_id].feature_range()
+
+    def selected_xai_method_params(self, family_id: str) -> dict[str, object]:
+        return self.xai_family_panels[family_id].selected_method_params()
+
+    def selected_xai_method_uses_layer_controls(self, family_id: str) -> bool:
+        return self.xai_family_panels[family_id].selected_method_uses_layer_controls()
+
+    def selected_xai_method_uses_objective(self, family_id: str) -> bool:
+        return self.xai_family_panels[family_id].selected_method_uses_objective()
 
     def choose_input_file(self) -> str:
         file_name, _ = QFileDialog.getOpenFileName(

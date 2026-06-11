@@ -31,6 +31,7 @@ class MainWindowPresenter:
         self.data_store = WorkspaceDataStore()
         self.selected_grad_dataset_id = ""
         self.selected_perturbation_dataset_id = ""
+        self.selected_xai_dataset_by_family = {"gradient": "", "perturbation": ""}
         self._last_scene_signature: tuple[tuple[str, tuple[int, ...]], ...] = ()
         self.data_store.subscribe(self._on_store_event)
 
@@ -93,6 +94,10 @@ class MainWindowPresenter:
         self.view.perturbation_run_button.clicked.connect(
             self.on_perturbation_run_requested
         )
+        if hasattr(self.view, "perturbation_method_combo"):
+            self.view.perturbation_method_combo.currentIndexChanged.connect(
+                lambda _index: self.on_xai_method_changed("perturbation")
+            )
         self.view.save_screenshot_button.clicked.connect(
             self.on_save_screenshot_requested
         )
@@ -173,14 +178,27 @@ class MainWindowPresenter:
     def initialize(self) -> None:
         options = self.workflow.list_model_configs()
         self.view.set_model_options(options)
-        self.view.set_method_options(self.workflow.list_cam_methods(), "gradcam")
+        if hasattr(self.workflow, "list_xai_methods") and hasattr(
+            self.view, "set_xai_method_options"
+        ):
+            self.view.set_xai_method_options(
+                "gradient", self.workflow.list_xai_methods("gradient"), "gradcam"
+            )
+            self.view.set_xai_method_options(
+                "perturbation",
+                self.workflow.list_xai_methods("perturbation"),
+                "perturb_occlusion",
+            )
+        else:
+            self.view.set_method_options(self.workflow.list_cam_methods(), "gradcam")
         self.view.set_objective_options(
             self.workflow.list_objectives(), "predicted_target_mask"
         )
-        self.view.set_perturbation_method_options(
-            self.workflow.list_perturbation_methods(),
-            "perturb_occlusion",
-        )
+        if not hasattr(self.workflow, "list_xai_methods"):
+            self.view.set_perturbation_method_options(
+                self.workflow.list_perturbation_methods(),
+                "perturb_occlusion",
+            )
         self.view.set_gradcam_dataset_options([], None)
         self.view.set_perturbation_dataset_options([], None)
         if options:
@@ -221,6 +239,8 @@ class MainWindowPresenter:
         self.data_store.add_loaded_dataset(dataset_id, result)
         self.selected_grad_dataset_id = dataset_id
         self.selected_perturbation_dataset_id = dataset_id
+        self.selected_xai_dataset_by_family["gradient"] = dataset_id
+        self.selected_xai_dataset_by_family["perturbation"] = dataset_id
         self.view.set_rotation_running(True)
 
     def _on_store_event(self, event: WorkspaceEvent) -> None:
@@ -344,12 +364,21 @@ class MainWindowPresenter:
         return
 
     def on_method_changed(self, _index: int) -> None:
-        uses_layer_controls = (
-            self.view.selected_method_uses_layer_controls()
-            if hasattr(self.view, "selected_method_uses_layer_controls")
-            else True
-        )
-        self.view.set_gradcam_layer_controls_enabled(uses_layer_controls)
+        self.on_xai_method_changed("gradient")
+
+    def on_xai_method_changed(self, family_id: str) -> None:
+        if hasattr(self.view, "selected_xai_method_uses_layer_controls"):
+            uses_layer_controls = self.view.selected_xai_method_uses_layer_controls(
+                family_id
+            )
+        elif family_id == "gradient" and hasattr(
+            self.view, "selected_method_uses_layer_controls"
+        ):
+            uses_layer_controls = self.view.selected_method_uses_layer_controls()
+        else:
+            uses_layer_controls = True
+        if family_id == "gradient":
+            self.view.set_gradcam_layer_controls_enabled(uses_layer_controls)
 
     def on_transfer_function_changed(
         self, transfer_function: TransferFunction, data_range: DataRange
@@ -461,42 +490,60 @@ class MainWindowPresenter:
         self.data_store.delete_volume(volume_id)
 
     def on_gradcam_dataset_changed(self, _index: int) -> None:
-        self.selected_grad_dataset_id = self.view.selected_gradcam_dataset()
+        self.selected_grad_dataset_id = self._selected_xai_dataset("gradient")
+        self.selected_xai_dataset_by_family["gradient"] = self.selected_grad_dataset_id
         self.data_store.set_active_dataset("gradcam", self.selected_grad_dataset_id)
-        self._sync_gradcam_controls()
+        self._sync_xai_controls("gradient")
 
     def on_perturbation_dataset_changed(self, _index: int) -> None:
-        self.selected_perturbation_dataset_id = self.view.selected_perturbation_dataset()
+        self.selected_perturbation_dataset_id = self._selected_xai_dataset(
+            "perturbation"
+        )
+        self.selected_xai_dataset_by_family["perturbation"] = (
+            self.selected_perturbation_dataset_id
+        )
         self.data_store.set_active_dataset(
             "perturbation", self.selected_perturbation_dataset_id
         )
 
     def on_gradcam_run_requested(self) -> None:
-        dataset_id = self.view.selected_gradcam_dataset()
+        self.on_xai_run_requested("gradient")
+
+    def on_xai_run_requested(self, family_id: str) -> None:
+        dataset_id = self._selected_xai_dataset(family_id)
         if not dataset_id:
             return
         dataset = self.datasets.get(dataset_id)
         if dataset is None:
             return
-        method = self.view.selected_method()
-        objective_id = self.view.selected_objective()
+        method = self._selected_xai_method(family_id)
+        objective_id = self._selected_xai_objective(family_id)
         model_name = self._selected_model_name()
-        uses_layer_controls = (
-            self.view.selected_method_uses_layer_controls()
-            if hasattr(self.view, "selected_method_uses_layer_controls")
-            else True
-        )
-        layer = self.view.selected_layer() if uses_layer_controls else "input"
-        target_class = self.view.selected_class()
+        uses_layer_controls = self._selected_xai_method_uses_layer_controls(family_id)
+        layer = self._selected_xai_layer(family_id) if uses_layer_controls else "input"
+        target_class = self._selected_xai_class(family_id)
         result_name = self._prediction_result_name(
             dataset.name,
             model_name,
             layer,
             target_class,
         )
-        n1, n2 = self.view.feature_range() if uses_layer_controls else (0, 1)
+        n1, n2 = (
+            self._selected_xai_feature_range(family_id)
+            if uses_layer_controls
+            else (0, 1)
+        )
         if uses_layer_controls and (int(dataset.feature_size or 0) <= 0 or n2 <= n1):
             n1, n2 = 0, 999
+        method_params = self._selected_xai_method_params(family_id)
+        method_params.update(
+            {
+                "model_name": model_name,
+                "requested_layer": layer,
+                "target_class": target_class,
+                "objective_id": objective_id,
+            }
+        )
         self._run_dataset_method(
             dataset_id,
             target_class=target_class,
@@ -506,46 +553,11 @@ class MainWindowPresenter:
             method=method,
             objective_id=objective_id,
             result_name=result_name,
-            method_params={
-                "model_name": model_name,
-                "requested_layer": layer,
-                "target_class": target_class,
-                "objective_id": objective_id,
-            },
+            method_params=method_params,
         )
 
     def on_perturbation_run_requested(self) -> None:
-        dataset_id = self.view.selected_perturbation_dataset()
-        if not dataset_id:
-            return
-        dataset = self.datasets.get(dataset_id)
-        if dataset is None:
-            return
-        method = self.view.selected_perturbation_method()
-        model_name = self._selected_model_name()
-        target_class = self.view.perturbation_class_spinbox.value()
-        result_name = self._prediction_result_name(
-            dataset.name,
-            model_name,
-            dataset.selected_layer,
-            target_class,
-        )
-        self._run_dataset_method(
-            dataset_id,
-            target_class=target_class,
-            layer=dataset.selected_layer,
-            n1=0,
-            n2=int(dataset.feature_size),
-            method=method,
-            result_name=result_name,
-            method_params={
-                "block_size": self.view.perturbation_block_size_spinbox.value(),
-                "stride": self.view.perturbation_stride_spinbox.value(),
-                "model_name": model_name,
-                "requested_layer": dataset.selected_layer,
-                "target_class": target_class,
-            },
-        )
+        self.on_xai_run_requested("perturbation")
 
     def _on_xai_result_loaded(self, dataset_id: str, result) -> None:
         result_id = self.data_store.upsert_xai_result(dataset_id, result)
@@ -556,7 +568,26 @@ class MainWindowPresenter:
             if hasattr(result, "volume")
             else str(result["renderable_item"]["method_id"])
         )
-        if not method_id.startswith("perturb"):
+        family_id = "perturbation" if method_id.startswith("perturb") else "gradient"
+        if hasattr(self.view, "set_xai_method_options"):
+            self.view.set_xai_method_options(
+                family_id, list(result.method_options), result.selected_method
+            )
+            self.view.set_objective_options(
+                list(result.objective_options), result.selected_objective
+            )
+            if hasattr(self.view, "set_xai_layer_options"):
+                self.view.set_xai_layer_options(
+                    family_id,
+                    list(result.layer_names),
+                    result.selected_layer,
+                    result.feature_size,
+                )
+            elif family_id == "gradient":
+                self.view.set_layer_options(list(result.layer_names), result.selected_layer)
+                self.view.set_feature_size(result.feature_size)
+            self.on_xai_method_changed(family_id)
+        elif not method_id.startswith("perturb"):
             self.view.set_method_options(
                 list(result.method_options), result.selected_method
             )
@@ -580,15 +611,36 @@ class MainWindowPresenter:
         )
 
     def _sync_gradcam_controls(self) -> None:
-        dataset = self.datasets.get(self.selected_grad_dataset_id)
+        self._sync_xai_controls("gradient")
+        self._sync_xai_controls("perturbation")
+
+    def _sync_xai_controls(self, family_id: str) -> None:
+        selected_id = self.selected_xai_dataset_by_family.get(family_id, "")
+        if family_id == "gradient":
+            selected_id = self.selected_grad_dataset_id
+        elif family_id == "perturbation":
+            selected_id = self.selected_perturbation_dataset_id
+        dataset = self.datasets.get(selected_id)
         if dataset is None:
-            self.view.set_layer_options([], "")
-            self.view.set_feature_size(0)
-            self.on_method_changed(0)
+            if hasattr(self.view, "set_xai_layer_options"):
+                self.view.set_xai_layer_options(family_id, [], "", 0)
+            elif family_id == "gradient":
+                self.view.set_layer_options([], "")
+                self.view.set_feature_size(0)
+                self.on_method_changed(0)
             return
-        self.view.set_layer_options(list(dataset.layer_names), dataset.selected_layer)
-        self.view.set_feature_size(int(dataset.feature_size))
-        self.on_method_changed(0)
+        if hasattr(self.view, "set_xai_layer_options"):
+            self.view.set_xai_layer_options(
+                family_id,
+                list(dataset.layer_names),
+                dataset.selected_layer,
+                int(dataset.feature_size),
+            )
+            self.on_xai_method_changed(family_id)
+        elif family_id == "gradient":
+            self.view.set_layer_options(list(dataset.layer_names), dataset.selected_layer)
+            self.view.set_feature_size(int(dataset.feature_size))
+            self.on_method_changed(0)
 
     def _sync_selected_dataset_ids(self) -> None:
         if self.selected_grad_dataset_id not in self.datasets:
@@ -597,6 +649,71 @@ class MainWindowPresenter:
             self.selected_perturbation_dataset_id = self.data_store.active_dataset_id(
                 "perturbation"
             )
+        self.selected_xai_dataset_by_family["gradient"] = self.selected_grad_dataset_id
+        self.selected_xai_dataset_by_family["perturbation"] = (
+            self.selected_perturbation_dataset_id
+        )
+
+    def _selected_xai_dataset(self, family_id: str) -> str:
+        if hasattr(self.view, "selected_xai_dataset"):
+            return self.view.selected_xai_dataset(family_id)
+        if family_id == "perturbation":
+            return self.view.selected_perturbation_dataset()
+        return self.view.selected_gradcam_dataset()
+
+    def _selected_xai_method(self, family_id: str) -> str:
+        if hasattr(self.view, "selected_xai_method"):
+            return self.view.selected_xai_method(family_id)
+        if family_id == "perturbation":
+            return self.view.selected_perturbation_method()
+        return self.view.selected_method()
+
+    def _selected_xai_objective(self, family_id: str) -> str:
+        if hasattr(self.view, "selected_xai_objective"):
+            return self.view.selected_xai_objective(family_id)
+        if family_id == "gradient":
+            return self.view.selected_objective()
+        return "predicted_target_mask"
+
+    def _selected_xai_class(self, family_id: str) -> int:
+        if hasattr(self.view, "selected_xai_class"):
+            return self.view.selected_xai_class(family_id)
+        if family_id == "perturbation":
+            return int(self.view.perturbation_class_spinbox.value())
+        return self.view.selected_class()
+
+    def _selected_xai_layer(self, family_id: str) -> str:
+        if hasattr(self.view, "selected_xai_layer"):
+            return self.view.selected_xai_layer(family_id)
+        if family_id == "perturbation":
+            dataset = self.datasets.get(self._selected_xai_dataset(family_id))
+            return str(dataset.selected_layer if dataset is not None else "")
+        return self.view.selected_layer()
+
+    def _selected_xai_feature_range(self, family_id: str) -> tuple[int, int]:
+        if hasattr(self.view, "selected_xai_feature_range"):
+            return self.view.selected_xai_feature_range(family_id)
+        if family_id == "perturbation":
+            dataset = self.datasets.get(self._selected_xai_dataset(family_id))
+            return (0, int(dataset.feature_size if dataset is not None else 1))
+        return self.view.feature_range()
+
+    def _selected_xai_method_params(self, family_id: str) -> dict[str, object]:
+        if hasattr(self.view, "selected_xai_method_params"):
+            return dict(self.view.selected_xai_method_params(family_id))
+        if family_id == "perturbation":
+            return {
+                "block_size": self.view.perturbation_block_size_spinbox.value(),
+                "stride": self.view.perturbation_stride_spinbox.value(),
+            }
+        return {}
+
+    def _selected_xai_method_uses_layer_controls(self, family_id: str) -> bool:
+        if hasattr(self.view, "selected_xai_method_uses_layer_controls"):
+            return self.view.selected_xai_method_uses_layer_controls(family_id)
+        if family_id == "gradient":
+            return self.view.selected_method_uses_layer_controls()
+        return True
 
     def _workspace_renderable_items(self) -> list[dict[str, object]]:
         return self.data_store.workspace_renderable_items()

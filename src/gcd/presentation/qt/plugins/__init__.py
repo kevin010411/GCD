@@ -3,6 +3,7 @@ from .gradcam import GradCamPluginPanel
 from .perturbation import PerturbationPluginPanel
 from .roi_annotation import RoiAnnotationPluginPanel
 from .transfer_volume import TransferVolumePluginPanel
+from .xai_family import XaiFamilyPluginPanel
 from .registry import DEFAULT_PLUGIN_DEFINITIONS, PluginDefinition
 
 __all__ = [
@@ -13,4 +14,5 @@ __all__ = [
     "PluginDefinition",
     "RoiAnnotationPluginPanel",
     "TransferVolumePluginPanel",
+    "XaiFamilyPluginPanel",
 ]

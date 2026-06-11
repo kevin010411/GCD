@@ -133,6 +133,25 @@ class WorkflowService:
     def list_cam_methods(self) -> list[dict[str, object]]:
         return self.engine.available_cam_methods("grad")
 
+    def list_xai_method_families(self) -> list[dict[str, object]]:
+        if hasattr(self.engine, "available_xai_method_families"):
+            return self.engine.available_xai_method_families()
+        return [
+            {"id": "gradient", "title": "Gradient XAI", "button_label": "Gradient"},
+            {
+                "id": "perturbation",
+                "title": "Perturbation XAI",
+                "button_label": "Perturb",
+            },
+        ]
+
+    def list_xai_methods(self, family: str | None = None) -> list[dict[str, object]]:
+        if hasattr(self.engine, "available_xai_methods"):
+            return self.engine.available_xai_methods(family)
+        if family == "perturbation":
+            return self.list_perturbation_methods()
+        return self.list_cam_methods()
+
     def list_objectives(self) -> list[dict[str, object]]:
         return self.engine.available_objectives()
 
@@ -233,9 +252,10 @@ class WorkflowService:
             if request.method.startswith("perturb")
             else TransferFunction.heatmap_preset()
         )
-        method_options = self.engine.available_cam_methods(
-            "perturbation" if request.method.startswith("perturb") else "grad"
-        )
+        family = "perturbation" if request.method.startswith("perturb") else "gradient"
+        if hasattr(self.engine, "_resolve_cam_method"):
+            family = getattr(self.engine._resolve_cam_method(request.method), "family", family)
+        method_options = self.list_xai_methods(family)
         objective_options = self.engine.available_objectives()
         return XaiComputeResult(
             dataset_input=self.engine.dataset_input(),
