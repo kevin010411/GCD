@@ -10,4 +10,4 @@ model = dict(
     deep_supervision=False,
 )  # 模型
 ckpt = "checkpoint/cotr_2025.pth"  # 權重檔
-default_layer = "dec0"  # 預設 CAM 層
+default_layer = "decoder0"  # 預設 CAM 層

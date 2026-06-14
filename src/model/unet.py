@@ -18,7 +18,6 @@ from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
 
 from monai.networks.blocks.convolutions import Convolution, ResidualUnit
 from monai.networks.layers.factories import Act, Norm
@@ -192,7 +191,6 @@ class UNet(nn.Module):
         self.dropout = dropout
         self.bias = bias
         self.adn_ordering = adn_ordering
-        self.layers: dict[str, torch.Tensor] = {}
 
         def _create_block(
             inc: int,
@@ -239,6 +237,18 @@ class UNet(nn.Module):
         self.model = _create_block(
             in_channels, out_channels, self.channels, self.strides, True
         )
+        self.xai_layer_targets = self._build_xai_layer_targets()
+
+    def _build_xai_layer_targets(self) -> dict[str, str]:
+        targets: dict[str, str] = {}
+        block_path = "model"
+        depth = len(self.channels) - 1
+        for index in range(1, depth + 1):
+            targets[f"encoder {index}"] = f"{block_path}.0"
+            targets[f"decoder {index}"] = f"{block_path}.2"
+            if index < depth:
+                block_path = f"{block_path}.1.submodule"
+        return targets
 
     def _get_connection_block(
         self, down_path: nn.Module, up_path: nn.Module, subblock: nn.Module
@@ -359,76 +369,7 @@ class UNet(nn.Module):
         return conv
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Keep original design:
-        - UNet is nested Sequential(down, SkipConnection(subblock), up)
-        - Use checkpoint on down/skip/up
-        Collect all stage features:
-        - encoder k: output of down at depth k (top=1)
-        - decoder k: output of up at depth k (top=1)
-        """
-
-        need_cam = x.requires_grad
-        if need_cam:
-            self.layers = {}
-            enc_feats: list[torch.Tensor] = []
-            dec_feats: list[torch.Tensor] = []
-
-        def _is_unet_block(m: nn.Module) -> bool:
-            # expect a layer block: Sequential(down, SkipConnection(subblock), up)
-            if not isinstance(m, nn.Sequential) or len(m) != 3:
-                return False
-            return isinstance(m[1], SkipConnection)
-
-        def _run_block(block: nn.Module, inp: torch.Tensor) -> torch.Tensor:
-            # if the structure is unexpected, fallback
-            if not _is_unet_block(block):
-                return block(inp)
-
-            down, skip, up = block[0], block[1], block[2]
-
-            # 1) down
-            xd = checkpoint(down, inp, use_reentrant=False)
-            if need_cam:
-                enc_feats.append(xd)
-
-            # 2) skip (this will run subblock inside SkipConnection)
-            if need_cam and isinstance(skip.submodule, nn.Sequential):
-                xs = _run_block(skip, xd)
-            else:
-                xs = checkpoint(skip, xd, use_reentrant=False)
-
-            # 3) up
-            xu = checkpoint(up, xs, use_reentrant=False)
-            if need_cam:
-                dec_feats.append(xu)
-
-            return xu
-
-        out = _run_block(self.model, x)
-
-        # Save features for CAM (top=1, deeper increases)
-        if need_cam:
-            # enc_feats / dec_feats were appended in forward order:
-            # encoder: top -> deeper (good)
-            # decoder: top -> deeper? actually appended as we unwind recursion depends on SkipConnection internals;
-            # BUT in this design (calling down/skip/up at each visited block), this list is top -> deeper for stages we execute.
-            # To be safe and consistent with "top=1", we keep as collected.
-            self.layers = {}
-
-            for i, t in enumerate(enc_feats, 1):
-                self.layers[f"encoder {i}"] = t
-            for i, t in enumerate(dec_feats, 1):
-                self.layers[f"decoder {i}"] = t
-
-            # retain grads for CAM
-            for v in self.layers.values():
-                try:
-                    v.retain_grad()
-                except Exception:
-                    pass
-
-        return out
+        return self.model(x)
 
 
 Unet = UNet

@@ -15,4 +15,4 @@ model = dict(
     dropout_rate=0.0,
 )  # 模型
 ckpt = "checkpoint/60_20_20_fold3/unetr.pth"  # 權重檔
-default_layer = "dec1"  # 預設 CAM 層
+default_layer = "decoder3"  # 預設 CAM 層

@@ -17,6 +17,7 @@ from .cam_methods import (
     XaiLayerSelection,
     XaiMethodRegistry,
 )
+from .layer_hooks import XaiLayerHookManager
 
 if TYPE_CHECKING:
     import numpy as np
@@ -47,6 +48,30 @@ class ModelLoadStateDictError(RuntimeError):
         super().__init__(message)
         self.error_file = error_file
         self.skip_error_store = True
+
+
+class _NullContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        return None
+
+
+def _layer_channel_counts(patch_payload: dict[str, object]) -> dict[str, int]:
+    import torch
+
+    layers = patch_payload.get("layers")
+    if not isinstance(layers, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for name, layer_payload in layers.items():
+        if not isinstance(layer_payload, dict):
+            continue
+        activation = layer_payload.get("activation")
+        if isinstance(activation, torch.Tensor):
+            counts[str(name)] = int(activation.size(1))
+    return counts
 
 
 class GradCamEngine:
@@ -117,6 +142,22 @@ class GradCamEngine:
         self.cfg = _config_from_file(config_path)
         self._apply_config()
         self._log(f"已設定 Config 為: {config_path}")
+
+    def model_layer_metadata(self) -> dict[str, object]:
+        model = _build_model(self.cfg.model)
+        hook_manager = XaiLayerHookManager(model)
+        layer_names = list(hook_manager.layer_names)
+        default_layer = str(self.cfg.get("default_layer", "") or "")
+        selected_layer = (
+            default_layer
+            if default_layer in layer_names
+            else (layer_names[0] if layer_names else "")
+        )
+        return {
+            "layer_names": layer_names,
+            "selected_layer": selected_layer,
+            "feature_size": 0,
+        }
 
     def set_target_class(self, target_class: int) -> None:
         self.target_class = int(target_class)
@@ -429,6 +470,10 @@ class GradCamEngine:
         img2 = self.img1.unsqueeze(0).to(device)
         img2.requires_grad_()
 
+        hook_manager = (
+            XaiLayerHookManager(model) if cam_method.uses_layer_controls else None
+        )
+
         with _timer("模型推論", track_gpu=True):
             x0, y0, z0 = list(
                 (
@@ -447,46 +492,43 @@ class GradCamEngine:
                 (self.STRIDE, 0),
                 (self.STRIDE, self.STRIDE),
             ]
-            for x, y in tiles:
-                model.zero_grad(set_to_none=True)
-                if img2.grad is not None:
-                    img2.grad = None
-                tile_input = img2[
-                    ...,
-                    x0 + x : x0 + x + self.SIZE,
-                    y0 + y : y0 + y + self.SIZE,
-                    z0 : z0 + self.SIZE,
-                ]
-                tile_input.retain_grad()
-                logits = model(tile_input)
-
-                layers_by_name = (
-                    model.layers
-                    if hasattr(model, "layers") and model.layers
-                    else {}
-                )
-
-                if cam_method.uses_layer_controls and not layers_by_name:
-                    raise RuntimeError(
-                        "model.layers 未填入。請確認模型 forward 在 requires_grad=True 時"
-                        "會保留中間層與梯度。"
+            hook_context = hook_manager if hook_manager is not None else _NullContext()
+            with hook_context:
+                for x, y in tiles:
+                    model.zero_grad(set_to_none=True)
+                    if img2.grad is not None:
+                        img2.grad = None
+                    if hook_manager is not None:
+                        hook_manager.clear()
+                    tile_input = img2[
+                        ...,
+                        x0 + x : x0 + x + self.SIZE,
+                        y0 + y : y0 + y + self.SIZE,
+                        z0 : z0 + self.SIZE,
+                    ]
+                    tile_input.retain_grad()
+                    logits = model(tile_input)
+                    layers_by_name = (
+                        hook_manager.layers_by_name()
+                        if hook_manager is not None
+                        else {}
                     )
 
-                self.patch.append(
-                    cam_method.collect_patch_data(
-                        CamPatchContext(
-                            input_tensor=tile_input,
-                            logits=logits,
-                            layers_by_name=layers_by_name,
-                            target_class=self.target_class,
-                            objective=objective,
+                    self.patch.append(
+                        cam_method.collect_patch_data(
+                            CamPatchContext(
+                                input_tensor=tile_input,
+                                logits=logits,
+                                layers_by_name=layers_by_name,
+                                target_class=self.target_class,
+                                objective=objective,
+                            )
                         )
                     )
-                )
 
             self.layers = (
-                {key: value.size(1) for key, value in model.layers.items()}
-                if cam_method.uses_layer_controls
+                _layer_channel_counts(self.patch[-1])
+                if hook_manager is not None
                 else {"input": 1}
             )
             self.model_output = logits.detach().to("cpu")

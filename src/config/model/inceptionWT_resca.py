@@ -10,4 +10,4 @@ model = dict(
     deep_sup=True,
 )  # 模型
 ckpt = "checkpoint/inceptionWT_resca.pth"  # 權重檔
-default_layer = "dec1"  # 預設 CAM 層
+default_layer = "decoder1"  # 預設 CAM 層

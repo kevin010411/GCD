@@ -12,4 +12,4 @@ model = dict(
     use_ckpt=True,
 )  # 模型
 ckpt = "checkpoint/60_20_20_fold3/nnunet.pth"  # 權重檔
-default_layer = "dec0"  # 預設 CAM 層
+default_layer = "decoder0"  # 預設 CAM 層

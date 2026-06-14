@@ -18,7 +18,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as checkpoint
 from torch.nn import LayerNorm
 
 from monai.networks.blocks import MLPBlock as Mlp
@@ -67,7 +66,6 @@ class SwinUNETR(nn.Module):
         attn_drop_rate: float = 0.0,
         dropout_path_rate: float = 0.0,
         normalize: bool = True,
-        use_checkpoint: bool = False,
         spatial_dims: int = 3,
         downsample="merging",
         use_v2=False,
@@ -88,7 +86,6 @@ class SwinUNETR(nn.Module):
             attn_drop_rate: attention dropout rate.
             dropout_path_rate: drop path rate.
             normalize: normalize output intermediate features in each stage.
-            use_checkpoint: use gradient checkpointing for reduced memory usage.
             spatial_dims: number of spatial dims.
             downsample: module used for downsampling, available options are `"mergingv2"`, `"merging"` and a
                 user-specified `nn.Module` following the API defined in :py:class:`monai.networks.nets.PatchMerging`.
@@ -103,8 +100,8 @@ class SwinUNETR(nn.Module):
             # for 3D 4-channel input with size (128,128,128), 3-channel output and (2,4,2,2) layers in each stage.
             >>> net = SwinUNETR(img_size=(128,128,128), in_channels=4, out_channels=3, depths=(2,4,2,2))
 
-            # for 2D single channel input with size (96,96), 2-channel output and gradient checkpointing.
-            >>> net = SwinUNETR(img_size=(96,96), in_channels=3, out_channels=2, use_checkpoint=True, spatial_dims=2)
+            # for 2D single channel input with size (96,96), 2-channel output.
+            >>> net = SwinUNETR(img_size=(96,96), in_channels=3, out_channels=2, spatial_dims=2)
 
         """
 
@@ -146,7 +143,6 @@ class SwinUNETR(nn.Module):
             attn_drop_rate=attn_drop_rate,
             drop_path_rate=dropout_path_rate,
             norm_layer=nn.LayerNorm,
-            use_checkpoint=use_checkpoint,
             spatial_dims=spatial_dims,
             downsample=(
                 look_up_option(downsample, MERGING_MODE)
@@ -260,6 +256,19 @@ class SwinUNETR(nn.Module):
             in_channels=feature_size,
             out_channels=out_channels,
         )
+        self.xai_layer_targets = {
+            "encoder1": "encoder1",
+            "encoder2": "encoder2",
+            "encoder3": "encoder3",
+            "encoder4": "encoder4",
+            "encoder10": "encoder10",
+            "decoder5": "decoder5",
+            "decoder4": "decoder4",
+            "decoder3": "decoder3",
+            "decoder2": "decoder2",
+            "decoder1": "decoder1",
+            "out": "out",
+        }
 
     def load_from(self, weights):
         with torch.no_grad():
@@ -329,63 +338,19 @@ class SwinUNETR(nn.Module):
         if not torch.jit.is_scripting() and not torch.jit.is_tracing():
             self._check_input_size(x_in.shape[2:])
 
-        # 小工具：給 decoder(當前特徵, skip) 用，方便丟進 checkpoint
-        def _dec_call(args):
-            mod, a, b = args  # (模組, 當前特徵, skip特徵)
-            return mod(a, b)
-
         hidden_states_out = self.swinViT(x_in, self.normalize)
-        # hidden_states_out = checkpoint.checkpoint(
-        #     lambda t: self.swinViT(t, self.normalize), x_in, use_reentrant=False
-        # ) # 沒辦法取出來 目前這樣寫會報錯
 
-        enc0 = checkpoint.checkpoint(self.encoder1, x_in, use_reentrant=False)
-        enc1 = checkpoint.checkpoint(
-            self.encoder2, hidden_states_out[0], use_reentrant=False
-        )
-        enc2 = checkpoint.checkpoint(
-            self.encoder3, hidden_states_out[1], use_reentrant=False
-        )
-        enc3 = checkpoint.checkpoint(
-            self.encoder4, hidden_states_out[2], use_reentrant=False
-        )
-        dec4 = checkpoint.checkpoint(
-            self.encoder10, hidden_states_out[4], use_reentrant=False
-        )
-        dec3 = checkpoint.checkpoint(
-            _dec_call, (self.decoder5, dec4, hidden_states_out[3]), use_reentrant=False
-        )
-        dec2 = checkpoint.checkpoint(
-            _dec_call, (self.decoder4, dec3, enc3), use_reentrant=False
-        )
-        dec1 = checkpoint.checkpoint(
-            _dec_call, (self.decoder3, dec2, enc2), use_reentrant=False
-        )
-        dec0 = checkpoint.checkpoint(
-            _dec_call, (self.decoder2, dec1, enc1), use_reentrant=False
-        )
-        out = checkpoint.checkpoint(
-            _dec_call, (self.decoder1, dec0, enc0), use_reentrant=False
-        )
+        enc0 = self.encoder1(x_in)
+        enc1 = self.encoder2(hidden_states_out[0])
+        enc2 = self.encoder3(hidden_states_out[1])
+        enc3 = self.encoder4(hidden_states_out[2])
+        dec4 = self.encoder10(hidden_states_out[4])
+        dec3 = self.decoder5(dec4, hidden_states_out[3])
+        dec2 = self.decoder4(dec3, enc3)
+        dec1 = self.decoder3(dec2, enc2)
+        dec0 = self.decoder2(dec1, enc1)
+        out = self.decoder1(dec0, enc0)
         logits = self.out(out)
-
-        if x_in.requires_grad:
-            self.layers = {
-                "enc0": enc0,
-                "enc1": enc1,
-                "enc2": enc2,
-                "enc3": enc3,
-                "dec4": dec4,  # bottleneck 之後
-                "dec3": dec3,
-                "dec2": dec2,
-                "dec1": dec1,
-                "dec0": dec0,
-                "out": out,  # 最後一層decoder輸出（可選）
-            }
-            for v in self.layers.values():
-                # 只在需要時保留梯度，避免不必要的顯存
-                if hasattr(v, "retain_grad"):
-                    v.retain_grad()
 
         return logits
 
@@ -647,7 +612,6 @@ class SwinTransformerBlock(nn.Module):
         drop_path: float = 0.0,
         act_layer: str = "GELU",
         norm_layer: type[LayerNorm] = nn.LayerNorm,
-        use_checkpoint: bool = False,
     ) -> None:
         """
         Args:
@@ -662,7 +626,6 @@ class SwinTransformerBlock(nn.Module):
             drop_path: stochastic depth rate.
             act_layer: activation layer.
             norm_layer: normalization layer.
-            use_checkpoint: use gradient checkpointing for reduced memory usage.
         """
 
         super().__init__()
@@ -671,7 +634,6 @@ class SwinTransformerBlock(nn.Module):
         self.window_size = window_size
         self.shift_size = shift_size
         self.mlp_ratio = mlp_ratio
-        self.use_checkpoint = use_checkpoint
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
             dim,
@@ -806,17 +768,9 @@ class SwinTransformerBlock(nn.Module):
 
     def forward(self, x, mask_matrix):
         shortcut = x
-        if self.use_checkpoint:
-            x = checkpoint.checkpoint(
-                self.forward_part1, x, mask_matrix, use_reentrant=False
-            )
-        else:
-            x = self.forward_part1(x, mask_matrix)
+        x = self.forward_part1(x, mask_matrix)
         x = shortcut + self.drop_path(x)
-        if self.use_checkpoint:
-            x = x + checkpoint.checkpoint(self.forward_part2, x, use_reentrant=False)
-        else:
-            x = x + self.forward_part2(x)
+        x = x + self.forward_part2(x)
         return x
 
 
@@ -993,7 +947,6 @@ class BasicLayer(nn.Module):
         attn_drop: float = 0.0,
         norm_layer: type[LayerNorm] = nn.LayerNorm,
         downsample: nn.Module | None = None,
-        use_checkpoint: bool = False,
     ) -> None:
         """
         Args:
@@ -1008,7 +961,6 @@ class BasicLayer(nn.Module):
             attn_drop: attention dropout rate.
             norm_layer: normalization layer.
             downsample: an optional downsampling layer at the end of the layer.
-            use_checkpoint: use gradient checkpointing for reduced memory usage.
         """
 
         super().__init__()
@@ -1016,7 +968,6 @@ class BasicLayer(nn.Module):
         self.shift_size = tuple(i // 2 for i in window_size)
         self.no_shift = tuple(0 for i in window_size)
         self.depth = depth
-        self.use_checkpoint = use_checkpoint
         self.blocks = nn.ModuleList(
             [
                 SwinTransformerBlock(
@@ -1032,7 +983,6 @@ class BasicLayer(nn.Module):
                         drop_path[i] if isinstance(drop_path, list) else drop_path
                     ),
                     norm_layer=norm_layer,
-                    use_checkpoint=use_checkpoint,
                 )
                 for i in range(depth)
             ]
@@ -1103,7 +1053,6 @@ class SwinTransformer(nn.Module):
         drop_path_rate: float = 0.0,
         norm_layer: type[LayerNorm] = nn.LayerNorm,
         patch_norm: bool = False,
-        use_checkpoint: bool = False,
         spatial_dims: int = 3,
         downsample="merging",
         use_v2=False,
@@ -1123,7 +1072,6 @@ class SwinTransformer(nn.Module):
             drop_path_rate: stochastic depth rate.
             norm_layer: normalization layer.
             patch_norm: add normalization after patch embedding.
-            use_checkpoint: use gradient checkpointing for reduced memory usage.
             spatial_dims: spatial dimension.
             downsample: module used for downsampling, available options are `"mergingv2"`, `"merging"` and a
                 user-specified `nn.Module` following the API defined in :py:class:`monai.networks.nets.PatchMerging`.
@@ -1174,7 +1122,6 @@ class SwinTransformer(nn.Module):
                 attn_drop=attn_drop_rate,
                 norm_layer=norm_layer,
                 downsample=down_sample_mod,
-                use_checkpoint=use_checkpoint,
             )
             if i_layer == 0:
                 self.layers1.append(layer)

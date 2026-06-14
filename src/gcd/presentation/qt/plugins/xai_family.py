@@ -194,11 +194,12 @@ class XaiFamilyPluginPanel(PluginPanel):
 
     def _sync_capability_controls(self) -> None:
         uses_layer = self.selected_method_uses_layer_controls()
-        can_adjust = bool(uses_layer) and self.layer_combo.count() > 0 and self._feature_size > 0
+        can_select_layer = bool(uses_layer) and self.layer_combo.count() > 0
+        can_adjust_feature = can_select_layer and self._feature_size > 0
         self.layer_feature_group.setVisible(bool(uses_layer))
-        self.layer_feature_group.setEnabled(can_adjust)
-        self.layer_combo.setEnabled(can_adjust)
-        self.feature_widget.setEnabled(can_adjust)
+        self.layer_feature_group.setEnabled(can_select_layer)
+        self.layer_combo.setEnabled(can_select_layer)
+        self.feature_widget.setEnabled(can_adjust_feature)
         self.objective_row.setVisible(self.selected_method_uses_objective())
 
     def _rebuild_parameter_controls(self) -> None:

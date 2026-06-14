@@ -4,7 +4,6 @@ from timm.models.layers import trunc_normal_
 from .blocks.utils import LayerNorm
 from .blocks.cbam import CBAM
 from .blocks.InceptionWTBlock import InceptionWTBlock
-from torch.utils.checkpoint import checkpoint
 from monai.networks.blocks import UnetrBasicBlock, UnetrUpBlock, UnetOutBlock
 from src.utils import MODEL
 
@@ -149,54 +148,32 @@ class INCEPTIONWT_RESBLOCK(nn.Module):
                 spatial_dims=3, in_channels=feature_sizes[0], out_channels=out_channels
             )
 
-        # 【新增這行】初始化 layers 字典，讓工具可以存取
-        self.layers = {}
+        self.xai_layer_targets = {
+            "encoder0": "encoder0",
+            "encoder1": "backbone.stages.0",
+            "encoder2": "backbone.stages.1",
+            "encoder3": "backbone.stages.2",
+            "encoder4": "backbone.stages.3",
+            "decoder5": "decoder5",
+            "decoder4": "decoder4",
+            "decoder3": "decoder3",
+            "decoder2": "decoder2",
+            "decoder1": "decoder1",
+            "out_block": "out_block",
+        }
 
     def forward(self, x):
-        # 輔助函式，用於處理多輸入的 checkpoint
-        def forward_multiple(x):
-            module, in1, in2 = x
-            return module(in1, in2)
-
-        # 使用 Checkpoint 以節省 VRAM
-        enc0 = checkpoint(self.encoder0, x, use_reentrant=False)
-        hidden_states_out = checkpoint(self.backbone, x, use_reentrant=False)
+        enc0 = self.encoder0(x)
+        hidden_states_out = self.backbone(x)
         enc1, enc2, enc3, enc4 = hidden_states_out
 
-        bn = checkpoint(self.bottleneck, enc4, use_reentrant=False)
+        bn = self.bottleneck(enc4)
 
-        dec5 = checkpoint(
-            forward_multiple, (self.decoder5, bn, enc4), use_reentrant=False
-        )
-        dec4 = checkpoint(
-            forward_multiple, (self.decoder4, dec5, enc3), use_reentrant=False
-        )
-        dec3 = checkpoint(
-            forward_multiple, (self.decoder3, dec4, enc2), use_reentrant=False
-        )
-        dec2 = checkpoint(
-            forward_multiple, (self.decoder2, dec3, enc1), use_reentrant=False
-        )
-        dec1 = checkpoint(
-            forward_multiple, (self.decoder1, dec2, enc0), use_reentrant=False
-        )
-
-        # Grad-CAM 梯度保留邏輯
-        if x.requires_grad:
-            self.layers = {
-                "dec1": dec1,
-                "dec2": dec2,
-                "dec3": dec3,
-                "dec4": dec4,
-                "dec5": dec5,
-                "enc4": enc4,
-                "enc3": enc3,
-                "enc2": enc2,
-                "enc1": enc1,
-                "enc0": enc0,
-            }
-            for v in self.layers.values():
-                v.retain_grad()
+        dec5 = self.decoder5(bn, enc4)
+        dec4 = self.decoder4(dec5, enc3)
+        dec3 = self.decoder3(dec4, enc2)
+        dec2 = self.decoder2(dec3, enc1)
+        dec1 = self.decoder1(dec2, enc0)
 
         out = self.out_block(dec1)
 

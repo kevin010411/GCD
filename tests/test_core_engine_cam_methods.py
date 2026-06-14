@@ -12,6 +12,82 @@ from src.gcd.infrastructure.core_engine import GradCamEngine
 
 
 class CoreEngineCamMethodTests(unittest.TestCase):
+    def test_model_layer_metadata_reads_nested_targets_without_forward(self) -> None:
+        class _Cfg:
+            model = object()
+
+            def get(self, key, default=None):
+                return {"default_layer": "decoder"}.get(key, default)
+
+        class _Model(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.encoder = torch.nn.Sequential(torch.nn.Conv3d(1, 2, kernel_size=1))
+                self.decoder = torch.nn.Sequential(
+                    torch.nn.Identity(),
+                    torch.nn.Conv3d(2, 3, kernel_size=1),
+                )
+                self.xai_layer_targets = {
+                    "encoder": "encoder.0",
+                    "decoder": "decoder.1",
+                }
+
+            def forward(self, _value):
+                raise AssertionError("metadata lookup must not run forward")
+
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine.cfg = _Cfg()
+
+        with patch("src.gcd.infrastructure.core_engine._build_model", return_value=_Model()):
+            metadata = engine.model_layer_metadata()
+
+        self.assertEqual(metadata["layer_names"], ["encoder", "decoder"])
+        self.assertEqual(metadata["selected_layer"], "decoder")
+        self.assertEqual(metadata["feature_size"], 0)
+
+    def test_model_layer_metadata_falls_back_to_first_layer(self) -> None:
+        class _Cfg:
+            model = object()
+
+            def get(self, key, default=None):
+                return {"default_layer": "missing"}.get(key, default)
+
+        class _Model(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.encoder = torch.nn.Conv3d(1, 2, kernel_size=1)
+                self.xai_layer_targets = {"encoder": "encoder"}
+
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine.cfg = _Cfg()
+
+        with patch("src.gcd.infrastructure.core_engine._build_model", return_value=_Model()):
+            metadata = engine.model_layer_metadata()
+
+        self.assertEqual(metadata["selected_layer"], "encoder")
+
+    def test_model_layer_metadata_reports_missing_target_path(self) -> None:
+        class _Cfg:
+            model = object()
+
+            def get(self, key, default=None):
+                return {"default_layer": "decoder"}.get(key, default)
+
+        class _Model(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.encoder = torch.nn.Conv3d(1, 2, kernel_size=1)
+                self.xai_layer_targets = {"decoder": "decoder.0"}
+
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine.cfg = _Cfg()
+
+        with (
+            patch("src.gcd.infrastructure.core_engine._build_model", return_value=_Model()),
+            self.assertRaisesRegex(RuntimeError, "decoder.*decoder\\.0"),
+        ):
+            engine.model_layer_metadata()
+
     def test_unknown_method_falls_back_to_gradcam(self) -> None:
         logs = []
         engine = GradCamEngine.__new__(GradCamEngine)
@@ -173,6 +249,86 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         self.assertEqual(engine.layers, {"input": 1})
         self.assertTrue(all(item["method"] == "saliency_map" for item in engine.patch))
         self.assertTrue(all("input_gradient" in item for item in engine.patch))
+
+    def test_prepare_xai_inputs_collects_layers_with_forward_hooks(self) -> None:
+        class _Cfg:
+            model = object()
+            ckpt = "checkpoint.pt"
+
+        class _Model(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.feature = torch.nn.Conv3d(1, 2, kernel_size=1)
+                self.head = torch.nn.Conv3d(2, 2, kernel_size=1)
+                self.xai_layer_targets = {"feature": "feature"}
+
+            def load_state_dict(self, _state_dict, strict=False):
+                return [], []
+
+            def forward(self, value):
+                return self.head(self.feature(value))
+
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine._logger = lambda _message: None
+        engine.error_store = None
+        engine.cfg = _Cfg()
+        engine.cam_methods = {
+            "gradcam": GradCamMethod(GradCamEngine._gradcam_objective)
+        }
+        engine.active_method_id = "gradcam"
+        engine.file_name = "sample.nii.gz"
+        engine.img1 = torch.ones((1, 2, 2, 2), dtype=torch.float32)
+        engine.SIZE = 2
+        engine.STRIDE = 0
+        engine.target_class = 1
+
+        with (
+            patch("src.gcd.infrastructure.core_engine._build_model", return_value=_Model()),
+            patch("src.gcd.infrastructure.core_engine.os.path.exists", return_value=True),
+            patch("torch.load", return_value={}),
+        ):
+            engine.prepare_xai_inputs(method="gradcam")
+
+        self.assertEqual(engine.layers, {"feature": 2})
+        self.assertTrue(all(item["method"] == "gradcam" for item in engine.patch))
+        self.assertTrue(all("feature" in item["layers"] for item in engine.patch))
+        layer_payload = engine.patch[0]["layers"]["feature"]
+        self.assertIn("activation", layer_payload)
+        self.assertIn("gradient", layer_payload)
+
+    def test_prepare_xai_inputs_requires_xai_layer_targets_for_layer_methods(self) -> None:
+        class _Cfg:
+            model = object()
+            ckpt = "checkpoint.pt"
+
+        class _Model(torch.nn.Module):
+            def load_state_dict(self, _state_dict, strict=False):
+                return [], []
+
+            def forward(self, value):
+                return torch.cat([value.mean(dim=1), value.sum(dim=1)], dim=1)
+
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine._logger = lambda _message: None
+        engine.error_store = None
+        engine.cfg = _Cfg()
+        engine.cam_methods = {
+            "gradcam": GradCamMethod(GradCamEngine._gradcam_objective)
+        }
+        engine.active_method_id = "gradcam"
+        engine.file_name = "sample.nii.gz"
+        engine.img1 = torch.ones((1, 2, 2, 2), dtype=torch.float32)
+        engine.SIZE = 2
+        engine.STRIDE = 0
+        engine.target_class = 1
+
+        with (
+            patch("src.gcd.infrastructure.core_engine._build_model", return_value=_Model()),
+            patch("src.gcd.infrastructure.core_engine.os.path.exists", return_value=True),
+            patch("torch.load", return_value={}),
+            self.assertRaisesRegex(RuntimeError, "xai_layer_targets"),
+        ):
+            engine.prepare_xai_inputs(method="gradcam")
 
     def test_dataset_input_omits_large_result_and_patch_payloads(self) -> None:
         engine = GradCamEngine.__new__(GradCamEngine)

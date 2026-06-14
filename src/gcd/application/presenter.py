@@ -203,6 +203,7 @@ class MainWindowPresenter:
         self.view.set_perturbation_dataset_options([], None)
         if options:
             self.workflow.set_config(options[0]["path"])
+            self._sync_model_layer_options()
         self.view.set_rotation_speed_label(self.rotation_speed)
         self.view.set_rotation_running(True)
         self.view.renderer.set_rotation_speed(self.rotation_speed)
@@ -217,6 +218,7 @@ class MainWindowPresenter:
         path = self.view.selected_model_path()
         if path:
             self.workflow.set_config(path)
+            self._sync_model_layer_options()
 
     def on_open_file_requested(self) -> None:
         file_name = self.view.choose_input_file()
@@ -613,6 +615,24 @@ class MainWindowPresenter:
     def _sync_gradcam_controls(self) -> None:
         self._sync_xai_controls("gradient")
         self._sync_xai_controls("perturbation")
+
+    def _sync_model_layer_options(self) -> None:
+        if not hasattr(self.workflow, "list_current_model_layers"):
+            return
+        metadata = self.workflow.list_current_model_layers()
+        layer_names = list(metadata.get("layer_names", []))
+        selected_layer = str(metadata.get("selected_layer", "") or "")
+        feature_size = int(metadata.get("feature_size", 0) or 0)
+        if hasattr(self.view, "set_xai_layer_options"):
+            for family_id in ("gradient", "perturbation"):
+                self.view.set_xai_layer_options(
+                    family_id, layer_names, selected_layer, feature_size
+                )
+                self.on_xai_method_changed(family_id)
+            return
+        self.view.set_layer_options(layer_names, selected_layer)
+        self.view.set_feature_size(feature_size)
+        self.on_method_changed(0)
 
     def _sync_xai_controls(self, family_id: str) -> None:
         selected_id = self.selected_xai_dataset_by_family.get(family_id, "")

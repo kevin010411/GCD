@@ -130,6 +130,9 @@ class WorkflowService:
     def set_config(self, config_path: str) -> None:
         self.engine.set_config(config_path)
 
+    def list_current_model_layers(self) -> dict[str, Any]:
+        return self.engine.model_layer_metadata()
+
     def list_cam_methods(self) -> list[dict[str, object]]:
         return self.engine.available_cam_methods("grad")
 

@@ -307,6 +307,21 @@ class WISNET(nn.Module):
                 in_channels=feature_sizes[1],
                 out_channels=out_channels,
             )
+        self.xai_layer_targets = {
+            "encoder0": "encoder0",
+            "encoder1": "backbone.stages.0",
+            "encoder2": "backbone.stages.1",
+            "encoder3": "backbone.stages.2",
+            "encoder4": "backbone.stages.3",
+            "bottleneck_downsample": "bottleneck_downsample",
+            "bottleneck": "bottleneck",
+            "decoder5": "decoder5",
+            "decoder4": "decoder4",
+            "decoder3": "decoder3",
+            "decoder2": "decoder2",
+            "decoder1": "decoder1",
+            "out_block": "out_block",
+        }
 
     def forward(self, x):
         # Encoder

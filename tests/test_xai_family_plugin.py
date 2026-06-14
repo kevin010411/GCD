@@ -75,6 +75,46 @@ class XaiFamilyPluginPanelTests(unittest.TestCase):
         self.assertTrue(panel.layer_feature_group.isHidden())
         self.assertFalse(panel.objective_row.isHidden())
 
+    def test_layer_combo_enabled_before_feature_size_is_known(self) -> None:
+        panel = XaiFamilyPluginPanel("gradient", "Gradient XAI", "Run gradients.")
+        panel.set_method_options(
+            [
+                {
+                    "id": "gradcam",
+                    "name": "Grad-CAM",
+                    "uses_layer_controls": True,
+                    "uses_objective": True,
+                    "parameters": [],
+                }
+            ],
+            "gradcam",
+        )
+
+        panel.set_layer_options(["encoder 1", "decoder 1"], "decoder 1", 0)
+
+        self.assertTrue(panel.layer_combo.isEnabled())
+        self.assertFalse(panel.feature_widget.isEnabled())
+
+    def test_feature_widget_enabled_after_feature_size_is_known(self) -> None:
+        panel = XaiFamilyPluginPanel("gradient", "Gradient XAI", "Run gradients.")
+        panel.set_method_options(
+            [
+                {
+                    "id": "gradcam",
+                    "name": "Grad-CAM",
+                    "uses_layer_controls": True,
+                    "uses_objective": True,
+                    "parameters": [],
+                }
+            ],
+            "gradcam",
+        )
+
+        panel.set_layer_options(["decoder 1"], "decoder 1", 8)
+
+        self.assertTrue(panel.layer_combo.isEnabled())
+        self.assertTrue(panel.feature_widget.isEnabled())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,4 +11,4 @@ model = dict(
     res_block=True,
 )  # 模型
 ckpt = "checkpoint/inception_resca.pth"  # 權重檔
-default_layer = "dec1"  # 預設 CAM 層
+default_layer = "decoder1"  # 預設 CAM 層

@@ -348,6 +348,12 @@ class _FakeWorkflow:
         self.load_calls = []
         self.compute_calls = []
         self.set_config_calls = []
+        self.model_configs = []
+        self.model_layer_metadata = {
+            "layer_names": ["encoder 1", "decoder 1"],
+            "selected_layer": "decoder 1",
+            "feature_size": 0,
+        }
         self.loaded_volume_data = np.array([9, 8, 7], dtype=np.float32)
         self.engine = type(
             "Engine",
@@ -363,7 +369,7 @@ class _FakeWorkflow:
         )()
 
     def list_model_configs(self):
-        return []
+        return list(self.model_configs)
 
     def list_cam_methods(self):
         return [
@@ -375,6 +381,15 @@ class _FakeWorkflow:
             },
         ]
 
+    def list_perturbation_methods(self):
+        return [
+            {
+                "id": "perturb_occlusion",
+                "name": "Occlusion",
+                "uses_layer_controls": True,
+            }
+        ]
+
     def list_objectives(self):
         return [
             {"id": "predicted_target_mask", "name": "Predicted Target Mask"},
@@ -383,6 +398,9 @@ class _FakeWorkflow:
 
     def set_config(self, path):
         self.set_config_calls.append(path)
+
+    def list_current_model_layers(self):
+        return dict(self.model_layer_metadata)
 
     def load_input(self, file_name, target_class, method=None):
         self.load_calls.append((file_name, target_class, method))
@@ -483,6 +501,51 @@ class _FakeErrorStore:
 
 
 class PresenterMethodTests(unittest.TestCase):
+    def test_model_change_refreshes_layer_options_before_forward(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+
+        presenter.on_model_changed(0)
+
+        self.assertEqual(workflow.set_config_calls, ["src/config/model/unet.py"])
+        self.assertEqual(
+            view.layer_options_calls[-1],
+            (["encoder 1", "decoder 1"], "decoder 1"),
+        )
+        self.assertEqual(view.feature_size_calls[-1], (0,))
+
+    def test_initialize_refreshes_layer_options_for_initial_model(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        workflow.model_configs = [
+            {"name": "unet", "path": "src/config/model/unet.py"},
+        ]
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+
+        presenter.initialize()
+
+        self.assertEqual(workflow.set_config_calls, ["src/config/model/unet.py"])
+        self.assertEqual(
+            view.layer_options_calls[-1],
+            (["encoder 1", "decoder 1"], "decoder 1"),
+        )
+        self.assertEqual(view.feature_size_calls[-1], (0,))
+
     def test_open_file_passes_selected_method_to_workflow(self) -> None:
         view = _FakeView()
         workflow = _FakeWorkflow()

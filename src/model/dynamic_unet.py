@@ -16,7 +16,6 @@ from typing import List, Optional, Sequence, Tuple, Union
 import torch
 import torch.nn as nn
 from torch.nn.functional import interpolate
-from torch.utils.checkpoint import checkpoint
 
 from monai.networks.blocks.dynunet_block import (
     UnetBasicBlock,
@@ -48,7 +47,6 @@ class DynUNetSkipLayer(nn.Module):
         heads=None,
         super_head=None,
         use_ckpt: bool = False,
-        layers_ref: Optional[dict] = None,
     ):
         super().__init__()
         self.downsample = downsample
@@ -58,11 +56,8 @@ class DynUNetSkipLayer(nn.Module):
         self.heads = heads
         self.index = index
         self.use_ckpt = use_ckpt
-        self.layers_ref = layers_ref
 
     def _run(self, mod, *args):
-        if self.use_ckpt:
-            return checkpoint(mod, *args, use_reentrant=False)
         return mod(*args)
 
     def forward(self, x):
@@ -70,17 +65,10 @@ class DynUNetSkipLayer(nn.Module):
         #     breakpoint()
 
         downout = self._run(self.downsample, x)
-        if x.requires_grad and self.layers_ref is not None:
-            downout.retain_grad()
-            self.layers_ref[f"enc{self.index}"] = downout
 
         nextout = self.next_layer(downout)
 
         upout = self._run(self.upsample, nextout, downout)
-
-        if x.requires_grad and self.layers_ref is not None:
-            upout.retain_grad()
-            self.layers_ref[f"dec{self.index}"] = upout
 
         if self.super_head is not None and self.heads is not None and self.index > 0:
             self.heads[self.index - 1] = self.super_head(upout)
@@ -214,7 +202,6 @@ class DynUNet(nn.Module):
         # initialize the typed list of supervision head outputs so that Torchscript can recognize what's going on
         self.heads: List[torch.Tensor] = [torch.rand(1)] * self.deep_supr_num
         self.use_ckpt = use_ckpt
-        self.layers: dict[str, torch.Tensor] = {}
 
         if self.deep_supervision:
             self.deep_supervision_heads = self.get_deep_supervision_heads()
@@ -249,7 +236,6 @@ class DynUNet(nn.Module):
                     upsample=upsamples[0],
                     next_layer=next_layer,
                     use_ckpt=self.use_ckpt,
-                    layers_ref=self.layers,
                 )
 
             super_head_flag = False
@@ -279,7 +265,6 @@ class DynUNet(nn.Module):
                     heads=self.heads,
                     super_head=superheads[0],
                     use_ckpt=self.use_ckpt,
-                    layers_ref=self.layers,
                 )
 
             return DynUNetSkipLayer(
@@ -288,7 +273,6 @@ class DynUNet(nn.Module):
                 upsample=upsamples[0],
                 next_layer=next_layer,
                 use_ckpt=self.use_ckpt,
-                layers_ref=self.layers,
             )
 
         if not self.deep_supervision:
@@ -306,6 +290,17 @@ class DynUNet(nn.Module):
                 self.bottleneck,
                 superheads=self.deep_supervision_heads,
             )
+        self.xai_layer_targets = self._build_xai_layer_targets()
+
+    def _build_xai_layer_targets(self) -> dict[str, str]:
+        targets: dict[str, str] = {}
+        path = "skip_layers"
+        for index in range(len(self.strides) - 1):
+            targets[f"encoder{index}"] = f"{path}.downsample"
+            targets[f"decoder{index}"] = f"{path}.upsample"
+            path = f"{path}.next_layer"
+        targets["output_block"] = "output_block"
+        return targets
 
     def check_kernel_stride(self):
         kernels, strides = self.kernel_size, self.strides

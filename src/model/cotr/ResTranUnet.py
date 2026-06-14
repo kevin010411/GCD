@@ -5,7 +5,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 from .CNNBackbone import Backbone
 from .neural_network import SegmentationNetwork
 from .DeTrans.DeformableTrans import DeformableTransformer
@@ -302,47 +301,26 @@ class U_ResTran3D(nn.Module):
             .view(x_convs[-2].shape)
         )
 
-        dec2_in = checkpoint(
-            self.transposeconv_stage2, x_stage2_in, use_reentrant=False
-        )
+        dec2_in = self.transposeconv_stage2(x_stage2_in)
         x = dec2_in + skip2
-        x_stage2 = checkpoint(self.stage2_de, x, use_reentrant=False)
+        x_stage2 = self.stage2_de(x)
         ds2 = self.ds2_cls_conv(x_stage2)
 
-        x = checkpoint(self.transposeconv_stage1, x_stage2, use_reentrant=False)
+        x = self.transposeconv_stage1(x_stage2)
         skip1 = x_convs[-3]
         x = x + skip1
-        x_stage1 = checkpoint(self.stage1_de, x, use_reentrant=False)
+        x_stage1 = self.stage1_de(x)
         ds1 = self.ds1_cls_conv(x_stage1)
 
-        x = checkpoint(self.transposeconv_stage0, x_stage1, use_reentrant=False)
+        x = self.transposeconv_stage0(x_stage1)
         skip0 = x_convs[-4]
         x = x + skip0
-        x_stage0 = checkpoint(self.stage0_de, x, use_reentrant=False)
+        x_stage0 = self.stage0_de(x)
         ds0 = self.ds0_cls_conv(x_stage0)
 
         # ---- 輸出 ----
-        result_up = checkpoint(self.upsamplex2, x_stage0, use_reentrant=False)
+        result_up = self.upsamplex2(x_stage0)
         result = self.cls_conv(result_up)
-
-        if inputs.requires_grad:
-            # 這些層的張量形狀都應該是 [N, C, D, H, W]（或你實作的 3D 順序）
-            self.layers = {
-                # encoder 端可觀察的 skip
-                "enc0": skip0,  # 對應最淺層
-                "enc1": skip1,
-                "enc2": skip2,  # 由 x_trans 還原得到
-                # decoder 端的主幹特徵
-                "dec2": x_stage2,  # stage2_de 之後
-                "dec1": x_stage1,  # stage1_de 之後
-                "dec0": x_stage0,  # stage0_de 之後（最後一層 decoder 特徵）
-                # （可選）輸出頭前的特徵
-                "pre_cls": result_up,
-            }
-            for v in self.layers.values():
-                # 不是所有張量都會有此方法（保險起見先判斷）
-                if hasattr(v, "retain_grad"):
-                    v.retain_grad()
 
         return [result, ds0, ds1, ds2]
 
@@ -367,6 +345,14 @@ class Cotr(SegmentationNetwork):
         self.U_ResTran3D = U_ResTran3D(
             norm_cfg, activation_cfg, img_size, num_classes, weight_std
         )  # U_ResTran3D
+        self.xai_layer_targets = {
+            "encoder1": "U_ResTran3D.backbone.layer1",
+            "encoder2": "U_ResTran3D.backbone.layer2",
+            "encoder3": "U_ResTran3D.backbone.layer3",
+            "decoder2": "U_ResTran3D.stage2_de",
+            "decoder1": "U_ResTran3D.stage1_de",
+            "decoder0": "U_ResTran3D.stage0_de",
+        }
 
         if weight_std == False:
             self.conv_op = nn.Conv3d
@@ -387,9 +373,6 @@ class Cotr(SegmentationNetwork):
 
     def forward(self, x):
         seg_output = self.U_ResTran3D(x)
-        self.layers = (
-            self.U_ResTran3D.layers if hasattr(self.U_ResTran3D, "layers") else {}
-        )
         if self._deep_supervision and self.do_ds and self.train:
             return seg_output
         else:

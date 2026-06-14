@@ -8,4 +8,4 @@ model = dict(
     use_cbam=False,
 )  # 模型
 ckpt = "checkpoint/60_20_20_fold1/unetirc_nocbam_11x5.pth"  # 權重檔
-default_layer = "dec4"  # 預設 CAM 層
+default_layer = "decoder4"  # 預設 CAM 層

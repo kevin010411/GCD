@@ -506,14 +506,11 @@ class MainWindowView(QMainWindow):
 
     def set_gradcam_layer_controls_enabled(self, enabled: bool) -> None:
         if "gradcam_plugin_panel" not in self.__dict__:
-            can_adjust = (
-                bool(enabled)
-                and self.layer_combo.count() > 0
-                and self._gradcam_feature_size > 0
-            )
-            self.layer_feature_group.setEnabled(can_adjust)
-            self.layer_combo.setEnabled(can_adjust)
-            self.feature_widget.setEnabled(can_adjust)
+            can_select_layer = bool(enabled) and self.layer_combo.count() > 0
+            can_adjust_feature = can_select_layer and self._gradcam_feature_size > 0
+            self.layer_feature_group.setEnabled(can_select_layer)
+            self.layer_combo.setEnabled(can_select_layer)
+            self.feature_widget.setEnabled(can_adjust_feature)
             return
         self.gradcam_plugin_panel._sync_capability_controls()
 

@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torchvision.ops.stochastic_depth import StochasticDepth
-from torch.utils.checkpoint import checkpoint
 
 from timm.models.layers import trunc_normal_
 
@@ -244,47 +243,29 @@ class UNetIRC(nn.Module):
                 in_channels=feature_sizes[1],
                 out_channels=out_channels,
             )
+        self.xai_layer_targets = {
+            "encoder0": "encoder0",
+            "encoder1": "backbone.stages.0",
+            "encoder2": "backbone.stages.1",
+            "encoder3": "backbone.stages.2",
+            "encoder4": "backbone.stages.3",
+            "decoder1": "decoder1",
+            "decoder2": "decoder2",
+            "decoder3": "decoder3",
+            "decoder4": "decoder4",
+            "decoder5": "decoder5",
+            "out_block": "out_block",
+        }
 
     def forward(self, x):
-        def block_forward(x):
-            x0, x1, x2 = x
-            return x0(x1, x2)
-
-        enc0 = checkpoint(self.encoder0, x, use_reentrant=False)
-        enc1, enc2, enc3, enc4 = checkpoint(self.backbone, x, use_reentrant=False)
+        enc0 = self.encoder0(x)
+        enc1, enc2, enc3, enc4 = self.backbone(x)
         bn = self.bottleneck(enc4)
-        dec5 = checkpoint(block_forward, (self.decoder5, bn, enc4), use_reentrant=False)
-        dec4 = checkpoint(
-            block_forward, (self.decoder4, dec5, enc3), use_reentrant=False
-        )
-        dec3 = checkpoint(
-            block_forward, (self.decoder3, dec4, enc2), use_reentrant=False
-        )
-        dec2 = checkpoint(
-            block_forward, (self.decoder2, dec3, enc1), use_reentrant=False
-        )
-        dec1 = checkpoint(
-            block_forward, (self.decoder1, dec2, enc0), use_reentrant=False
-        )
-
-        if x.requires_grad:
-            # layers to save
-            self.layers = {
-                "dec1": dec1,
-                "dec2": dec2,
-                "dec3": dec3,
-                "dec4": dec4,
-                "dec5": dec5,
-                "enc4": enc4,
-                "enc3": enc3,
-                "enc2": enc2,
-                "enc1": enc1,
-                "enc0": enc0,
-            }
-
-            # graradients will be retained only when explicitely requested
-            for v in self.layers.values():
-                v.retain_grad()
+        dec5 = self.decoder5(bn, enc4)
+        dec4 = self.decoder4(dec5, enc3)
+        dec3 = self.decoder3(dec4, enc2)
+        dec2 = self.decoder2(dec3, enc1)
+        dec1 = self.decoder1(dec2, enc0)
 
         out = self.out_block(dec1)
 

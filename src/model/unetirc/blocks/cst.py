@@ -42,8 +42,7 @@ class ConvSwinTransformerBlock_A0(nn.Module):
             drop=0.0,
             attn_drop=0.0,
             drop_path=0.0,
-            norm_layer=nn.LayerNorm,
-            use_checkpoint=True) 
+            norm_layer=nn.LayerNorm) 
         for i in range(2)])
         
         self.convnext_block = DiConvNeXt(dim, stochastic_depth_prob, kernel_size, dilation)

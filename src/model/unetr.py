@@ -14,7 +14,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
 from monai.networks.blocks.dynunet_block import UnetOutBlock
 from monai.networks.blocks.unetr_block import (
     UnetrBasicBlock,
@@ -30,7 +29,17 @@ from monai.networks.nets import UNETR as MONAI_UNETR
 
 @MODEL.register_module()
 class UNETR(MONAI_UNETR):
-    layers = {}
+    xai_layer_targets = {
+        "encoder1": "encoder1",
+        "encoder2": "encoder2",
+        "encoder3": "encoder3",
+        "encoder4": "encoder4",
+        "decoder5": "decoder5",
+        "decoder4": "decoder4",
+        "decoder3": "decoder3",
+        "decoder2": "decoder2",
+        "out": "out",
+    }
 
     def forward(self, x_in):
         def decode_forward(args):
@@ -38,47 +47,18 @@ class UNETR(MONAI_UNETR):
             return mod(a, b)
 
         x, hidden_states_out = self.vit(x_in)
-        enc1 = checkpoint(self.encoder1, x_in, use_reentrant=False)
+        enc1 = self.encoder1(x_in)
         x2 = hidden_states_out[3]
-        enc2 = checkpoint(self.encoder2, self.proj_feat(x2), use_reentrant=False)
+        enc2 = self.encoder2(self.proj_feat(x2))
         x3 = hidden_states_out[6]
-        enc3 = checkpoint(self.encoder3, self.proj_feat(x3), use_reentrant=False)
+        enc3 = self.encoder3(self.proj_feat(x3))
         x4 = hidden_states_out[9]
-        enc4 = checkpoint(self.encoder4, self.proj_feat(x4), use_reentrant=False)
-        dec4 = checkpoint(self.proj_feat, x, use_reentrant=False)
-        dec3 = checkpoint(
-            decode_forward, (self.decoder5, dec4, enc4), use_reentrant=False
-        )
-        dec2 = checkpoint(
-            decode_forward, (self.decoder4, dec3, enc3), use_reentrant=False
-        )
-        dec1 = checkpoint(
-            decode_forward, (self.decoder3, dec2, enc2), use_reentrant=False
-        )
-        out = checkpoint(
-            decode_forward, (self.decoder2, dec1, enc1), use_reentrant=False
-        )
-
-        if x.requires_grad:
-            # 這些層的張量形狀都應該是 [N, C, D, H, W]（或你實作的 3D 順序）
-            self.layers = {
-                # encoder 端可觀察的 skip
-                "enc1": enc1,
-                "enc2": enc2,
-                "enc3": enc3,
-                "enc4": enc4,
-                # decoder 端的主幹特徵
-                "dec4": dec4,  # stage2_de 之後
-                "dec3": dec3,  # stage2_de 之後
-                "dec2": dec2,  # stage2_de 之後
-                "dec1": dec1,  # stage1_de 之後
-                "out": out,  # stage0_de 之後（最後一層 decoder 特徵）
-                # （可選）輸出頭前的特徵
-            }
-            for v in self.layers.values():
-                # 不是所有張量都會有此方法（保險起見先判斷）
-                if hasattr(v, "retain_grad"):
-                    v.retain_grad()
+        enc4 = self.encoder4(self.proj_feat(x4))
+        dec4 = self.proj_feat(x)
+        dec3 = decode_forward((self.decoder5, dec4, enc4))
+        dec2 = decode_forward((self.decoder4, dec3, enc3))
+        dec1 = decode_forward((self.decoder3, dec2, enc2))
+        out = decode_forward((self.decoder2, dec1, enc1))
 
         return self.out(out)
 
@@ -273,26 +253,18 @@ class UNETR(MONAI_UNETR):
 #             return mod(a, b)
 
 #         x, hidden_states_out = self.vit(x_in)
-#         enc1 = checkpoint(self.encoder1, x_in, use_reentrant=False)
+#         enc1 = self.encoder1(x_in)
 #         x2 = hidden_states_out[3]
-#         enc2 = checkpoint(self.encoder2, self.proj_feat(x2), use_reentrant=False)
+#         enc2 = self.encoder2(self.proj_feat(x2))
 #         x3 = hidden_states_out[6]
-#         enc3 = checkpoint(self.encoder3, self.proj_feat(x3), use_reentrant=False)
+#         enc3 = self.encoder3(self.proj_feat(x3))
 #         x4 = hidden_states_out[9]
-#         enc4 = checkpoint(self.encoder4, self.proj_feat(x4), use_reentrant=False)
-#         dec4 = checkpoint(self.proj_feat, x, use_reentrant=False)
-#         dec3 = checkpoint(
-#             decode_forward, (self.decoder5, dec4, enc4), use_reentrant=False
-#         )
-#         dec2 = checkpoint(
-#             decode_forward, (self.decoder4, dec3, enc3), use_reentrant=False
-#         )
-#         dec1 = checkpoint(
-#             decode_forward, (self.decoder3, dec2, enc2), use_reentrant=False
-#         )
-#         out = checkpoint(
-#             decode_forward, (self.decoder2, dec1, enc1), use_reentrant=False
-#         )
+#         enc4 = self.encoder4(self.proj_feat(x4))
+#         dec4 = self.proj_feat(x)
+#         dec3 = decode_forward((self.decoder5, dec4, enc4))
+#         dec2 = decode_forward((self.decoder4, dec3, enc3))
+#         dec1 = decode_forward((self.decoder3, dec2, enc2))
+#         out = decode_forward((self.decoder2, dec1, enc1))
 
 #         if x.requires_grad:
 #             # 這些層的張量形狀都應該是 [N, C, D, H, W]（或你實作的 3D 順序）
