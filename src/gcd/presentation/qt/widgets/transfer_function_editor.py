@@ -86,7 +86,7 @@ class TransferFunctionCanvas(QWidget):
         self.setMinimumSize(220, 200)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.transfer_function = TransferFunction.overlay_preset()
+        self.transfer_function = TransferFunction.heatmap_preset()
         self.data_range = DataRange(0.0, 1.0)
         self.selected_index: int | None = None
         self._dragging_point = False

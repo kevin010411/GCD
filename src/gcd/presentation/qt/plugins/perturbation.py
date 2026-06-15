@@ -9,6 +9,9 @@ class PerturbationPluginPanel(XaiFamilyPluginPanel):
             "perturbation",
             "Perturbation-based XAI",
             "Run perturbation explainability on loaded data and publish a shared result volume.",
-            "Answer",
-            parent,
+            class_label="Answer",
+            objective_label="Score",
+            show_answer_data=True,
+            show_progress=True,
+            parent=parent,
         )

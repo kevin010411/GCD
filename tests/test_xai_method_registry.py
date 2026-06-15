@@ -16,7 +16,10 @@ class XaiMethodRegistryTests(unittest.TestCase):
             gradient_ids,
             ["gradcam", "xrescam", "gradcam_test", "saliency_map"],
         )
-        self.assertEqual(perturbation_ids, ["perturb_occlusion"])
+        self.assertEqual(
+            perturbation_ids,
+            ["perturb_occlusion", "perturb_lime", "perturb_rise"],
+        )
 
     def test_registered_methods_follow_xai_method_interface(self) -> None:
         registry = XaiMethodRegistry.default()
@@ -34,10 +37,33 @@ class XaiMethodRegistryTests(unittest.TestCase):
         self.assertTrue(by_id["gradcam"]["uses_layer_controls"])
         self.assertTrue(by_id["saliency_map"]["uses_objective"])
         self.assertFalse(by_id["saliency_map"]["uses_layer_controls"])
-        self.assertFalse(by_id["perturb_occlusion"]["uses_objective"])
+        self.assertFalse(by_id["perturb_occlusion"]["uses_layer_controls"])
+        self.assertTrue(by_id["perturb_occlusion"]["uses_objective"])
         self.assertEqual(
             [item["id"] for item in by_id["perturb_occlusion"]["parameters"]],
-            ["block_size", "stride"],
+            ["block_size", "stride", "baseline", "batch_size"],
+        )
+        self.assertEqual(
+            [item["id"] for item in by_id["perturb_lime"]["parameters"]],
+            [
+                "segments_per_axis",
+                "num_samples",
+                "kernel_width",
+                "baseline",
+                "batch_size",
+                "random_seed",
+            ],
+        )
+        self.assertEqual(
+            [item["id"] for item in by_id["perturb_rise"]["parameters"]],
+            [
+                "num_masks",
+                "mask_grid_size",
+                "keep_probability",
+                "baseline",
+                "batch_size",
+                "random_seed",
+            ],
         )
 
 

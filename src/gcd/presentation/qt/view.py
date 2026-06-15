@@ -458,6 +458,11 @@ class MainWindowView(QMainWindow):
         for panel in self.xai_family_panels.values():
             panel.set_objective_options(options, selected)
 
+    def set_xai_objective_options(
+        self, family_id: str, options: list[dict[str, object]], selected: str | None
+    ) -> None:
+        self.xai_family_panels[family_id].set_objective_options(options, selected)
+
     def set_gradcam_dataset_options(
         self, options: list[dict[str, str]], selected: str | None
     ) -> None:
@@ -472,6 +477,19 @@ class MainWindowView(QMainWindow):
         self, family_id: str, options: list[dict[str, str]], selected: str | None
     ) -> None:
         self.xai_family_panels[family_id].set_dataset_options(options, selected)
+
+    def set_perturbation_answer_data_options(
+        self, options: list[dict[str, str]], selected: str | None
+    ) -> None:
+        self.xai_family_panels["perturbation"].set_answer_data_options(
+            options, selected
+        )
+
+    def set_perturbation_progress_running(self, running: bool) -> None:
+        self.xai_family_panels["perturbation"].set_progress_running(running)
+
+    def set_perturbation_progress(self, current: int, total: int) -> None:
+        self.xai_family_panels["perturbation"].set_progress_value(current, total)
 
     def set_perturbation_method_options(
         self, options: list[dict[str, str]], selected: str | None
@@ -565,6 +583,9 @@ class MainWindowView(QMainWindow):
 
     def selected_xai_dataset(self, family_id: str) -> str:
         return self.xai_family_panels[family_id].selected_dataset()
+
+    def selected_perturbation_answer_data(self) -> str:
+        return self.xai_family_panels["perturbation"].selected_answer_data()
 
     def selected_xai_method(self, family_id: str) -> str:
         return self.xai_family_panels[family_id].selected_method()

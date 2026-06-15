@@ -141,13 +141,20 @@ class WorkspaceDataStore:
             for dataset_id in self.dataset_order
         ]
 
+    def volume_options(self) -> list[dict[str, str]]:
+        return [
+            {"id": volume_id, "name": str(self.volume_display_name(volume_id))}
+            for volume_id in self.volume_order
+            if volume_id in self.volumes
+        ]
+
     def current_transfer_target(self) -> str:
         return self.selection.selected_volume_id
 
     def current_transfer_state(self) -> tuple[TransferFunction, DataRange]:
         current = self.volumes.get(self.current_transfer_target())
         if current is None:
-            return TransferFunction.base_preset(), DataRange(0.0, 1.0)
+            return TransferFunction.heatmap_preset(), DataRange(0.0, 1.0)
         return current.transfer_function, current.data_range
 
     def update_current_transfer_state(

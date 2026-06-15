@@ -47,8 +47,8 @@ class TransferFunctionDomainTests(unittest.TestCase):
         self.assertEqual(minmax_range.min_value, 1.0)
         self.assertEqual(minmax_range.max_value, 3.0)
 
-    def test_base_preset_starts_transparent_and_stays_sorted(self):
-        transfer_function = TransferFunction.base_preset()
+    def test_heatmap_preset_starts_transparent_and_stays_sorted(self):
+        transfer_function = TransferFunction.heatmap_preset()
         self.assertEqual(transfer_function.control_points[0].opacity, 0.0)
         self.assertEqual(
             sorted(point.position for point in transfer_function.control_points),
@@ -85,7 +85,7 @@ class TransferFunctionDomainTests(unittest.TestCase):
 
     def test_rgba_samples_requires_at_least_two_samples(self):
         with self.assertRaises(ValueError):
-            TransferFunction.base_preset().rgba_samples(1)
+            TransferFunction.heatmap_preset().rgba_samples(1)
 
     def test_rgb_samples_do_not_include_opacity(self):
         transfer_function = TransferFunction.from_iterable(

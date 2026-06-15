@@ -6,7 +6,11 @@ from typing import TYPE_CHECKING
 from .base import XaiMethod
 from .gradcam import GradCamMethod
 from .gradcam_test import GradCAMTestMethod
-from .perturb_occlusion import PerturbationOcclusionMethod
+from .perturb_occlusion import (
+    PerturbationLimeMethod,
+    PerturbationOcclusionMethod,
+    PerturbationRiseMethod,
+)
 from .saliency_map import SaliencyMapMethod
 from .xrescam import XResCamMethod
 
@@ -30,6 +34,8 @@ class XaiMethodRegistry:
                 GradCAMTestMethod(),
                 SaliencyMapMethod(objective),
                 PerturbationOcclusionMethod(),
+                PerturbationLimeMethod(),
+                PerturbationRiseMethod(),
             )
         )
 

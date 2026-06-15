@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -31,6 +32,9 @@ class XaiFamilyPluginPanel(PluginPanel):
         title: str,
         description: str,
         class_label: str = "Class",
+        objective_label: str = "Objective",
+        show_answer_data: bool = False,
+        show_progress: bool = False,
         parent=None,
     ) -> None:
         super().__init__(title, description, parent)
@@ -38,6 +42,7 @@ class XaiFamilyPluginPanel(PluginPanel):
         self._method_options_by_id: dict[str, dict[str, object]] = {}
         self._parameter_widgets: dict[str, QWidget] = {}
         self._feature_size = 0
+        self._show_progress = bool(show_progress)
 
         dataset_layout = QHBoxLayout()
         dataset_layout.addWidget(QLabel("Data"))
@@ -53,6 +58,16 @@ class XaiFamilyPluginPanel(PluginPanel):
         class_layout.addWidget(self.class_spinbox, 1)
         self.content_layout.addLayout(class_layout)
 
+        self.answer_data_row = QWidget()
+        answer_data_layout = QHBoxLayout()
+        answer_data_layout.addWidget(QLabel("Answer Data"))
+        self.answer_data_combo = QComboBox()
+        _apply_soft_combo_style(self.answer_data_combo)
+        answer_data_layout.addWidget(self.answer_data_combo, 1)
+        self.answer_data_row.setLayout(answer_data_layout)
+        self.answer_data_row.setVisible(bool(show_answer_data))
+        self.content_layout.addWidget(self.answer_data_row)
+
         method_layout = QHBoxLayout()
         method_layout.addWidget(QLabel("Method"))
         self.method_combo = QComboBox()
@@ -62,7 +77,7 @@ class XaiFamilyPluginPanel(PluginPanel):
         self.content_layout.addLayout(method_layout)
 
         objective_layout = QHBoxLayout()
-        objective_layout.addWidget(QLabel("Objective"))
+        objective_layout.addWidget(QLabel(objective_label))
         self.objective_combo = QComboBox()
         _apply_soft_combo_style(self.objective_combo)
         objective_layout.addWidget(self.objective_combo, 1)
@@ -89,6 +104,15 @@ class XaiFamilyPluginPanel(PluginPanel):
         self.params_layout = QVBoxLayout(self.params_group)
         self.params_group.setVisible(False)
         self.content_layout.addWidget(self.params_group)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("")
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setProperty("xaiProgress", True)
+        self.content_layout.addWidget(self.progress_bar)
 
         self.run_button = QPushButton("Run")
         self.content_layout.addWidget(self.run_button)
@@ -135,6 +159,20 @@ class XaiFamilyPluginPanel(PluginPanel):
                 self.dataset_combo.setCurrentIndex(index)
         self.dataset_combo.blockSignals(False)
 
+    def set_answer_data_options(
+        self, options: list[dict[str, str]], selected: str | None
+    ) -> None:
+        self.answer_data_combo.blockSignals(True)
+        self.answer_data_combo.clear()
+        self.answer_data_combo.addItem("Prediction mask", "")
+        for option in options:
+            self.answer_data_combo.addItem(option["name"], option["id"])
+        if selected:
+            index = self.answer_data_combo.findData(selected)
+            if index >= 0:
+                self.answer_data_combo.setCurrentIndex(index)
+        self.answer_data_combo.blockSignals(False)
+
     def set_layer_options(
         self, layer_names: list[str], selected: str, feature_size: int
     ) -> None:
@@ -150,11 +188,19 @@ class XaiFamilyPluginPanel(PluginPanel):
     def selected_dataset(self) -> str:
         return str(self.dataset_combo.currentData() or "")
 
+    def selected_answer_data(self) -> str:
+        return str(self.answer_data_combo.currentData() or "")
+
     def selected_method(self) -> str:
         return str(self.method_combo.currentData() or "")
 
     def selected_objective(self) -> str:
-        return str(self.objective_combo.currentData() or "predicted_target_mask")
+        fallback = (
+            "predicted_mask_dice"
+            if self.family_id == "perturbation"
+            else "predicted_target_mask"
+        )
+        return str(self.objective_combo.currentData() or fallback)
 
     def selected_layer(self) -> str:
         return self.layer_combo.currentText()
@@ -170,6 +216,27 @@ class XaiFamilyPluginPanel(PluginPanel):
 
     def selected_method_uses_objective(self) -> bool:
         return bool(self.current_method_option().get("uses_objective", True))
+
+    def set_progress_running(self, running: bool) -> None:
+        self.progress_bar.setVisible(self._show_progress and bool(running))
+        if running:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("0/100")
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("")
+
+    def set_progress_value(self, current: int, total: int) -> None:
+        if not self._show_progress:
+            return
+        total = max(1, int(total))
+        current = max(0, min(int(current), total))
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(current)
+        self.progress_bar.setFormat(f"{current}/{total}")
 
     def selected_method_params(self) -> dict[str, object]:
         values = {}

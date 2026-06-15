@@ -102,7 +102,9 @@ class GradCamEngine:
         self.target_class = 1
         self.active_objective_id = "predicted_target_mask"
         self.xai_cache_key = ""
-        self.objectives = self._default_objectives()
+        self.gradient_objectives = self._default_gradient_objectives()
+        self.perturbation_objectives = self._default_perturbation_objectives()
+        self.objectives = self.gradient_objectives
         self.xai_method_registry = XaiMethodRegistry.default(
             self._predicted_target_mask_objective
         )
@@ -301,15 +303,14 @@ class GradCamEngine:
         )
         return (target_logits - torch.amax(other_logits, dim=0)).sum()
 
-    def available_objectives(self) -> list[dict[str, object]]:
-        if not hasattr(self, "objectives"):
-            self.objectives = self._default_objectives()
+    def available_objectives(self, family: str | None = None) -> list[dict[str, object]]:
+        objectives = self._objectives_for_family(family)
         return [
             {"id": objective_id, "name": label}
-            for objective_id, (label, _objective) in self.objectives.items()
+            for objective_id, (label, _objective) in objectives.items()
         ]
 
-    def _default_objectives(
+    def _default_gradient_objectives(
         self,
     ) -> dict[str, tuple[str, Callable[[torch.Tensor, int], torch.Tensor]]]:
         return {
@@ -325,20 +326,81 @@ class GradCamEngine:
             "target_margin": ("Target Margin", self._target_margin_objective),
         }
 
+    def _default_perturbation_objectives(
+        self,
+    ) -> dict[str, tuple[str, Callable[..., torch.Tensor]]]:
+        return {
+            "predicted_mask_dice": (
+                "Predicted Mask Dice",
+                self._predicted_mask_dice_score,
+            ),
+            "predicted_mask_iou": (
+                "Predicted Mask IoU",
+                self._predicted_mask_iou_score,
+            ),
+            "target_probability_sum": (
+                "Target Probability Sum",
+                self._target_probability_sum_objective,
+            ),
+            "target_logit_sum": ("Target Logit Sum", self._target_logit_sum_objective),
+        }
+
+    @staticmethod
+    def _predicted_mask_dice_score(
+        logits: torch.Tensor, target_class: int, reference_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        import torch
+
+        if reference_mask is None:
+            reference_mask = torch.argmax(logits[0], dim=0) == target_class
+        pred_mask = torch.argmax(logits[0], dim=0) == target_class
+        reference_mask = reference_mask.to(device=pred_mask.device, dtype=torch.bool)
+        intersection = torch.logical_and(pred_mask, reference_mask).sum(dtype=torch.float32)
+        denom = pred_mask.sum(dtype=torch.float32) + reference_mask.sum(dtype=torch.float32)
+        if denom == 0:
+            return torch.ones((), device=logits.device, dtype=torch.float32)
+        return (2.0 * intersection) / denom
+
+    @staticmethod
+    def _predicted_mask_iou_score(
+        logits: torch.Tensor, target_class: int, reference_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        import torch
+
+        if reference_mask is None:
+            reference_mask = torch.argmax(logits[0], dim=0) == target_class
+        pred_mask = torch.argmax(logits[0], dim=0) == target_class
+        reference_mask = reference_mask.to(device=pred_mask.device, dtype=torch.bool)
+        intersection = torch.logical_and(pred_mask, reference_mask).sum(dtype=torch.float32)
+        union = torch.logical_or(pred_mask, reference_mask).sum(dtype=torch.float32)
+        if union == 0:
+            return torch.ones((), device=logits.device, dtype=torch.float32)
+        return intersection / union
+
+    def _objectives_for_family(
+        self, family: str | None
+    ) -> dict[str, tuple[str, Callable[..., torch.Tensor]]]:
+        if not hasattr(self, "gradient_objectives"):
+            self.gradient_objectives = self._default_gradient_objectives()
+        if not hasattr(self, "perturbation_objectives"):
+            self.perturbation_objectives = self._default_perturbation_objectives()
+        if family == "perturbation":
+            return self.perturbation_objectives
+        return self.gradient_objectives
+
     def _resolve_objective(
-        self, objective_id: str | None
-    ) -> tuple[str, Callable[[torch.Tensor, int], torch.Tensor]]:
-        if not hasattr(self, "objectives"):
-            self.objectives = self._default_objectives()
+        self, objective_id: str | None, family: str | None = None
+    ) -> tuple[str, Callable[..., torch.Tensor]]:
+        objectives = self._objectives_for_family(family)
         active_objective_id = getattr(
             self, "active_objective_id", "predicted_target_mask"
         )
         requested = (objective_id or active_objective_id).strip().lower()
-        if requested in self.objectives:
-            return requested, self.objectives[requested][1]
-        fallback = "predicted_target_mask"
+        if requested in objectives:
+            return requested, objectives[requested][1]
+        fallback = "predicted_mask_dice" if family == "perturbation" else "predicted_target_mask"
         self._log(f"未知 objective '{objective_id}'，改用預設 objective: {fallback}")
-        return fallback, self.objectives[fallback][1]
+        return fallback, objectives[fallback][1]
 
     def load_volume(self, input_file: str | None = None) -> list[str]:
         import monai.transforms as mt
@@ -416,14 +478,19 @@ class GradCamEngine:
         return messages
 
     def prepare_xai_inputs(
-        self, method: str | None = None, objective_id: str | None = None
+        self,
+        method: str | None = None,
+        objective_id: str | None = None,
+        method_params: dict[str, object] | None = None,
     ) -> None:
         import torch
 
         if not self.file_name or self.img1 is None:
             raise ValueError("尚未載入檔案，無法準備 XAI 輸入。")
         cam_method = self._resolve_cam_method(method)
-        selected_objective_id, objective = self._resolve_objective(objective_id)
+        selected_objective_id, objective = self._resolve_objective(
+            objective_id, cam_method.family
+        )
         self.active_method_id = cam_method.id
         self.active_objective_id = selected_objective_id
         self.patch = []
@@ -474,6 +541,10 @@ class GradCamEngine:
             XaiLayerHookManager(model) if cam_method.uses_layer_controls else None
         )
 
+        perturb_reference_volume = self._perturb_reference_volume(
+            method_params or {}, device
+        )
+
         with _timer("模型推論", track_gpu=True):
             x0, y0, z0 = list(
                 (
@@ -492,6 +563,13 @@ class GradCamEngine:
                 (self.STRIDE, 0),
                 (self.STRIDE, self.STRIDE),
             ]
+            tile_progress_units = self._perturb_progress_units(
+                cam_method.id, method_params or {}
+            )
+            progress_total = tile_progress_units * len(tiles)
+            progress_callback = (method_params or {}).get("_progress_callback")
+            if cam_method.family == "perturbation" and callable(progress_callback):
+                progress_callback({"current": 0, "total": progress_total})
             hook_context = hook_manager if hook_manager is not None else _NullContext()
             with hook_context:
                 for x, y in tiles:
@@ -513,6 +591,20 @@ class GradCamEngine:
                         if hook_manager is not None
                         else {}
                     )
+                    tile_method_params = dict(method_params or {})
+                    tile_method_params["_score_logger"] = self._log
+                    tile_method_params["_score_print"] = True
+                    tile_method_params["_tile_index"] = len(self.patch)
+                    tile_method_params["_progress_total"] = progress_total
+                    tile_method_params["_progress_offset"] = (
+                        len(self.patch) * tile_progress_units
+                    )
+                    if perturb_reference_volume is not None:
+                        tile_method_params["reference_mask"] = perturb_reference_volume[
+                            x0 + x : x0 + x + self.SIZE,
+                            y0 + y : y0 + y + self.SIZE,
+                            z0 : z0 + self.SIZE,
+                        ]
 
                     self.patch.append(
                         cam_method.collect_patch_data(
@@ -522,6 +614,9 @@ class GradCamEngine:
                                 layers_by_name=layers_by_name,
                                 target_class=self.target_class,
                                 objective=objective,
+                                model=model,
+                                method_params=tile_method_params,
+                                device=device,
                             )
                         )
                     )
@@ -540,6 +635,69 @@ class GradCamEngine:
         self.xai_cache_key = (
             f"{cfg_name}|{self.target_class}|{cam_method.id}|{selected_objective_id}"
         )
+
+    def _perturb_reference_volume(
+        self, method_params: dict[str, object], device
+    ) -> torch.Tensor | None:
+        import torch
+
+        answer_data = method_params.get("answer_data")
+        if answer_data is None or self.img1 is None:
+            return None
+        data = torch.as_tensor(answer_data, device=device).to(torch.float32)
+        data = data.squeeze()
+        if data.ndim != 3:
+            return None
+        target_shape = tuple(int(v) for v in self.img1[0].shape)
+        display_shape = self._display_space_shape()
+        if display_shape is not None and tuple(data.shape) == display_shape:
+            data = self._inv_permute(data)
+        if tuple(data.shape) != target_shape:
+            data = self._resize(data, target_shape)
+
+        target_class = int(self.target_class)
+        finite = data[torch.isfinite(data)]
+        if finite.numel() == 0:
+            return torch.zeros(target_shape, dtype=torch.bool, device=device)
+        rounded = torch.round(data)
+        if torch.max(finite) > 1.5:
+            return rounded == target_class
+        return data > 0.5
+
+    def _perturb_progress_units(
+        self, method: str, method_params: dict[str, object]
+    ) -> int:
+        if method == "perturb_occlusion":
+            block_size = int(method_params.get("block_size", 16) or 16)
+            stride = int(method_params.get("stride", 8) or 8)
+            starts = self._perturb_axis_count(self.SIZE, block_size, stride)
+            return starts**3
+        if method == "perturb_lime":
+            return max(1, int(method_params.get("num_samples", 128) or 128))
+        if method == "perturb_rise":
+            return max(1, int(method_params.get("num_masks", 64) or 64))
+        return 1
+
+    @staticmethod
+    def _perturb_axis_count(size: int, block_size: int, stride: int) -> int:
+        size = max(1, int(size))
+        block_size = max(1, min(int(block_size), size))
+        stride = max(1, int(stride))
+        if block_size >= size:
+            return 1
+        count = ((size - block_size) // stride) + 1
+        last = size - block_size
+        if (count - 1) * stride != last:
+            count += 1
+        return count
+
+    def _display_space_shape(self) -> tuple[int, int, int] | None:
+        volume_data = getattr(self, "volume_data", None)
+        if volume_data is not None:
+            return tuple(int(v) for v in volume_data.shape)
+        if getattr(self, "img1", None) is None:
+            return None
+        return tuple(int(v) for v in self.img1[0].permute(*self.PERMUTE).shape)
 
     def load_and_process_input(
         self, input_file: str | None = None, method: str | None = None
@@ -665,11 +823,22 @@ class GradCamEngine:
                 cam[xs, ys, zs] += q[0, 0]
                 model_out[:, :, xs, ys, zs] += p1
 
-            cam = torch.maximum(cam, torch.tensor(0))
+            perturb_signal_max = None
+            if cam_method.family == "perturbation":
+                cam = torch.abs(cam)
+                perturb_signal_max = torch.max(cam)
+            else:
+                cam = torch.maximum(cam, torch.tensor(0))
             cam -= torch.min(cam)
             maximum = torch.max(cam)
             if maximum > 0:
                 cam /= maximum
+            elif (
+                cam_method.family == "perturbation"
+                and perturb_signal_max is not None
+                and perturb_signal_max > 0
+            ):
+                cam = torch.ones_like(cam)
 
             self.cam = cam.permute(*self.PERMUTE)
             self.volume_data = self.img1[0].permute(*self.PERMUTE)

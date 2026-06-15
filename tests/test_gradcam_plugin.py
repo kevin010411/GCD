@@ -26,7 +26,7 @@ class GradCamPluginPanelTests(unittest.TestCase):
         self.assertIsNotNone(panel.layer_feature_group)
         self.assertIn("Data", labels)
         self.assertIn("Class", labels)
-        self.assertIn("Objective", labels)
+        self.assertIn("Aggregation", labels)
         self.assertFalse(panel.layer_feature_group.isEnabled())
         self.assertEqual(panel.method_combo.count(), 1)
         self.assertEqual(panel.method_combo.itemText(0), "Grad-CAM")
@@ -52,10 +52,13 @@ class GradCamPluginPanelTests(unittest.TestCase):
         self.assertFalse(panel.layer_feature_group.isEnabled())
 
         MainWindowView.set_layer_options(view, ["layer-a"], "layer-a")
-        self.assertFalse(panel.layer_feature_group.isEnabled())
+        self.assertTrue(panel.layer_feature_group.isEnabled())
+        self.assertTrue(panel.layer_combo.isEnabled())
+        self.assertFalse(panel.feature_widget.isEnabled())
 
         MainWindowView.set_feature_size(view, 8)
         self.assertTrue(panel.layer_feature_group.isEnabled())
+        self.assertTrue(panel.feature_widget.isEnabled())
 
         MainWindowView.set_method_options(
             view,

@@ -25,8 +25,8 @@ class XaiFamilyPluginPanelTests(unittest.TestCase):
                 {
                     "id": "perturb_occlusion",
                     "name": "Occlusion",
-                    "uses_layer_controls": True,
-                    "uses_objective": False,
+                    "uses_layer_controls": False,
+                    "uses_objective": True,
                     "parameters": [
                         {
                             "id": "block_size",
@@ -44,14 +44,25 @@ class XaiFamilyPluginPanelTests(unittest.TestCase):
                             "min": 1,
                             "max": 256,
                         },
+                        {
+                            "id": "baseline",
+                            "label": "Baseline",
+                            "kind": "float",
+                            "default": 0.0,
+                            "min": -10.0,
+                            "max": 10.0,
+                        },
                     ],
                 }
             ],
             "perturb_occlusion",
         )
 
-        self.assertFalse(panel.objective_row.isVisible())
-        self.assertEqual(set(panel.selected_method_params()), {"block_size", "stride"})
+        self.assertFalse(panel.objective_row.isHidden())
+        self.assertEqual(
+            set(panel.selected_method_params()), {"block_size", "stride", "baseline"}
+        )
+        self.assertTrue(panel.layer_feature_group.isHidden())
         self.assertIsInstance(panel._parameter_widgets["block_size"], QSpinBox)
         self.assertEqual(panel.selected_method_params()["block_size"], 16)
 

@@ -33,5 +33,6 @@ class BackgroundTaskRunner(Protocol):
         func: Callable[[], object],
         on_success: Callable[[object], None],
         on_error: Callable[[Exception], None],
+        on_progress: Callable[[object], None] | None = None,
     ) -> None:
         ...

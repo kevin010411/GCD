@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from inspect import signature
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,7 +32,10 @@ class MainWindowPresenter:
         self.data_store = WorkspaceDataStore()
         self.selected_grad_dataset_id = ""
         self.selected_perturbation_dataset_id = ""
+        self.selected_perturbation_answer_volume_id = ""
         self.selected_xai_dataset_by_family = {"gradient": "", "perturbation": ""}
+        self._xai_is_running = False
+        self._xai_running_family = ""
         self._last_scene_signature: tuple[tuple[str, tuple[int, ...]], ...] = ()
         self.data_store.subscribe(self._on_store_event)
 
@@ -191,9 +195,21 @@ class MainWindowPresenter:
             )
         else:
             self.view.set_method_options(self.workflow.list_cam_methods(), "gradcam")
-        self.view.set_objective_options(
-            self.workflow.list_objectives(), "predicted_target_mask"
-        )
+        if hasattr(self.view, "set_xai_objective_options"):
+            self.view.set_xai_objective_options(
+                "gradient",
+                self._list_objectives("gradient"),
+                "predicted_target_mask",
+            )
+            self.view.set_xai_objective_options(
+                "perturbation",
+                self._list_objectives("perturbation"),
+                "predicted_mask_dice",
+            )
+        else:
+            self.view.set_objective_options(
+                self._list_objectives("gradient"), "predicted_target_mask"
+            )
         if not hasattr(self.workflow, "list_xai_methods"):
             self.view.set_perturbation_method_options(
                 self.workflow.list_perturbation_methods(),
@@ -335,11 +351,42 @@ class MainWindowPresenter:
         method_params: dict[str, object] | None = None,
         on_success=None,
     ) -> None:
+        if self._xai_is_running:
+            self.view.set_overlay_status_message("XAI is already running.")
+            return
         dataset = self.datasets.get(dataset_id)
         if dataset is None:
             return
-        self.task_runner.submit(
-            lambda: self.workflow.compute_xai(
+        family_id = "perturbation" if method.startswith("perturb") else "gradient"
+        self._set_xai_running(True, family_id)
+
+        def _handle_success(result) -> None:
+            try:
+                (on_success or (lambda value: self._on_xai_result_loaded(dataset_id, value)))(
+                    result
+                )
+            finally:
+                self._set_xai_running(False)
+
+        def _handle_error(exc: Exception) -> None:
+            try:
+                self._on_background_error(exc)
+            finally:
+                self._set_xai_running(False)
+
+        def _handle_progress(progress: object) -> None:
+            if family_id != "perturbation" or not isinstance(progress, dict):
+                return
+            current = int(progress.get("current", 0) or 0)
+            total = int(progress.get("total", 0) or 0)
+            if hasattr(self.view, "set_perturbation_progress"):
+                self.view.set_perturbation_progress(current, total)
+
+        def _compute(progress_callback=None):
+            active_method_params = dict(method_params or {})
+            if family_id == "perturbation" and callable(progress_callback):
+                active_method_params["_progress_callback"] = progress_callback
+            return self.workflow.compute_xai(
                 dataset.input_state,
                 XaiComputeRequest(
                     target_class=target_class,
@@ -349,12 +396,37 @@ class MainWindowPresenter:
                     method=method,
                     objective_id=objective_id,
                     result_name=result_name,
-                    method_params=method_params,
+                    method_params=active_method_params,
                 ),
-            ),
-            on_success or (lambda result: self._on_xai_result_loaded(dataset_id, result)),
-            self._on_background_error,
-        )
+            )
+
+        try:
+            submit = self.task_runner.submit
+            if len(signature(submit).parameters) >= 4:
+                submit(_compute, _handle_success, _handle_error, _handle_progress)
+            else:
+                submit(_compute, _handle_success, _handle_error)
+        except Exception:
+            self._set_xai_running(False)
+            raise
+
+    def _set_xai_running(self, is_running: bool, family_id: str = "") -> None:
+        self._xai_is_running = bool(is_running)
+        self._xai_running_family = str(family_id) if is_running else ""
+        for name in ("gradcam_run_button", "perturbation_run_button"):
+            button = getattr(self.view, name, None)
+            if button is not None and hasattr(button, "setEnabled"):
+                button.setEnabled(not self._xai_is_running)
+        if hasattr(self.view, "set_perturbation_progress_running"):
+            self.view.set_perturbation_progress_running(
+                self._xai_is_running and self._xai_running_family == "perturbation"
+            )
+
+    def _list_objectives(self, family_id: str | None = None) -> list[dict[str, object]]:
+        try:
+            return self.workflow.list_objectives(family_id)
+        except TypeError:
+            return self.workflow.list_objectives()
 
     def on_layer_changed(self, _layer: str) -> None:
         return
@@ -538,6 +610,16 @@ class MainWindowPresenter:
         if uses_layer_controls and (int(dataset.feature_size or 0) <= 0 or n2 <= n1):
             n1, n2 = 0, 999
         method_params = self._selected_xai_method_params(family_id)
+        if family_id == "perturbation":
+            answer_volume_id = self._selected_perturbation_answer_data()
+            self.selected_perturbation_answer_volume_id = answer_volume_id
+            answer_volume = self.data_store.volumes.get(answer_volume_id)
+            if answer_volume is not None:
+                method_params["answer_data"] = self._perturbation_answer_data(
+                    answer_volume
+                )
+                method_params["answer_volume_id"] = answer_volume_id
+                method_params["answer_volume_name"] = answer_volume.display_name
         method_params.update(
             {
                 "model_name": model_name,
@@ -575,9 +657,14 @@ class MainWindowPresenter:
             self.view.set_xai_method_options(
                 family_id, list(result.method_options), result.selected_method
             )
-            self.view.set_objective_options(
-                list(result.objective_options), result.selected_objective
-            )
+            if hasattr(self.view, "set_xai_objective_options"):
+                self.view.set_xai_objective_options(
+                    family_id, list(result.objective_options), result.selected_objective
+                )
+            else:
+                self.view.set_objective_options(
+                    list(result.objective_options), result.selected_objective
+                )
             if hasattr(self.view, "set_xai_layer_options"):
                 self.view.set_xai_layer_options(
                     family_id,
@@ -611,6 +698,14 @@ class MainWindowPresenter:
         self.view.set_perturbation_dataset_options(
             options, self.selected_perturbation_dataset_id
         )
+        if hasattr(self.view, "set_perturbation_answer_data_options"):
+            volume_options = self.data_store.volume_options()
+            valid_volume_ids = {option["id"] for option in volume_options}
+            if self.selected_perturbation_answer_volume_id not in valid_volume_ids:
+                self.selected_perturbation_answer_volume_id = ""
+            self.view.set_perturbation_answer_data_options(
+                volume_options, self.selected_perturbation_answer_volume_id
+            )
 
     def _sync_gradcam_controls(self) -> None:
         self._sync_xai_controls("gradient")
@@ -693,7 +788,7 @@ class MainWindowPresenter:
             return self.view.selected_xai_objective(family_id)
         if family_id == "gradient":
             return self.view.selected_objective()
-        return "predicted_target_mask"
+        return "predicted_mask_dice"
 
     def _selected_xai_class(self, family_id: str) -> int:
         if hasattr(self.view, "selected_xai_class"):
@@ -727,6 +822,18 @@ class MainWindowPresenter:
                 "stride": self.view.perturbation_stride_spinbox.value(),
             }
         return {}
+
+    def _selected_perturbation_answer_data(self) -> str:
+        if hasattr(self.view, "selected_perturbation_answer_data"):
+            return self.view.selected_perturbation_answer_data()
+        return ""
+
+    def _perturbation_answer_data(self, answer_volume):
+        if getattr(answer_volume, "method_id", "") == "base":
+            dataset = self.data_store.datasets.get(answer_volume.dataset_id)
+            if dataset is not None and dataset.input_state.origin_img is not None:
+                return dataset.input_state.origin_img
+        return answer_volume.data
 
     def _selected_xai_method_uses_layer_controls(self, family_id: str) -> bool:
         if hasattr(self.view, "selected_xai_method_uses_layer_controls"):

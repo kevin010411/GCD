@@ -5,6 +5,7 @@ import torch
 
 from src.gcd.infrastructure.cam_methods import (
     GradCamMethod,
+    PerturbationOcclusionMethod,
     SaliencyMapMethod,
     XResCamMethod,
 )
@@ -134,6 +135,61 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         self.assertGreaterEqual(float(engine.cam.min()), 0.0)
         self.assertLessEqual(float(engine.cam.max()), 1.0)
 
+    def test_compute_cam_keeps_perturbation_negative_score_changes_visible(self) -> None:
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine._logger = lambda _message: None
+        engine.cam_methods = {"perturb_occlusion": PerturbationOcclusionMethod()}
+        engine.active_method_id = "perturb_occlusion"
+        engine.file_name = "sample.nii.gz"
+        engine.cfg = {"default_layer": "layer-a"}
+        engine.layers = {"input": 1}
+        engine.SIZE = 2
+        engine.STRIDE = 2
+        engine.PERMUTE = (0, 1, 2)
+        engine.img1 = torch.ones((1, 4, 4, 2), dtype=torch.float32)
+        engine.save_dir = None
+        pred = torch.tensor([[[[[0.1]]], [[[0.9]]]]], dtype=torch.float32)
+        importance = -torch.ones((1, 1, 2, 2, 2), dtype=torch.float32)
+        importance[:, :, 0, 0, 0] = -2.0
+        tile_payload = {
+            "method": "perturb_occlusion",
+            "pred": pred,
+            "importance_map": importance,
+        }
+        engine.patch = [tile_payload, tile_payload, tile_payload, tile_payload]
+
+        selected = engine.compute_cam(method="perturb_occlusion")
+
+        self.assertEqual(selected, "input")
+        self.assertGreater(float(engine.cam.max()), 0.0)
+        self.assertGreaterEqual(float(engine.cam.min()), 0.0)
+        self.assertLessEqual(float(engine.cam.max()), 1.0)
+
+    def test_compute_cam_shows_uniform_perturbation_signal(self) -> None:
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine._logger = lambda _message: None
+        engine.cam_methods = {"perturb_occlusion": PerturbationOcclusionMethod()}
+        engine.active_method_id = "perturb_occlusion"
+        engine.file_name = "sample.nii.gz"
+        engine.cfg = {"default_layer": "layer-a"}
+        engine.layers = {"input": 1}
+        engine.SIZE = 2
+        engine.STRIDE = 2
+        engine.PERMUTE = (0, 1, 2)
+        engine.img1 = torch.ones((1, 4, 4, 2), dtype=torch.float32)
+        engine.save_dir = None
+        pred = torch.tensor([[[[[0.1]]], [[[0.9]]]]], dtype=torch.float32)
+        tile_payload = {
+            "method": "perturb_occlusion",
+            "pred": pred,
+            "importance_map": -torch.ones((1, 1, 2, 2, 2), dtype=torch.float32),
+        }
+        engine.patch = [tile_payload, tile_payload, tile_payload, tile_payload]
+
+        engine.compute_cam(method="perturb_occlusion")
+
+        self.assertTrue(torch.allclose(engine.cam, torch.ones_like(engine.cam)))
+
     def test_available_cam_methods_includes_layer_control_metadata(self) -> None:
         engine = GradCamEngine.__new__(GradCamEngine)
         engine.cam_methods = {
@@ -150,16 +206,74 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         self.assertEqual(by_id["xrescam"]["name"], "XResCAM")
         self.assertFalse(by_id["saliency_map"]["uses_layer_controls"])
 
-    def test_available_objectives_exposes_loss_reduction_choices(self) -> None:
+    def test_available_objectives_exposes_gradient_aggregation_choices(self) -> None:
         engine = GradCamEngine.__new__(GradCamEngine)
 
-        objectives = engine.available_objectives()
+        objectives = engine.available_objectives("gradient")
 
         by_id = {objective["id"]: objective["name"] for objective in objectives}
         self.assertEqual(by_id["predicted_target_mask"], "Predicted Target Mask")
         self.assertEqual(by_id["target_logit_sum"], "Target Logit Sum")
         self.assertEqual(by_id["target_probability_sum"], "Target Probability Sum")
         self.assertEqual(by_id["target_margin"], "Target Margin")
+
+    def test_available_objectives_exposes_perturbation_score_choices(self) -> None:
+        engine = GradCamEngine.__new__(GradCamEngine)
+
+        objectives = engine.available_objectives("perturbation")
+
+        by_id = {objective["id"]: objective["name"] for objective in objectives}
+        self.assertEqual(by_id["predicted_mask_dice"], "Predicted Mask Dice")
+        self.assertEqual(by_id["predicted_mask_iou"], "Predicted Mask IoU")
+        self.assertEqual(by_id["target_probability_sum"], "Target Probability Sum")
+
+    def test_predicted_mask_scores_compare_prediction_to_reference_mask(self) -> None:
+        logits = torch.tensor(
+            [[[[[0.1, 3.0]]], [[[2.0, 1.0]]]]],
+            dtype=torch.float32,
+        )
+        reference_mask = torch.tensor([[[True, True]]])
+
+        dice = GradCamEngine._predicted_mask_dice_score(logits, 1, reference_mask)
+        iou = GradCamEngine._predicted_mask_iou_score(logits, 1, reference_mask)
+
+        self.assertAlmostEqual(float(dice), 2.0 / 3.0)
+        self.assertAlmostEqual(float(iou), 0.5)
+
+    def test_perturb_reference_volume_handles_missing_display_volume_data(self) -> None:
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine.img1 = torch.zeros((1, 2, 3, 4), dtype=torch.float32)
+        engine.volume_data = None
+        engine.PERMUTE = (2, 1, 0)
+        engine.target_class = 1
+        answer_data = torch.zeros((4, 3, 2), dtype=torch.float32)
+        answer_data[1, 1, 0] = 1.0
+
+        reference = engine._perturb_reference_volume(
+            {"answer_data": answer_data}, torch.device("cpu")
+        )
+
+        self.assertIsNotNone(reference)
+        self.assertEqual(tuple(reference.shape), (2, 3, 4))
+        self.assertTrue(bool(reference[0, 1, 1]))
+
+    def test_perturb_reference_volume_uses_multiclass_label_map_even_when_target_absent(self) -> None:
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine.img1 = torch.zeros((1, 2, 2, 2), dtype=torch.float32)
+        engine.volume_data = None
+        engine.PERMUTE = (0, 1, 2)
+        engine.target_class = 3
+        answer_data = torch.tensor(
+            [[[0.0, 1.0], [2.0, 0.0]], [[1.0, 2.0], [0.0, 0.0]]],
+            dtype=torch.float32,
+        )
+
+        reference = engine._perturb_reference_volume(
+            {"answer_data": answer_data}, torch.device("cpu")
+        )
+
+        self.assertIsNotNone(reference)
+        self.assertEqual(int(reference.sum()), 0)
 
     def test_target_logit_sum_objective_aggregates_all_target_voxels(self) -> None:
         logits = torch.tensor(

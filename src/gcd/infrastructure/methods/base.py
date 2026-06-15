@@ -16,6 +16,9 @@ class CamPatchContext:
     layers_by_name: Mapping[str, torch.Tensor]
     target_class: int
     objective: Callable[[torch.Tensor, int], torch.Tensor]
+    model: Any = None
+    method_params: Mapping[str, object] | None = None
+    device: Any = None
 
 
 @dataclass(frozen=True)

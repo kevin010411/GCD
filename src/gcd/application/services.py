@@ -155,8 +155,8 @@ class WorkflowService:
             return self.list_perturbation_methods()
         return self.list_cam_methods()
 
-    def list_objectives(self) -> list[dict[str, object]]:
-        return self.engine.available_objectives()
+    def list_objectives(self, family: str | None = None) -> list[dict[str, object]]:
+        return self.engine.available_objectives(family)
 
     def list_perturbation_methods(self) -> list[dict[str, object]]:
         return self.engine.available_cam_methods("perturbation")
@@ -173,14 +173,14 @@ class WorkflowService:
             "selected_layer": "",
             "method_options": self.list_cam_methods(),
             "selected_method": method or self.engine.active_method_id,
-            "objective_options": self.list_objectives(),
+            "objective_options": self.list_objectives("gradient"),
             "selected_objective": self.engine.active_objective_id,
             "feature_size": 0,
             "volume_data": self.engine.volume_data,
             "spacing": self.engine.img1_spacing,
             "display_metadata": dict(self.engine.display_metadata),
             "volume_data_range": DataRange.from_data([self.engine.volume_data], method="minmax"),
-            "volume_transfer_function": TransferFunction.base_preset(),
+            "volume_transfer_function": TransferFunction.heatmap_preset(),
             "messages": messages,
         }
 
@@ -197,6 +197,11 @@ class WorkflowService:
         objective_id: str = "predicted_target_mask",
         method_params: dict[str, object] | None = None,
     ) -> dict[str, Any]:
+        effective_objective_id = (
+            "predicted_mask_dice"
+            if method.startswith("perturb") and objective_id == "predicted_target_mask"
+            else objective_id
+        )
         result = self.compute_xai(
             dataset_input,
             XaiComputeRequest(
@@ -205,7 +210,7 @@ class WorkflowService:
                 n1=n1,
                 n2=n2,
                 method=method,
-                objective_id=objective_id,
+                objective_id=effective_objective_id,
                 result_name=result_name,
                 method_params=method_params,
             ),
@@ -239,7 +244,9 @@ class WorkflowService:
         self.engine.load_dataset_input(dataset_input)
         self.engine.set_target_class(request.target_class)
         self.engine.prepare_xai_inputs(
-            method=request.method, objective_id=request.objective_id
+            method=request.method,
+            objective_id=request.objective_id,
+            method_params=request.method_params,
         )
         selected_layer = self.engine.compute_cam(
             layer=request.layer,
@@ -250,16 +257,12 @@ class WorkflowService:
         )
         cam_data_range = DataRange.from_data([self.engine.cam], method="minmax")
         volume_data_range = DataRange.from_data([self.engine.volume_data], method="minmax")
-        default_transfer = (
-            TransferFunction.overlay_preset()
-            if request.method.startswith("perturb")
-            else TransferFunction.heatmap_preset()
-        )
+        default_transfer = TransferFunction.heatmap_preset()
         family = "perturbation" if request.method.startswith("perturb") else "gradient"
         if hasattr(self.engine, "_resolve_cam_method"):
             family = getattr(self.engine._resolve_cam_method(request.method), "family", family)
         method_options = self.list_xai_methods(family)
-        objective_options = self.engine.available_objectives()
+        objective_options = self.engine.available_objectives(family)
         return XaiComputeResult(
             dataset_input=self.engine.dataset_input(),
             layer_names=tuple(self.engine.layers.keys()),
@@ -321,7 +324,7 @@ class WorkflowService:
             "selected_layer": selected_layer,
             "method_options": self.list_cam_methods(),
             "selected_method": self.engine.active_method_id,
-            "objective_options": self.list_objectives(),
+            "objective_options": self.list_objectives("gradient"),
             "selected_objective": self.engine.active_objective_id,
             "feature_size": self.engine.layers[selected_layer],
             "render_request": {
@@ -337,7 +340,7 @@ class WorkflowService:
             "cam_transfer_function": cam_transfer_function
             or TransferFunction.heatmap_preset(),
             "volume_transfer_function": volume_transfer_function
-            or TransferFunction.base_preset(),
+            or TransferFunction.heatmap_preset(),
         }
 
 

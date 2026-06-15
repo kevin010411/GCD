@@ -6,7 +6,10 @@ import torch.nn.functional as F
 from src.gcd.infrastructure.cam_methods import (
     CamPatchContext,
     GradCamMethod,
+    PerturbationLimeMethod,
     SaliencyMapMethod,
+    PerturbationOcclusionMethod,
+    PerturbationRiseMethod,
     XResCamMethod,
 )
 from src.gcd.infrastructure.core_engine import GradCamEngine
@@ -141,6 +144,118 @@ class GradCamMethodTests(unittest.TestCase):
         self.assertEqual(payload["method"], "saliency_map")
         self.assertNotIn("layers", payload)
         self.assertEqual(payload["input_gradient"].shape, input_tensor.shape)
+
+    def test_occlusion_masks_input_blocks_and_uses_score_drop(self) -> None:
+        class _ToyModel(torch.nn.Module):
+            def forward(self, value):
+                return torch.cat([torch.zeros_like(value), value], dim=1)
+
+        model = _ToyModel()
+        input_tensor = torch.ones((1, 1, 2, 2, 2), dtype=torch.float32)
+        logits = model(input_tensor)
+        method = PerturbationOcclusionMethod()
+        logs = []
+        progress = []
+
+        payload = method.collect_patch_data(
+            CamPatchContext(
+                input_tensor=input_tensor,
+                logits=logits,
+                layers_by_name={},
+                target_class=1,
+                objective=GradCamEngine._target_logit_sum_objective,
+                model=model,
+                method_params={
+                    "block_size": 1,
+                    "stride": 1,
+                    "baseline": 0.0,
+                    "batch_size": 2,
+                    "_score_logger": logs.append,
+                    "_tile_index": 3,
+                    "_progress_callback": progress.append,
+                    "_progress_total": 16,
+                    "_progress_offset": 8,
+                },
+            )
+        )
+
+        self.assertEqual(payload["method"], "perturb_occlusion")
+        self.assertTrue(
+            torch.allclose(payload["importance_map"], torch.ones((1, 1, 2, 2, 2)))
+        )
+        self.assertEqual(len(logs), 8)
+        self.assertIn("tile=3", logs[0])
+        self.assertIn("original_score=8.000000", logs[0])
+        self.assertIn("masked_score=7.000000", logs[0])
+        self.assertIn("drop=1.000000", logs[0])
+        self.assertEqual(progress[0], {"current": 9, "total": 16})
+        self.assertEqual(progress[-1], {"current": 16, "total": 16})
+
+    def test_lime_returns_reproducible_input_importance_map(self) -> None:
+        class _ToyModel(torch.nn.Module):
+            def forward(self, value):
+                return torch.cat([torch.zeros_like(value), value], dim=1)
+
+        model = _ToyModel()
+        input_tensor = torch.arange(1, 9, dtype=torch.float32).reshape(1, 1, 2, 2, 2)
+        logits = model(input_tensor)
+        method = PerturbationLimeMethod()
+        context = CamPatchContext(
+            input_tensor=input_tensor,
+            logits=logits,
+            layers_by_name={},
+            target_class=1,
+            objective=GradCamEngine._target_logit_sum_objective,
+            model=model,
+            method_params={
+                "segments_per_axis": 2,
+                "num_samples": 16,
+                "kernel_width": 1.0,
+                "baseline": 0.0,
+                "batch_size": 4,
+                "random_seed": 7,
+            },
+        )
+
+        first = method.collect_patch_data(context)["importance_map"]
+        second = method.collect_patch_data(context)["importance_map"]
+
+        self.assertEqual(first.shape, (1, 1, 2, 2, 2))
+        self.assertTrue(torch.allclose(first, second))
+        self.assertFalse(torch.isnan(first).any())
+
+    def test_rise_returns_reproducible_input_importance_map(self) -> None:
+        class _ToyModel(torch.nn.Module):
+            def forward(self, value):
+                return torch.cat([torch.zeros_like(value), value], dim=1)
+
+        model = _ToyModel()
+        input_tensor = torch.arange(1, 9, dtype=torch.float32).reshape(1, 1, 2, 2, 2)
+        logits = model(input_tensor)
+        method = PerturbationRiseMethod()
+        context = CamPatchContext(
+            input_tensor=input_tensor,
+            logits=logits,
+            layers_by_name={},
+            target_class=1,
+            objective=GradCamEngine._target_logit_sum_objective,
+            model=model,
+            method_params={
+                "num_masks": 8,
+                "mask_grid_size": 2,
+                "keep_probability": 0.5,
+                "baseline": 0.0,
+                "batch_size": 4,
+                "random_seed": 11,
+            },
+        )
+
+        first = method.collect_patch_data(context)["importance_map"]
+        second = method.collect_patch_data(context)["importance_map"]
+
+        self.assertEqual(first.shape, (1, 1, 2, 2, 2))
+        self.assertTrue(torch.allclose(first, second))
+        self.assertFalse(torch.isnan(first).any())
 
 
 if __name__ == "__main__":

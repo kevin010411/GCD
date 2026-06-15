@@ -264,6 +264,10 @@ class _FakeView:
         self.layer_options_calls = []
         self.feature_size_calls = []
         self.layer_control_calls = []
+        self.perturb_answer_options_calls = []
+        self.perturb_progress_calls = []
+        self.perturb_progress_values = []
+        self._selected_answer_data = ""
 
     def selected_class(self):
         return self._selected_class
@@ -297,6 +301,15 @@ class _FakeView:
 
     def set_perturbation_dataset_options(self, options, selected):
         self.perturb_dataset_options_calls.append((options, selected))
+
+    def set_perturbation_answer_data_options(self, options, selected):
+        self.perturb_answer_options_calls.append((options, selected))
+
+    def set_perturbation_progress_running(self, running):
+        self.perturb_progress_calls.append(running)
+
+    def set_perturbation_progress(self, current, total):
+        self.perturb_progress_values.append((current, total))
 
     def set_perturbation_method_options(self, *_args):
         pass
@@ -342,6 +355,9 @@ class _FakeView:
     def selected_perturbation_method(self):
         return "perturb_occlusion"
 
+    def selected_perturbation_answer_data(self):
+        return self._selected_answer_data
+
 
 class _FakeWorkflow:
     def __init__(self) -> None:
@@ -355,6 +371,7 @@ class _FakeWorkflow:
             "feature_size": 0,
         }
         self.loaded_volume_data = np.array([9, 8, 7], dtype=np.float32)
+        self.loaded_origin_img = np.array([0, 1, 2], dtype=np.float32)
         self.engine = type(
             "Engine",
             (),
@@ -409,7 +426,7 @@ class _FakeWorkflow:
             "dataset_input": DatasetInput(
                 img0=None,
                 img1=np.array([1.0], dtype=np.float32),
-                origin_img=None,
+                origin_img=self.loaded_origin_img,
                 origin_meta={},
                 origin_shape=(1,),
                 img1_spacing=(1.5, 1.5, 2.0),
@@ -445,12 +462,16 @@ class _FakeWorkflow:
             },
                 "xai_cache_key": "",
                 "volume_data_range": DataRange(0.0, 1.0),
-                "volume_transfer_function": TransferFunction.base_preset(),
+                "volume_transfer_function": TransferFunction.heatmap_preset(),
                 "messages": [],
         }
 
     def compute_xai(self, dataset_input, request):
         self.compute_calls.append((dataset_input, request))
+        progress_callback = (request.method_params or {}).get("_progress_callback")
+        if callable(progress_callback):
+            progress_callback({"current": 0, "total": 4})
+            progress_callback({"current": 4, "total": 4})
         data = np.array([1, 2, 3], dtype=np.float32)
         return XaiComputeResult(
             dataset_input=dataset_input,
@@ -490,6 +511,30 @@ class _FakeWorkflow:
 class _FakeTaskRunner:
     def submit(self, func, on_success, _on_error):
         on_success(func())
+
+
+class _DeferredTaskRunner:
+    def __init__(self) -> None:
+        self.pending = []
+
+    def submit(self, func, on_success, on_error):
+        self.pending.append((func, on_success, on_error))
+
+    def succeed_next(self):
+        func, on_success, _on_error = self.pending.pop(0)
+        on_success(func())
+
+    def fail_next(self, exc):
+        _func, _on_success, on_error = self.pending.pop(0)
+        on_error(exc)
+
+
+class _ProgressTaskRunner:
+    def submit(self, func, on_success, _on_error, on_progress=None):
+        try:
+            on_success(func(on_progress))
+        except TypeError:
+            on_success(func())
 
 
 class _FakeErrorStore:
@@ -679,6 +724,109 @@ class PresenterMethodTests(unittest.TestCase):
             presenter.render_items[presenter.volume_order[2]]["display_name"],
             "sample.nii_unet_layer-a_class2_2",
         )
+
+    def test_xai_run_ignores_second_request_while_one_is_running(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        task_runner = _DeferredTaskRunner()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=task_runner,
+            error_store=_FakeErrorStore(),
+        )
+        presenter.on_open_file_requested()
+        task_runner.succeed_next()
+        dataset_id = presenter.dataset_order[0]
+        view._selected_grad_dataset = dataset_id
+        view._selected_perturb_dataset = dataset_id
+
+        presenter.on_gradcam_run_requested()
+        presenter.on_perturbation_run_requested()
+
+        self.assertEqual(len(task_runner.pending), 1)
+        self.assertEqual(len(workflow.compute_calls), 0)
+        self.assertFalse(view.gradcam_run_button.enabled)
+        self.assertFalse(view.perturbation_run_button.enabled)
+        self.assertEqual(view.overlay_status_messages[-1], "XAI is already running.")
+        self.assertNotIn(True, view.perturb_progress_calls)
+
+        task_runner.succeed_next()
+
+        self.assertEqual(len(workflow.compute_calls), 1)
+        self.assertTrue(view.gradcam_run_button.enabled)
+        self.assertTrue(view.perturbation_run_button.enabled)
+
+    def test_perturbation_run_toggles_progress_bar(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        task_runner = _DeferredTaskRunner()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=task_runner,
+            error_store=_FakeErrorStore(),
+        )
+        presenter.on_open_file_requested()
+        task_runner.succeed_next()
+        dataset_id = presenter.dataset_order[0]
+        view._selected_perturb_dataset = dataset_id
+
+        presenter.on_perturbation_run_requested()
+
+        self.assertEqual(view.perturb_progress_calls[-1], True)
+
+        task_runner.succeed_next()
+
+        self.assertEqual(view.perturb_progress_calls[-1], False)
+
+    def test_perturbation_run_updates_progress_values(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_ProgressTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+        presenter.on_open_file_requested()
+        view._selected_perturb_dataset = presenter.dataset_order[0]
+
+        presenter.on_perturbation_run_requested()
+
+        self.assertEqual(view.perturb_progress_values, [(0, 4), (4, 4)])
+
+    def test_perturbation_run_passes_selected_data_volume_as_answer(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+        presenter.on_open_file_requested()
+        dataset_id = presenter.dataset_order[0]
+        base_volume_id = presenter.datasets[dataset_id].base_volume_id
+        view._selected_perturb_dataset = dataset_id
+        view._selected_answer_data = base_volume_id
+
+        presenter.on_perturbation_run_requested()
+
+        request = workflow.compute_calls[-1][1]
+        self.assertIs(
+            request.method_params["answer_data"],
+            workflow.loaded_origin_img,
+        )
+        self.assertEqual(request.method_params["answer_volume_id"], base_volume_id)
 
     def test_visibility_change_renders_immediately(self) -> None:
         view = _FakeView()

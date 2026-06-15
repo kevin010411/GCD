@@ -9,6 +9,7 @@ class GradCamPluginPanel(XaiFamilyPluginPanel):
             "gradient",
             "Grad-CAM Compute",
             "Run target-class explainability and drive the shared viewer workspace.",
-            "Class",
-            parent,
+            class_label="Class",
+            objective_label="Aggregation",
+            parent=parent,
         )
