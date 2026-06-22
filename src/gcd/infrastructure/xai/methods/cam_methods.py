@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .methods import (
+from . import (
     CamPatchContext,
     GradCAMTestMethod,
     GradCamMethod,

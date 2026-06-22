@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from src.gcd.infrastructure.layer_hooks import XaiLayerHookManager
+from src.gcd.infrastructure.xai.runtime.layer_hooks import XaiLayerHookManager
 
 
 class _HookedModel(torch.nn.Module):

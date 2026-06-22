@@ -5,22 +5,28 @@ from copy import deepcopy
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from ..domain import DatasetInput
-from .cam_methods import (
+from ....domain import DatasetInput
+from ..methods.cam_methods import (
     CamMethod,
-    CamPatchContext,
-    GradCAMTestMethod,
     GradCamMethod,
-    PerturbationOcclusionMethod,
-    SaliencyMapMethod,
-    XResCamMethod,
-    XaiLayerSelection,
     XaiMethodRegistry,
 )
-from .layer_hooks import XaiLayerHookManager
+from ..runtime.layer_hooks import XaiLayerHookManager
+from ...model_input_preprocessor import (
+    ModelInputPreprocessConfig,
+    ModelInputPreprocessor,
+)
+from ..runtime.model_runtime_loader import ModelLoadStateDictError, ModelRuntimeLoader
+from ..tiling.tile_collector import TileCollectionRequest, TileCollector
+from ..tiling.tile_strategy import TileStrategyResolver
+from ...volume_loading import (
+    VolumeLoadConfig,
+    VolumeLoadingService,
+    safe_affine,
+)
+from ..runners.xai_cam_runner import XaiCamRunRequest, XaiCamRunner
 
 if TYPE_CHECKING:
-    import numpy as np
     import torch
 
 
@@ -43,37 +49,6 @@ def _timer(*args, **kwargs):
     return timer(*args, **kwargs)
 
 
-class ModelLoadStateDictError(RuntimeError):
-    def __init__(self, message: str, *, error_file: str) -> None:
-        super().__init__(message)
-        self.error_file = error_file
-        self.skip_error_store = True
-
-
-class _NullContext:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, _exc_type, _exc, _tb) -> None:
-        return None
-
-
-def _layer_channel_counts(patch_payload: dict[str, object]) -> dict[str, int]:
-    import torch
-
-    layers = patch_payload.get("layers")
-    if not isinstance(layers, dict):
-        return {}
-    counts: dict[str, int] = {}
-    for name, layer_payload in layers.items():
-        if not isinstance(layer_payload, dict):
-            continue
-        activation = layer_payload.get("activation")
-        if isinstance(activation, torch.Tensor):
-            counts[str(name)] = int(activation.size(1))
-    return counts
-
-
 class GradCamEngine:
     def __init__(
         self,
@@ -91,6 +66,7 @@ class GradCamEngine:
         self.volume_data = None
         self.img0 = None
         self.img1 = None
+        self.model_input = None
         self.model_input_metadata = self._default_display_metadata()
         self.origin_img = None
         self.origin_meta = {}
@@ -100,17 +76,26 @@ class GradCamEngine:
         self.layers = {"layer1": 1}
         self.file_name = ""
         self.patch: list[dict[str, object]] = []
+        self.tile_plan = None
         self.target_class = 1
         self.active_objective_id = "predicted_target_mask"
         self.xai_cache_key = ""
         self.gradient_objectives = self._default_gradient_objectives()
         self.perturbation_objectives = self._default_perturbation_objectives()
-        self.objectives = self.gradient_objectives
         self.xai_method_registry = XaiMethodRegistry.default(
             self._predicted_target_mask_objective
         )
         self.cam_methods: dict[str, CamMethod] = self.xai_method_registry.methods_by_id
         self.active_method_id = GradCamMethod.id
+        self.volume_loader = VolumeLoadingService()
+        self.model_input_preprocessor = ModelInputPreprocessor()
+        self.model_runtime_loader = ModelRuntimeLoader(
+            build_model=_build_model,
+            error_store=self.error_store,
+        )
+        self.tile_strategy_resolver = TileStrategyResolver()
+        self.tile_collector = TileCollector()
+        self.xai_cam_runner = XaiCamRunner()
 
         self.save_dir = save_dir
         if self.save_dir:
@@ -124,6 +109,68 @@ class GradCamEngine:
 
     def _log(self, message: str) -> None:
         self._logger(message)
+
+    def _volume_load_config(self) -> VolumeLoadConfig:
+        return VolumeLoadConfig(
+            spacing=tuple(float(v) for v in self.SPACING),
+            permute=tuple(int(v) for v in self.PERMUTE),
+            default_layer=str(self.cfg["default_layer"]),
+        )
+
+    def _model_input_preprocess_config(self) -> ModelInputPreprocessConfig:
+        return ModelInputPreprocessConfig(
+            size=int(self.SIZE),
+            stride=int(self.STRIDE),
+            spacing=tuple(float(v) for v in self.SPACING),
+            permute=tuple(int(v) for v in self.PERMUTE),
+        )
+
+    def _volume_loading_service(self) -> VolumeLoadingService:
+        service = getattr(self, "volume_loader", None)
+        if service is None:
+            service = VolumeLoadingService()
+            self.volume_loader = service
+        return service
+
+    def _model_input_service(self) -> ModelInputPreprocessor:
+        service = getattr(self, "model_input_preprocessor", None)
+        if service is None:
+            service = ModelInputPreprocessor()
+            self.model_input_preprocessor = service
+        return service
+
+    def _xai_runner(self) -> XaiCamRunner:
+        runner = getattr(self, "xai_cam_runner", None)
+        if runner is None:
+            runner = XaiCamRunner()
+            self.xai_cam_runner = runner
+        return runner
+
+    def _model_runtime_service(self) -> ModelRuntimeLoader:
+        service = getattr(self, "model_runtime_loader", None)
+        if service is None:
+            service = ModelRuntimeLoader(
+                build_model=_build_model,
+                error_store=getattr(self, "error_store", None),
+            )
+            self.model_runtime_loader = service
+        service._build_model = _build_model
+        service.error_store = getattr(self, "error_store", None)
+        return service
+
+    def _tile_strategy_service(self) -> TileStrategyResolver:
+        service = getattr(self, "tile_strategy_resolver", None)
+        if service is None:
+            service = TileStrategyResolver()
+            self.tile_strategy_resolver = service
+        return service
+
+    def _tile_collector_service(self) -> TileCollector:
+        service = getattr(self, "tile_collector", None)
+        if service is None:
+            service = TileCollector()
+            self.tile_collector = service
+        return service
 
     @staticmethod
     def _default_display_metadata() -> dict[str, object]:
@@ -199,9 +246,6 @@ class GradCamEngine:
     ) -> list[dict[str, object]]:
         return self.xai_method_registry.available_methods(family)
 
-    def default_feature_size(self) -> int:
-        return list(self.layers.values())[0]
-
     def dataset_input(self) -> DatasetInput:
         return DatasetInput(
             img0=deepcopy(self.img0),
@@ -233,6 +277,7 @@ class GradCamEngine:
         self.volume_data = None
         self.img0 = deepcopy(dataset_input.img0)
         self.img1 = None
+        self.model_input = None
         self.origin_img = deepcopy(dataset_input.origin_img)
         self.origin_meta = deepcopy(dataset_input.origin_meta)
         self.origin_shape = deepcopy(dataset_input.origin_shape)
@@ -244,6 +289,7 @@ class GradCamEngine:
         self.layers = deepcopy(dataset_input.layers)
         self.file_name = str(dataset_input.file_name)
         self.patch = []
+        self.tile_plan = None
         self.target_class = int(dataset_input.target_class)
         self.active_method_id = str(dataset_input.active_method_id)
         self.active_objective_id = str(
@@ -418,126 +464,60 @@ class GradCamEngine:
         return fallback, objectives[fallback][1]
 
     def load_volume(self, input_file: str | None = None) -> list[str]:
-        import monai.transforms as mt
         import torch
 
-        messages: list[str] = []
         if input_file is not None:
             self.file_name = input_file
         if not self.file_name:
             raise ValueError("尚未指定輸入檔案，無法載入與處理資料。")
 
-        self.origin_img, self.origin_meta = mt.LoadImage(image_only=False)(
-            self.file_name
-        )
-        self.img0 = mt.EnsureChannelFirst()(self.origin_img, self.origin_meta)
-
         with _timer("載入展示資料"):
-            try:
-                self.origin_meta = dict(self.img0.meta)
-            except Exception:
-                self.origin_meta = {}
-            self.origin_shape = tuple(self.img0.shape)
-            raw_affine = self._extract_affine(self.img0)
-            self.display_metadata = self._build_display_metadata(raw_affine)
-            self.display_metadata.update(
-                {
-                    "source_affine": self._safe_affine(),
-                    "source_shape": tuple(int(v) for v in self.origin_shape[1:]),
-                    "display_permute": tuple(int(v) for v in self.PERMUTE),
-                }
+            loaded = self._volume_loading_service().load(
+                self.file_name, self._volume_load_config()
             )
-            self.volume_data = self.img0[0].permute(*self.PERMUTE).to(torch.float32)
+            self.origin_img = loaded.origin_img
+            self.origin_meta = loaded.origin_meta
+            self.origin_shape = loaded.origin_shape
+            self.img0 = loaded.img0
+            self.display_metadata = loaded.display_metadata
+            self.volume_data = loaded.display_volume
             self.cam = torch.zeros_like(self.volume_data)
             self.img1 = None
-            self.img1_spacing = (
-                self.SPACING[self.PERMUTE[0]],
-                self.SPACING[self.PERMUTE[1]],
-                self.SPACING[self.PERMUTE[2]],
-            )
+            self.model_input = None
+            self.img1_spacing = loaded.display_spacing
             self.model_input_metadata = self._default_display_metadata()
             self.model_output = None
             self.patch = []
-            self.layers = {self.cfg["default_layer"]: 1}
+            self.tile_plan = None
+            self.layers = loaded.default_layers
             self.xai_cache_key = ""
 
-        for message in messages:
+        for message in loaded.messages:
             self._log(message)
-        return messages
+        return list(loaded.messages)
 
     def prepare_model_input(self) -> list[str]:
-        if getattr(self, "img0", None) is None:
-            if getattr(self, "img1", None) is not None:
-                self.model_input_metadata = deepcopy(
-                    getattr(self, "display_metadata", self._default_display_metadata())
-                )
-                return []
-            if getattr(self, "origin_img", None) is None:
-                raise ValueError("缺少原始資料，無法產生模型輸入。")
-            import monai.transforms as mt
-
-            self.img0 = mt.EnsureChannelFirst()(self.origin_img, self.origin_meta)
-            try:
-                self.origin_meta = dict(self.img0.meta)
-            except Exception:
-                self.origin_meta = dict(self.origin_meta or {})
-            self.origin_shape = tuple(self.img0.shape)
-
-        import monai.transforms as mt
-        import torch
-
-        messages: list[str] = []
+        if getattr(self, "img0", None) is None and getattr(self, "img1", None) is not None:
+            self.model_input_metadata = deepcopy(
+                getattr(self, "display_metadata", self._default_display_metadata())
+            )
+            return []
         with _timer("資料前處理"):
-            img1 = mt.Spacing(mode="bilinear", pixdim=self.SPACING)(self.img0)
-            width, depth = self.SIZE + self.STRIDE, self.SIZE
-            img1 = mt.SpatialPad(
-                spatial_size=(width, width, depth), mode="constant", value=0
-            )(img1)
-            img1_affine = self._extract_affine(img1)
-
-            shape = list(img1.shape)
-            slices = [slice(None), slice(None), slice(None), slice(None)]
-            pad_offsets = [0, 0, 0]
-            if shape[1] < width:
-                x = (width - shape[1]) // 2
-                slices[1] = slice(x, x + shape[1])
-                shape[1] = width
-                pad_offsets[0] = x
-            if shape[2] < width:
-                x = (width - shape[2]) // 2
-                slices[2] = slice(x, x + shape[2])
-                shape[2] = width
-                pad_offsets[1] = x
-            if shape[3] < depth:
-                x = (depth - shape[3]) // 2
-                slices[3] = slice(x, x + shape[3])
-                shape[3] = depth
-                pad_offsets[2] = x
-            if any(current.start is not None for current in slices):
-                image = torch.zeros(shape)
-                image[tuple(slices)] = img1
-                img1 = image
-                messages.append("info: image is zero padded")
-                img1_affine = self._shift_affine_for_padding(img1_affine, pad_offsets)
-
-            img1 = mt.ScaleIntensityRange(
-                a_min=-42, a_max=423, b_min=0, b_max=1, clip=True
-            )(img1)
-            self.img1 = img1
-            self.img1_spacing = (
-                self.SPACING[self.PERMUTE[0]],
-                self.SPACING[self.PERMUTE[1]],
-                self.SPACING[self.PERMUTE[2]],
+            result = self._model_input_service().preprocess(
+                img0=getattr(self, "img0", None),
+                origin_img=getattr(self, "origin_img", None),
+                origin_meta=getattr(self, "origin_meta", {}),
+                origin_shape=getattr(self, "origin_shape", None),
+                config=self._model_input_preprocess_config(),
             )
-            self.model_input_metadata = self._build_display_metadata(img1_affine)
-            self.model_input_metadata.update(
-                {
-                    "source_affine": self._safe_affine(),
-                    "source_shape": tuple(int(v) for v in self.origin_shape[1:]),
-                    "display_permute": tuple(int(v) for v in self.PERMUTE),
-                }
-            )
-        return messages
+            self.img0 = result.img0
+            self.img1 = result.img1
+            self.model_input = result
+            self.origin_meta = result.origin_meta
+            self.origin_shape = result.origin_shape
+            self.img1_spacing = result.img1_spacing
+            self.model_input_metadata = result.model_input_metadata
+        return list(result.messages)
 
     def prepare_xai_inputs(
         self,
@@ -550,6 +530,8 @@ class GradCamEngine:
         if not self.file_name:
             raise ValueError("尚未載入檔案，無法準備 XAI 輸入。")
         self.prepare_model_input()
+        if self.img1 is None:
+            raise ValueError("尚未產生模型輸入，無法準備 XAI 輸入。")
         cam_method = self._resolve_cam_method(method)
         selected_objective_id, objective = self._resolve_objective(
             objective_id, cam_method.family
@@ -557,158 +539,48 @@ class GradCamEngine:
         self.active_method_id = cam_method.id
         self.active_objective_id = selected_objective_id
         self.patch = []
+        self.tile_plan = None
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         with _timer("載入模型"):
-            model = _build_model(self.cfg.model).to(device)
-            ckpt_path = self.cfg.ckpt
-            if not os.path.exists(ckpt_path):
-                raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+            runtime = self._model_runtime_service().load(self.cfg)
 
-            pth = torch.load(ckpt_path, map_location="cpu")
-            sd = pth["state_dict"].copy() if "state_dict" in pth else pth.copy()
-
-            missing, unexpected = model.load_state_dict(sd, strict=False)
-            if missing or unexpected:
-                error_path = None
-                if self.error_store is not None:
-                    error_path = self.error_store.save_json(
-                        {
-                            "error_type": "model_load_error",
-                            "config_path": getattr(self.cfg, "filename", None),
-                            "checkpoint_path": ckpt_path,
-                            "missing_count": len(missing),
-                            "missing_keys": list(missing),
-                            "unexpected_count": len(unexpected),
-                            "unexpected_keys": list(unexpected),
-                        },
-                        suffix="model_load_error",
-                    )
-                raise ModelLoadStateDictError(
-                    (
-                        "Model load failed because checkpoint keys do not match the model."
-                        + (
-                            f" Error details saved to: {error_path}"
-                            if error_path
-                            else ""
-                        )
-                    ),
-                    error_file=str(error_path) if error_path else "",
-                )
-            model.eval()
-
-        img2 = self.img1.unsqueeze(0).to(device)
-        img2.requires_grad_()
-
-        hook_manager = (
-            XaiLayerHookManager(model) if cam_method.uses_layer_controls else None
-        )
-
-        perturb_reference_volume = self._perturb_reference_volume(
-            method_params or {}, device
-        )
-
-        with _timer("模型推論", track_gpu=True):
-            x0, y0, z0 = list(
-                (
-                    torch.tensor(self.img1[0].shape)
-                    - torch.tensor(
-                        [self.STRIDE + self.SIZE, self.STRIDE + self.SIZE, self.SIZE]
-                    )
-                )
-                // 2
+        track_gpu = getattr(runtime.device, "type", "") == "cuda"
+        with _timer("模型推論", track_gpu=track_gpu, device=str(runtime.device)):
+            tile_strategy = self._tile_strategy_service().resolve(method_params or {})
+            tile_plan = tile_strategy.plan(
+                input_shape=tuple(int(v) for v in self.img1[0].shape),
+                patch_size=int(self.SIZE),
+                stride=int(self.STRIDE),
             )
-
-            self.patch = []
-            tiles = [
-                (0, 0),
-                (0, self.STRIDE),
-                (self.STRIDE, 0),
-                (self.STRIDE, self.STRIDE),
-            ]
-            tile_progress_units = self._perturb_progress_units(
-                cam_method.id, method_params or {}
+            perturb_reference_volume = self._perturb_reference_volume(
+                method_params or {}, runtime.device
             )
-            progress_total = tile_progress_units * len(tiles)
-            progress_callback = (method_params or {}).get("_progress_callback")
-            if cam_method.family == "perturbation" and callable(progress_callback):
-                progress_callback({"current": 0, "total": progress_total})
-            hook_context = hook_manager if hook_manager is not None else _NullContext()
-            with hook_context:
-                for x, y in tiles:
-                    self._wait_for_perturbation_pause(cam_method, method_params or {})
-                    model.zero_grad(set_to_none=True)
-                    if img2.grad is not None:
-                        img2.grad = None
-                    if hook_manager is not None:
-                        hook_manager.clear()
-                    tile_input = img2[
-                        ...,
-                        x0 + x : x0 + x + self.SIZE,
-                        y0 + y : y0 + y + self.SIZE,
-                        z0 : z0 + self.SIZE,
-                    ]
-                    tile_input.retain_grad()
-                    logits = model(tile_input)
-                    layers_by_name = (
-                        hook_manager.layers_by_name()
-                        if hook_manager is not None
-                        else {}
-                    )
-                    tile_method_params = dict(method_params or {})
-                    tile_method_params["_score_logger"] = self._log
-                    tile_method_params["_tile_index"] = len(self.patch)
-                    tile_method_params["_progress_total"] = progress_total
-                    tile_method_params["_progress_offset"] = (
-                        len(self.patch) * tile_progress_units
-                    )
-                    tile_method_params["_preview_spacing"] = getattr(
+            collection = self._tile_collector_service().collect(
+                TileCollectionRequest(
+                    model=runtime.model,
+                    device=runtime.device,
+                    model_input=self.img1,
+                    method=cam_method,
+                    objective=objective,
+                    target_class=self.target_class,
+                    tile_plan=tile_plan,
+                    method_params=method_params or {},
+                    model_input_spacing=getattr(
                         self, "img1_spacing", getattr(self, "SPACING", (1.0, 1.0, 1.0))
-                    )
-                    tile_method_params["_preview_metadata"] = {
-                        **self.model_input_metadata,
-                        "volume_id": "perturb-preview",
-                    }
-                    tile_method_params["_preview_full_input"] = img2[0].detach()
-                    tile_method_params["_preview_tile_origin"] = (
-                        int(x0 + x),
-                        int(y0 + y),
-                        int(z0),
-                    )
-                    tile_method_params["_preview_permute"] = tuple(
-                        getattr(self, "PERMUTE", (0, 1, 2))
-                    )
-                    if perturb_reference_volume is not None:
-                        tile_method_params["reference_mask"] = perturb_reference_volume[
-                            x0 + x : x0 + x + self.SIZE,
-                            y0 + y : y0 + y + self.SIZE,
-                            z0 : z0 + self.SIZE,
-                        ]
-
-                    self._wait_for_perturbation_pause(cam_method, tile_method_params)
-                    self.patch.append(
-                        cam_method.collect_patch_data(
-                            CamPatchContext(
-                                input_tensor=tile_input,
-                                logits=logits,
-                                layers_by_name=layers_by_name,
-                                target_class=self.target_class,
-                                objective=objective,
-                                model=model,
-                                method_params=tile_method_params,
-                                device=device,
-                            )
-                        )
-                    )
-
-            self.layers = (
-                _layer_channel_counts(self.patch[-1])
-                if hook_manager is not None
-                else {"input": 1}
+                    ),
+                    model_input_metadata=getattr(self, "model_input_metadata", {}),
+                    display_permute=tuple(int(v) for v in getattr(self, "PERMUTE", (0, 1, 2))),
+                    reference_mask=perturb_reference_volume,
+                    progress_units=self._perturb_progress_units,
+                    pause_waiter=self._wait_for_perturbation_pause,
+                    logger=self._log,
+                )
             )
-            self.model_output = logits.detach().to("cpu")
-
-            del model, img2, pth, sd
+            self.patch = collection.patches
+            self.layers = collection.layers
+            self.model_output = collection.model_output
+            self.tile_plan = collection.tile_plan
+            del runtime
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         cfg_name = str(getattr(self.cfg, "filename", "") or "")
@@ -788,14 +660,7 @@ class GradCamEngine:
             return None
         return tuple(int(v) for v in self.img1[0].permute(*self.PERMUTE).shape)
 
-    def load_and_process_input(
-        self, input_file: str | None = None, method: str | None = None
-    ) -> list[str]:
-        messages = self.load_volume(input_file)
-        self.prepare_xai_inputs(method)
-        return messages
-
-    def compute_cam(
+    def run_xai_method(
         self,
         layer: str | None = None,
         n1: int = 0,
@@ -803,9 +668,6 @@ class GradCamEngine:
         method: str | None = None,
         method_params: dict[str, object] | None = None,
     ) -> str:
-        import torch
-        import torch.nn.functional as F
-
         if not self.file_name:
             raise ValueError("尚未載入檔案，無法計算 CAM。")
         cam_method = self._resolve_cam_method(method)
@@ -822,123 +684,37 @@ class GradCamEngine:
             raise ValueError("目前的 CAM patch payload 與指定 method 不一致。")
         self.active_method_id = cam_method.id
 
-        if cam_method.uses_layer_controls:
-            available_layers = list(self.layers.keys())
-            selected_layer = layer or self.cfg["default_layer"]
-            if selected_layer not in self.layers:
-                fallback_layer = (
-                    self.cfg["default_layer"]
-                    if self.cfg["default_layer"] in self.layers
-                    else (available_layers[0] if available_layers else "")
-                )
-                if not fallback_layer:
-                    raise RuntimeError("目前沒有可用的 CAM layer。")
-                selected_layer = fallback_layer
-                self._log(f"指定 layer 不存在，改用可用 layer: {selected_layer}")
-        else:
-            selected_layer = "input"
-            self.layers = {"input": 1}
-
-        with _timer(f"layer={selected_layer} 計算 GradCAM"):
-            n2 = min(n2, self.layers[selected_layer])
-            shape = list(self.img1[0].shape)
-            cam = torch.zeros(shape, dtype=torch.float32)
-            if not isinstance(self.patch[0].get("pred"), torch.Tensor):
-                raise TypeError("CAM patch payload 缺少 pred tensor。")
-            pred_shape = list(self.patch[0]["pred"].shape)[:2] + shape
-            model_out = torch.zeros(pred_shape, dtype=torch.float32)
-
-            x0, y0, z0 = list(
-                (
-                    torch.tensor(self.img1[0].shape)
-                    - torch.tensor(
-                        [self.STRIDE + self.SIZE, self.STRIDE + self.SIZE, self.SIZE]
-                    )
-                )
-                // 2
-            )
-
-            tiles = [
-                (0, 0),
-                (0, self.STRIDE),
-                (self.STRIDE, 0),
-                (self.STRIDE, self.STRIDE),
-            ]
-            for index, (x, y) in enumerate(tiles):
-                q = cam_method.build_tile_cam(
-                    self.patch[index],
-                    XaiLayerSelection(
-                        selected_layer,
-                        n1,
-                        n2,
-                        (self.SIZE, self.SIZE, self.SIZE),
-                    ),
+        with _timer(f"method={cam_method.id} 計算 XAI CAM"):
+            result = self._xai_runner().run(
+                XaiCamRunRequest(
+                    method=cam_method,
+                    patches=self.patch,
+                    layers=self.layers,
+                    img1=self.img1,
+                    size=int(self.SIZE),
+                    stride=int(self.STRIDE),
+                    permute=tuple(int(v) for v in self.PERMUTE),
+                    default_layer=str(self.cfg["default_layer"]),
+                    tile_plan=getattr(self, "tile_plan", None),
+                    layer=layer,
+                    n1=n1,
+                    n2=n2,
                     method_params=method_params,
+                    logger=self._log,
                 )
-
-                p1 = self.patch[index]["pred"]
-                if not isinstance(p1, torch.Tensor):
-                    raise TypeError("CAM patch payload 缺少 pred tensor。")
-                p1 = F.interpolate(
-                    p1, size=(self.SIZE, self.SIZE, self.SIZE), mode="trilinear"
-                )
-
-                overlap = self.SIZE - self.STRIDE
-                if index in (0, 1):
-                    for i in range(overlap):
-                        weight = (overlap - i) / overlap
-                        q[0, 0, self.STRIDE + i, :, :] *= weight
-                        p1[0, 0, self.STRIDE + i, :, :] *= weight
-                if index in (2, 3):
-                    for i in range(overlap):
-                        weight = i / overlap
-                        q[0, 0, i, :, :] *= weight
-                        p1[0, 0, i, :, :] *= weight
-                if index in (0, 2):
-                    for i in range(overlap):
-                        weight = (overlap - i) / overlap
-                        q[0, 0, :, self.STRIDE + i, :] *= weight
-                        p1[0, 0, :, self.STRIDE + i, :] *= weight
-                if index in (1, 3):
-                    for i in range(overlap):
-                        weight = i / overlap
-                        q[0, 0, :, i, :] *= weight
-                        p1[0, 0, :, i, :] *= weight
-
-                xs = slice(x0 + x, x0 + x + self.SIZE)
-                ys = slice(y0 + y, y0 + y + self.SIZE)
-                zs = slice(z0, z0 + self.SIZE)
-
-                cam[xs, ys, zs] += q[0, 0]
-                model_out[:, :, xs, ys, zs] += p1
-
-            perturb_signal_max = None
-            if cam_method.family == "perturbation":
-                cam = torch.abs(cam)
-                perturb_signal_max = torch.max(cam)
-            else:
-                cam = torch.maximum(cam, torch.tensor(0))
-            cam -= torch.min(cam)
-            maximum = torch.max(cam)
-            if maximum > 0:
-                cam /= maximum
-            elif (
-                cam_method.family == "perturbation"
-                and perturb_signal_max is not None
-                and perturb_signal_max > 0
-            ):
-                cam = torch.ones_like(cam)
-
-            self.cam = cam.permute(*self.PERMUTE)
+            )
+            selected_layer = result.selected_layer
+            self.layers = result.layers
+            self.cam = result.cam
             if getattr(self, "volume_data", None) is None:
                 self.volume_data = self.img1[0].permute(*self.PERMUTE)
-            self.model_output = torch.argmax(model_out, dim=1)[0].permute(*self.PERMUTE)
+            self.model_output = result.model_output
 
         if self.save_dir:
             os.makedirs(self.save_dir, exist_ok=True)
             base = os.path.splitext(os.path.basename(self.file_name))[0]
             self._save_volume(
-                cam.permute(*self.PERMUTE),
+                self.cam,
                 os.path.join(
                     self.save_dir, f"{base}_{self.cfg.model.type}_{selected_layer}_cam"
                 ),
@@ -951,6 +727,22 @@ class GradCamEngine:
                 self.volume_data, os.path.join(self.save_dir, f"{base}_img")
             )
         return selected_layer
+
+    def compute_cam(
+        self,
+        layer: str | None = None,
+        n1: int = 0,
+        n2: int = 999,
+        method: str | None = None,
+        method_params: dict[str, object] | None = None,
+    ) -> str:
+        return self.run_xai_method(
+            layer=layer,
+            n1=n1,
+            n2=n2,
+            method=method,
+            method_params=method_params,
+        )
 
     def _inv_permute(self, tensor: torch.Tensor) -> torch.Tensor:
         if tensor is None:
@@ -1002,87 +794,10 @@ class GradCamEngine:
         return source_space.permute(*self.PERMUTE)
 
     def _safe_affine(self):
-        import numpy as np
-
-        spacing = None
-        if (
-            self.origin_meta
-            and "pixdim" in self.origin_meta
-            and len(self.origin_meta["pixdim"]) >= 4
-        ):
-            try:
-                spacing = tuple(map(float, self.origin_meta["pixdim"][1:4]))
-            except Exception:
-                spacing = None
-        if spacing is None:
-            spacing = tuple(
-                float(value) for value in (self.img1_spacing or (1.0, 1.0, 1.0))
-            )
-
-        affine = (
-            self.origin_meta["affine"]
-            if self.origin_meta and "affine" in self.origin_meta
-            else None
+        spacing = tuple(
+            float(value) for value in (self.img1_spacing or (1.0, 1.0, 1.0))
         )
-        if affine is None:
-            affine = np.diag([spacing[0], spacing[1], spacing[2], 1.0]).astype(
-                "float32"
-            )
-        return affine
-
-    def _extract_affine(self, image) -> np.ndarray:
-        import numpy as np
-
-        meta = getattr(image, "meta", None)
-        if meta is not None:
-            affine = meta.get("affine")
-            if affine is not None:
-                return np.array(affine, dtype=np.float32, copy=True)
-        return np.array(self._safe_affine(), dtype=np.float32, copy=True)
-
-    @staticmethod
-    def _shift_affine_for_padding(
-        affine: np.ndarray, offsets: list[int] | tuple[int, int, int]
-    ) -> np.ndarray:
-        import numpy as np
-
-        shifted = np.array(affine, dtype=np.float32, copy=True)
-        offset_vector = np.array(offsets, dtype=np.float32)
-        shifted[:3, 3] -= shifted[:3, :3] @ offset_vector
-        return shifted
-
-    def _build_display_metadata(self, affine: np.ndarray) -> dict[str, object]:
-        import numpy as np
-
-        axis_order = list(self.PERMUTE)
-        display_affine = np.eye(4, dtype=np.float32)
-        display_affine[:3, :3] = affine[:3, :3][:, axis_order]
-        display_affine[:3, 3] = affine[:3, 3]
-
-        display_vectors = display_affine[:3, :3]
-        display_spacing = np.linalg.norm(display_vectors, axis=0)
-        safe_display_spacing = np.where(display_spacing > 0, display_spacing, 1.0)
-        display_direction = display_vectors / safe_display_spacing
-
-        vtk_axis_order = [2, 1, 0]
-        vtk_vectors = display_vectors[:, vtk_axis_order]
-        vtk_spacing = np.linalg.norm(vtk_vectors, axis=0)
-        safe_vtk_spacing = np.where(vtk_spacing > 0, vtk_spacing, 1.0)
-        vtk_direction = vtk_vectors / safe_vtk_spacing
-
-        return {
-            "affine": display_affine,
-            "origin": tuple(float(v) for v in display_affine[:3, 3]),
-            "spacing": tuple(float(v) for v in safe_display_spacing),
-            "direction": tuple(
-                tuple(float(v) for v in row) for row in display_direction.T
-            ),
-            "vtk_origin": tuple(float(v) for v in display_affine[:3, 3]),
-            "vtk_spacing": tuple(float(v) for v in safe_vtk_spacing),
-            "vtk_direction": tuple(
-                tuple(float(v) for v in row) for row in vtk_direction.T
-            ),
-        }
+        return safe_affine(getattr(self, "origin_meta", {}), spacing)
 
     def _save_volume(
         self, tensor: torch.Tensor, stem: str, exist_ok: bool = True

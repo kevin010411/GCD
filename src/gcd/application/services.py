@@ -22,6 +22,7 @@ from ..presentation.qt.workspace_models import (
     PointAnnotation,
     SliceOrientation,
 )
+from ..infrastructure.volume_loading import VolumeLoadingService
 
 
 class TransferFunctionAppService:
@@ -152,9 +153,10 @@ class VolumePersistenceService:
 
 
 class WorkflowService:
-    def __init__(self, engine) -> None:
+    def __init__(self, engine, volume_loader: VolumeLoadingService | None = None) -> None:
         self.engine = engine
         self.transfer_function_service = TransferFunctionAppService()
+        self.volume_loader = volume_loader or getattr(engine, "volume_loader", None)
 
     def list_model_configs(self) -> list[dict[str, str]]:
         root = Path("src/config/model")
@@ -204,6 +206,8 @@ class WorkflowService:
         self, file_name: str, target_class: int, method: str | None = None
     ) -> dict[str, Any]:
         self.engine.set_target_class(target_class)
+        if self.volume_loader is not None and hasattr(self.engine, "_volume_load_config"):
+            return self._load_input_with_volume_loader(file_name, target_class, method)
         messages = self.engine.load_volume(file_name)
         display_metadata = dict(self.engine.display_metadata)
         display_spacing = tuple(
@@ -226,6 +230,51 @@ class WorkflowService:
             "volume_data_range": DataRange.from_data([self.engine.volume_data], method="minmax"),
             "volume_transfer_function": TransferFunction.base_preset(),
             "messages": messages,
+        }
+
+    def _load_input_with_volume_loader(
+        self, file_name: str, target_class: int, method: str | None
+    ) -> dict[str, Any]:
+        loaded = self.volume_loader.load(file_name, self.engine._volume_load_config())
+        selected_method = method or self.engine.active_method_id
+        dataset_input = DatasetInput(
+            img0=loaded.img0,
+            img1=None,
+            origin_img=loaded.origin_img,
+            origin_meta=dict(loaded.origin_meta),
+            origin_shape=loaded.origin_shape,
+            img1_spacing=loaded.display_spacing,
+            display_metadata=dict(loaded.display_metadata),
+            layers=dict(loaded.default_layers),
+            file_name=file_name,
+            target_class=target_class,
+            active_method_id=selected_method,
+            active_objective_id=getattr(
+                self.engine, "active_objective_id", "predicted_target_mask"
+            ),
+            xai_cache_key="",
+            raw_display_data=loaded.display_volume,
+            raw_spacing=loaded.display_spacing,
+            raw_display_metadata=dict(loaded.display_metadata),
+        )
+        return {
+            "file_name": file_name,
+            "dataset_input": dataset_input,
+            "layer_names": [],
+            "selected_layer": "",
+            "method_options": self.list_cam_methods(),
+            "selected_method": selected_method,
+            "objective_options": self.list_objectives("gradient"),
+            "selected_objective": dataset_input.active_objective_id,
+            "feature_size": 0,
+            "volume_data": loaded.display_volume,
+            "spacing": loaded.display_spacing,
+            "display_metadata": dict(loaded.display_metadata),
+            "volume_data_range": DataRange.from_data(
+                [loaded.display_volume], method="minmax"
+            ),
+            "volume_transfer_function": TransferFunction.base_preset(),
+            "messages": list(loaded.messages),
         }
 
     def compute_dataset_result(
@@ -292,7 +341,9 @@ class WorkflowService:
             objective_id=request.objective_id,
             method_params=request.method_params,
         )
-        selected_layer = self.engine.compute_cam(
+        run_xai_method = getattr(self.engine, "run_xai_method", None)
+        compute = run_xai_method if callable(run_xai_method) else self.engine.compute_cam
+        selected_layer = compute(
             layer=request.layer,
             n1=request.n1,
             n2=request.n2,

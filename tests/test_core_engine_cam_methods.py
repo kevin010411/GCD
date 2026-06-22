@@ -3,13 +3,13 @@ from unittest.mock import patch
 
 import torch
 
-from src.gcd.infrastructure.cam_methods import (
+from src.gcd.infrastructure.xai.methods.cam_methods import (
     GradCamMethod,
     PerturbationOcclusionMethod,
     SaliencyMapMethod,
     XResCamMethod,
 )
-from src.gcd.infrastructure.core_engine import GradCamEngine
+from src.gcd.infrastructure.xai.engine.core_engine import GradCamEngine
 
 
 class CoreEngineCamMethodTests(unittest.TestCase):
@@ -39,7 +39,7 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         engine = GradCamEngine.__new__(GradCamEngine)
         engine.cfg = _Cfg()
 
-        with patch("src.gcd.infrastructure.core_engine._build_model", return_value=_Model()):
+        with patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=_Model()):
             metadata = engine.model_layer_metadata()
 
         self.assertEqual(metadata["layer_names"], ["encoder", "decoder"])
@@ -62,7 +62,7 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         engine = GradCamEngine.__new__(GradCamEngine)
         engine.cfg = _Cfg()
 
-        with patch("src.gcd.infrastructure.core_engine._build_model", return_value=_Model()):
+        with patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=_Model()):
             metadata = engine.model_layer_metadata()
 
         self.assertEqual(metadata["selected_layer"], "encoder")
@@ -84,7 +84,7 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         engine.cfg = _Cfg()
 
         with (
-            patch("src.gcd.infrastructure.core_engine._build_model", return_value=_Model()),
+            patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=_Model()),
             self.assertRaisesRegex(RuntimeError, "decoder.*decoder\\.0"),
         ):
             engine.model_layer_metadata()
@@ -374,8 +374,8 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         engine.target_class = 1
 
         with (
-            patch("src.gcd.infrastructure.core_engine._build_model", return_value=_Model()),
-            patch("src.gcd.infrastructure.core_engine.os.path.exists", return_value=True),
+            patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=_Model()),
+            patch("src.gcd.infrastructure.xai.runtime.model_runtime_loader.os.path.exists", return_value=True),
             patch("torch.load", return_value={}),
         ):
             engine.prepare_xai_inputs(method="saliency_map")
@@ -417,8 +417,8 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         engine.target_class = 1
 
         with (
-            patch("src.gcd.infrastructure.core_engine._build_model", return_value=_Model()),
-            patch("src.gcd.infrastructure.core_engine.os.path.exists", return_value=True),
+            patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=_Model()),
+            patch("src.gcd.infrastructure.xai.runtime.model_runtime_loader.os.path.exists", return_value=True),
             patch("torch.load", return_value={}),
         ):
             engine.prepare_xai_inputs(method="gradcam")
@@ -457,8 +457,8 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         engine.target_class = 1
 
         with (
-            patch("src.gcd.infrastructure.core_engine._build_model", return_value=_Model()),
-            patch("src.gcd.infrastructure.core_engine.os.path.exists", return_value=True),
+            patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=_Model()),
+            patch("src.gcd.infrastructure.xai.runtime.model_runtime_loader.os.path.exists", return_value=True),
             patch("torch.load", return_value={}),
             self.assertRaisesRegex(RuntimeError, "xai_layer_targets"),
         ):

@@ -132,6 +132,22 @@ class _FakeEngine:
         return "layer-a"
 
 
+class _FakeRunnerEngine(_FakeEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.run_xai_method_calls = []
+
+    def run_xai_method(self, *, layer, n1, n2, method=None, method_params=None):
+        self.run_xai_method_calls.append((layer, n1, n2, method, method_params))
+        self.active_method_id = method or "gradcam"
+        if self.active_method_id == "saliency_map" or self.active_method_id.startswith(
+            "perturb"
+        ):
+            self.layers = {"input": 1}
+            return "input"
+        return "layer-a"
+
+
 class WorkflowServiceTests(unittest.TestCase):
     def test_compute_cam_returns_separate_transfer_defaults_and_ranges(self) -> None:
         service = WorkflowService(_FakeEngine())
@@ -211,6 +227,25 @@ class WorkflowServiceTests(unittest.TestCase):
         self.assertEqual(result["renderable_item"]["name"], "sample_model_perturb方法")
         self.assertEqual(result["renderable_item"]["source"], "xai")
         self.assertEqual(result["selected_method"], "perturb_occlusion")
+
+    def test_compute_dataset_result_prefers_explicit_xai_runner_entrypoint(self) -> None:
+        service = WorkflowService(_FakeRunnerEngine())
+
+        service.compute_dataset_result(
+            service.engine.dataset_input(),
+            target_class=1,
+            layer="layer-a",
+            n1=0,
+            n2=8,
+            method="gradcam",
+            result_name="sample_model_grad方法",
+        )
+
+        self.assertEqual(
+            service.engine.run_xai_method_calls,
+            [("layer-a", 0, 8, "gradcam", None)],
+        )
+        self.assertEqual(service.engine.compute_cam_calls, [])
 
     def test_compute_dataset_result_prepares_when_only_placeholder_layers_exist(self) -> None:
         service = WorkflowService(_FakeEngine())

@@ -1,6 +1,6 @@
 import unittest
 
-from src.gcd.infrastructure.methods import XaiMethod, XaiMethodRegistry
+from src.gcd.infrastructure.xai.methods import XaiMethod, XaiMethodRegistry
 
 
 class XaiMethodRegistryTests(unittest.TestCase):

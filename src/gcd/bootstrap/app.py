@@ -9,7 +9,7 @@ from ..application.services import (
     VolumePersistenceService,
     WorkflowService,
 )
-from ..infrastructure.core_engine import GradCamEngine
+from ..infrastructure.xai.engine.core_engine import GradCamEngine
 from ..infrastructure.error_store import ErrorStore
 from ..presentation.qt.background import QtBackgroundTaskRunner
 from ..presentation.qt.styles import STYLESHEET

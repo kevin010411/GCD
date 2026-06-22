@@ -3,7 +3,7 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from src.gcd.infrastructure.cam_methods import (
+from src.gcd.infrastructure.xai.methods.cam_methods import (
     CamPatchContext,
     GradCamMethod,
     PerturbationLimeMethod,
@@ -12,7 +12,7 @@ from src.gcd.infrastructure.cam_methods import (
     PerturbationRiseMethod,
     XResCamMethod,
 )
-from src.gcd.infrastructure.core_engine import GradCamEngine
+from src.gcd.infrastructure.xai.engine.core_engine import GradCamEngine
 
 
 class GradCamMethodTests(unittest.TestCase):
@@ -211,7 +211,7 @@ class GradCamMethodTests(unittest.TestCase):
         self.assertGreaterEqual(pause_controller.waits, 8)
 
     def test_perturbation_progress_is_throttled_but_keeps_final_update(self) -> None:
-        from src.gcd.infrastructure.methods.perturb_occlusion import _report_progress
+        from src.gcd.infrastructure.xai.methods.perturb_occlusion import _report_progress
 
         progress = []
         params = {
@@ -228,7 +228,7 @@ class GradCamMethodTests(unittest.TestCase):
         self.assertEqual(progress, [{"current": 1, "total": 4}, {"current": 4, "total": 4}])
 
     def test_perturbation_progress_default_throttle_reduces_ui_signal_pressure(self) -> None:
-        from src.gcd.infrastructure.methods.perturb_occlusion import _report_progress
+        from src.gcd.infrastructure.xai.methods.perturb_occlusion import _report_progress
 
         progress = []
         params = {"_progress_callback": progress.append, "_progress_total": 4}

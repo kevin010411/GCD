@@ -4,15 +4,15 @@ import unittest
 
 import numpy as np
 
-from src.gcd.infrastructure.core_engine import GradCamEngine
 from src.gcd.infrastructure.renderer import VtkVolumeRenderer, _vtk_direction_matrix
+from src.gcd.infrastructure.volume_loading import (
+    build_display_metadata,
+    shift_affine_for_padding,
+)
 
 
 class VolumeMetadataTests(unittest.TestCase):
     def test_build_display_metadata_preserves_origin_and_reorders_axes(self) -> None:
-        engine = GradCamEngine.__new__(GradCamEngine)
-        engine.PERMUTE = (1, 2, 0)
-
         affine = np.array(
             [
                 [-0.36328125, 0.0, 0.0, 69.81835938],
@@ -23,7 +23,7 @@ class VolumeMetadataTests(unittest.TestCase):
             dtype=np.float32,
         )
 
-        metadata = engine._build_display_metadata(affine)
+        metadata = build_display_metadata(affine, (1, 2, 0))
 
         self.assertEqual(
             metadata["origin"],
@@ -59,7 +59,7 @@ class VolumeMetadataTests(unittest.TestCase):
             dtype=np.float32,
         )
 
-        shifted = GradCamEngine._shift_affine_for_padding(affine, [3, 4, 5])
+        shifted = shift_affine_for_padding(affine, [3, 4, 5])
 
         np.testing.assert_allclose(shifted[:3, 3], np.array([7.9, 17.2, 25.0]))
 
