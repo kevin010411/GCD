@@ -55,6 +55,14 @@ class TransferFunctionDomainTests(unittest.TestCase):
             [point.position for point in transfer_function.control_points],
         )
 
+    def test_base_preset_starts_transparent_and_stays_sorted(self):
+        transfer_function = TransferFunction.base_preset()
+        self.assertEqual(transfer_function.control_points[0].opacity, 0.0)
+        self.assertEqual(
+            sorted(point.position for point in transfer_function.control_points),
+            [point.position for point in transfer_function.control_points],
+        )
+
     def test_rgba_samples_interpolate_color_and_opacity(self):
         transfer_function = TransferFunction.from_iterable(
             [

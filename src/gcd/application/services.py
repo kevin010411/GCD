@@ -112,6 +112,45 @@ class TransferFunctionAppService:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
 
 
+class VolumePersistenceService:
+    def save(self, volume: VolumeRecord, path: str) -> str:
+        import numpy as np
+        import torch
+        import torch.nn.functional as F
+        import nibabel as nib
+
+        target = str(path)
+        if not target.lower().endswith((".nii", ".nii.gz")):
+            target = f"{target}.nii.gz"
+
+        data = torch.as_tensor(volume.data).detach().to(torch.float32)
+        permute = volume.metadata.get("display_permute", (0, 1, 2))
+        if data.ndim == 3 and len(permute) == 3:
+            inverse = [0, 0, 0]
+            for index, permute_index in enumerate(tuple(int(v) for v in permute)):
+                inverse[permute_index] = index
+            data = data.permute(*inverse)
+
+        source_shape = tuple(int(v) for v in volume.source_shape)
+        if data.ndim == 3 and source_shape and tuple(data.shape) != source_shape:
+            data = F.interpolate(
+                data.unsqueeze(0).unsqueeze(0),
+                size=source_shape,
+                mode="trilinear",
+                align_corners=False,
+            )[0, 0]
+
+        affine = volume.source_affine
+        if affine is None:
+            affine = volume.metadata.get("source_affine", volume.metadata.get("affine"))
+        if affine is None:
+            spacing = tuple(float(v) for v in (volume.source_spacing or volume.spacing))
+            affine = np.diag([spacing[0], spacing[1], spacing[2], 1.0]).astype("float32")
+        nii = nib.Nifti1Image(data.cpu().numpy().astype("float32"), affine=np.asarray(affine))
+        nib.save(nii, target)
+        return target
+
+
 class WorkflowService:
     def __init__(self, engine) -> None:
         self.engine = engine
@@ -166,6 +205,11 @@ class WorkflowService:
     ) -> dict[str, Any]:
         self.engine.set_target_class(target_class)
         messages = self.engine.load_volume(file_name)
+        display_metadata = dict(self.engine.display_metadata)
+        display_spacing = tuple(
+            float(v)
+            for v in display_metadata.get("spacing", self.engine.img1_spacing)
+        )
         return {
             "file_name": file_name,
             "dataset_input": self.engine.dataset_input(),
@@ -177,10 +221,10 @@ class WorkflowService:
             "selected_objective": self.engine.active_objective_id,
             "feature_size": 0,
             "volume_data": self.engine.volume_data,
-            "spacing": self.engine.img1_spacing,
-            "display_metadata": dict(self.engine.display_metadata),
+            "spacing": display_spacing,
+            "display_metadata": display_metadata,
             "volume_data_range": DataRange.from_data([self.engine.volume_data], method="minmax"),
-            "volume_transfer_function": TransferFunction.heatmap_preset(),
+            "volume_transfer_function": TransferFunction.base_preset(),
             "messages": messages,
         }
 
@@ -255,7 +299,22 @@ class WorkflowService:
             method=request.method,
             method_params=request.method_params,
         )
-        cam_data_range = DataRange.from_data([self.engine.cam], method="minmax")
+        display_cam = (
+            self.engine.to_raw_display_space(self.engine.cam)
+            if hasattr(self.engine, "to_raw_display_space")
+            else self.engine.cam
+        )
+        display_metadata = dict(
+            getattr(self.engine, "display_metadata", dataset_input.display_metadata)
+        )
+        display_spacing = tuple(
+            float(v)
+            for v in display_metadata.get(
+                "spacing",
+                getattr(self.engine, "img1_spacing", dataset_input.img1_spacing),
+            )
+        )
+        cam_data_range = DataRange.from_data([display_cam], method="minmax")
         volume_data_range = DataRange.from_data([self.engine.volume_data], method="minmax")
         default_transfer = TransferFunction.heatmap_preset()
         family = "perturbation" if request.method.startswith("perturb") else "gradient"
@@ -278,16 +337,16 @@ class WorkflowService:
                 display_name=request.result_name,
                 source="xai",
                 method_id=request.method,
-                data=self.engine.cam,
+                data=display_cam,
                 data_range=cam_data_range,
                 transfer_function=default_transfer,
-                spacing=tuple(float(v) for v in self.engine.img1_spacing),
-                metadata={**self.engine.display_metadata},
-                shape=tuple(int(v) for v in self.engine.cam.shape),
+                spacing=display_spacing,
+                metadata=display_metadata,
+                shape=tuple(int(v) for v in display_cam.shape),
                 source_base_item_id="",
-                source_shape=tuple(int(v) for v in self.engine.cam.shape),
-                source_spacing=tuple(float(v) for v in self.engine.img1_spacing),
-                source_affine=self.engine.display_metadata.get("affine"),
+                source_shape=tuple(int(v) for v in display_cam.shape),
+                source_spacing=display_spacing,
+                source_affine=display_metadata.get("affine"),
                 plugin_metadata={
                     "model_name": (request.method_params or {}).get("model_name"),
                     "requested_layer": request.layer,
@@ -340,7 +399,7 @@ class WorkflowService:
             "cam_transfer_function": cam_transfer_function
             or TransferFunction.heatmap_preset(),
             "volume_transfer_function": volume_transfer_function
-            or TransferFunction.heatmap_preset(),
+            or TransferFunction.base_preset(),
         }
 
 

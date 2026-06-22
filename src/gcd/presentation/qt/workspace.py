@@ -2146,6 +2146,27 @@ class WorkspaceHost(QWidget):
         for workspace in WorkspaceHost._initialized_workspaces(self):
             workspace.renderer.render()
 
+    def update_volume_data(
+        self,
+        index: int,
+        data: object,
+        spacing: tuple[float, float, float],
+        metadata: dict[str, object] | None = None,
+        *,
+        render: bool = True,
+    ) -> bool:
+        updated = False
+        for workspace in WorkspaceHost._initialized_workspaces(self):
+            updater = getattr(workspace.renderer, "update_volume_data", None)
+            if callable(updater):
+                updated = bool(
+                    updater(index, data, spacing, metadata, render=False)
+                ) or updated
+        if updated and render:
+            for workspace in WorkspaceHost._initialized_workspaces(self):
+                workspace.renderer.render()
+        return updated
+
     def overlay_status_message(self) -> str:
         return self.active_workspace.overlay_status_message()
 
@@ -2173,6 +2194,12 @@ class WorkspaceHost(QWidget):
         self.shared_state.camera_snapshot = snapshot
         for workspace in WorkspaceHost._initialized_workspaces(self):
             workspace.renderer.apply_camera_state(snapshot)
+
+    def set_camera_interaction_enabled(self, enabled: bool) -> None:
+        for workspace in WorkspaceHost._initialized_workspaces(self):
+            setter = getattr(workspace.renderer, "set_camera_interaction_enabled", None)
+            if callable(setter):
+                setter(enabled)
 
     def save_screenshot(self, filename: str) -> None:
         self.active_workspace.renderer.save_screenshot(filename)

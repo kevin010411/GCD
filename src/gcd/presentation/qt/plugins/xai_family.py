@@ -35,6 +35,7 @@ class XaiFamilyPluginPanel(PluginPanel):
         objective_label: str = "Objective",
         show_answer_data: bool = False,
         show_progress: bool = False,
+        show_preview_controls: bool = False,
         parent=None,
     ) -> None:
         super().__init__(title, description, parent)
@@ -43,6 +44,7 @@ class XaiFamilyPluginPanel(PluginPanel):
         self._parameter_widgets: dict[str, QWidget] = {}
         self._feature_size = 0
         self._show_progress = bool(show_progress)
+        self._show_preview_controls = bool(show_preview_controls)
 
         dataset_layout = QHBoxLayout()
         dataset_layout.addWidget(QLabel("Data"))
@@ -113,6 +115,20 @@ class XaiFamilyPluginPanel(PluginPanel):
         self.progress_bar.setVisible(False)
         self.progress_bar.setProperty("xaiProgress", True)
         self.content_layout.addWidget(self.progress_bar)
+
+        self.preview_checkbox = QCheckBox("Show perturb input")
+        self.preview_checkbox.setVisible(self._show_preview_controls)
+        self.content_layout.addWidget(self.preview_checkbox)
+
+        self.preview_pause_button = QPushButton("Pause")
+        self.preview_pause_button.setCheckable(True)
+        self.preview_pause_button.setVisible(False)
+        self.preview_pause_button.toggled.connect(
+            lambda paused: self.preview_pause_button.setText(
+                "Resume" if paused else "Pause"
+            )
+        )
+        self.content_layout.addWidget(self.preview_pause_button)
 
         self.run_button = QPushButton("Run")
         self.content_layout.addWidget(self.run_button)
@@ -238,6 +254,22 @@ class XaiFamilyPluginPanel(PluginPanel):
         self.progress_bar.setValue(current)
         self.progress_bar.setFormat(f"{current}/{total}")
 
+    def preview_enabled(self) -> bool:
+        return bool(self._show_preview_controls and self.preview_checkbox.isChecked())
+
+    def set_preview_running(self, running: bool) -> None:
+        running = bool(running and self._show_preview_controls)
+        self.preview_checkbox.setEnabled(not running)
+        self.preview_pause_button.setVisible(running)
+        if not running:
+            self.preview_pause_button.blockSignals(True)
+            self.preview_pause_button.setChecked(False)
+            self.preview_pause_button.setText("Pause")
+            self.preview_pause_button.blockSignals(False)
+
+    def preview_paused(self) -> bool:
+        return bool(self.preview_pause_button.isChecked())
+
     def selected_method_params(self) -> dict[str, object]:
         values = {}
         for parameter_id, widget in self._parameter_widgets.items():
@@ -270,6 +302,7 @@ class XaiFamilyPluginPanel(PluginPanel):
         self.objective_row.setVisible(self.selected_method_uses_objective())
 
     def _rebuild_parameter_controls(self) -> None:
+        previous_values = self.selected_method_params()
         while self.params_layout.count():
             item = self.params_layout.takeAt(0)
             widget = item.widget()
@@ -298,6 +331,8 @@ class XaiFamilyPluginPanel(PluginPanel):
             row_widget.setLayout(row)
             self.params_layout.addWidget(row_widget)
             self._parameter_widgets[parameter_id] = widget
+            if parameter_id in previous_values:
+                self._set_parameter_widget_value(widget, previous_values[parameter_id])
         self.params_group.setVisible(bool(self._parameter_widgets))
 
     def _create_parameter_widget(self, spec: dict[str, object]) -> QWidget:
@@ -334,3 +369,17 @@ class XaiFamilyPluginPanel(PluginPanel):
         widget = QLineEdit()
         widget.setText("" if default is None else str(default))
         return widget
+
+    def _set_parameter_widget_value(self, widget: QWidget, value: object) -> None:
+        if isinstance(widget, QCheckBox):
+            widget.setChecked(bool(value))
+        elif isinstance(widget, QSpinBox):
+            widget.setValue(int(value))
+        elif isinstance(widget, QDoubleSpinBox):
+            widget.setValue(float(value))
+        elif isinstance(widget, QComboBox):
+            index = widget.findData(value)
+            if index >= 0:
+                widget.setCurrentIndex(index)
+        elif isinstance(widget, QLineEdit):
+            widget.setText("" if value is None else str(value))

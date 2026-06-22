@@ -21,6 +21,9 @@ class DatasetInput:
     active_method_id: str
     active_objective_id: str = "predicted_target_mask"
     xai_cache_key: str = ""
+    raw_display_data: object = None
+    raw_spacing: tuple[float, float, float] | None = None
+    raw_display_metadata: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)

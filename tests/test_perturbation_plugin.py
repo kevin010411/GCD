@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtWidgets import QLabel
 from PyQt6.QtWidgets import QProgressBar
+from PyQt6.QtWidgets import QScrollArea
 
 from src.gcd.presentation.qt.plugins.perturbation import PerturbationPluginPanel
 
@@ -20,6 +21,8 @@ class PerturbationPluginPanelTests(unittest.TestCase):
         panel.method_combo.addItem("Occlusion", "perturb_occlusion")
         labels = {label.text() for label in panel.findChildren(QLabel)}
 
+        self.assertIsInstance(panel.scroll_area, QScrollArea)
+        self.assertTrue(panel.scroll_area.widgetResizable())
         self.assertIsNotNone(panel.dataset_combo)
         self.assertIsNotNone(panel.class_spinbox)
         self.assertIn("Data", labels)
@@ -65,3 +68,23 @@ class PerturbationPluginPanelTests(unittest.TestCase):
         )
 
         self.assertEqual(panel.selected_answer_data(), "dataset-1:base")
+
+    def test_preview_controls_expose_checkbox_and_pause_state(self) -> None:
+        panel = PerturbationPluginPanel()
+
+        self.assertFalse(panel.preview_enabled())
+        panel.preview_checkbox.setChecked(True)
+        panel.set_preview_running(True)
+
+        self.assertTrue(panel.preview_enabled())
+        self.assertFalse(panel.preview_pause_button.isHidden())
+
+        panel.preview_pause_button.setChecked(True)
+
+        self.assertTrue(panel.preview_paused())
+        self.assertEqual(panel.preview_pause_button.text(), "Resume")
+
+        panel.set_preview_running(False)
+
+        self.assertTrue(panel.preview_pause_button.isHidden())
+        self.assertEqual(panel.preview_pause_button.text(), "Pause")

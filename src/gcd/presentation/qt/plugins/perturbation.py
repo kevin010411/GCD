@@ -13,5 +13,6 @@ class PerturbationPluginPanel(XaiFamilyPluginPanel):
             objective_label="Score",
             show_answer_data=True,
             show_progress=True,
+            show_preview_controls=True,
             parent=parent,
         )

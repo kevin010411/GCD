@@ -149,7 +149,7 @@ class WorkflowServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             result["volume_transfer_function"].control_points,
-            TransferFunction.heatmap_preset().control_points,
+            TransferFunction.base_preset().control_points,
         )
         self.assertEqual(result["selected_method"], "gradcam")
         self.assertEqual(result["selected_objective"], "predicted_target_mask")

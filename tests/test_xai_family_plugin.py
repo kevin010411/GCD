@@ -66,6 +66,37 @@ class XaiFamilyPluginPanelTests(unittest.TestCase):
         self.assertIsInstance(panel._parameter_widgets["block_size"], QSpinBox)
         self.assertEqual(panel.selected_method_params()["block_size"], 16)
 
+    def test_method_option_refresh_preserves_parameter_values(self) -> None:
+        panel = XaiFamilyPluginPanel(
+            "perturbation",
+            "Perturbation XAI",
+            "Run perturbation methods.",
+        )
+        options = [
+            {
+                "id": "perturb_occlusion",
+                "name": "Occlusion",
+                "uses_layer_controls": False,
+                "uses_objective": True,
+                "parameters": [
+                    {
+                        "id": "block_size",
+                        "label": "Block Size",
+                        "kind": "int",
+                        "default": 16,
+                        "min": 1,
+                        "max": 256,
+                    }
+                ],
+            }
+        ]
+        panel.set_method_options(options, "perturb_occlusion")
+        panel._parameter_widgets["block_size"].setValue(32)
+
+        panel.set_method_options(options, "perturb_occlusion")
+
+        self.assertEqual(panel.selected_method_params()["block_size"], 32)
+
     def test_saliency_method_hides_layer_feature_controls(self) -> None:
         panel = XaiFamilyPluginPanel("gradient", "Gradient XAI", "Run gradients.")
 

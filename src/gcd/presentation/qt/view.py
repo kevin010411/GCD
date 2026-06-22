@@ -337,11 +337,15 @@ class MainWindowView(QMainWindow):
         self.perturbation_class_spinbox = self.perturbation_plugin_panel.class_spinbox
         self.perturbation_method_combo = self.perturbation_plugin_panel.method_combo
         self.perturbation_run_button = self.perturbation_plugin_panel.run_button
+        self.perturbation_preview_pause_button = (
+            self.perturbation_plugin_panel.preview_pause_button
+        )
 
         self.data_plugin_panel = self.plugin_panels["data"]
         self.transfer_plugin_panel = self.data_plugin_panel
         self.volume_list = self.data_plugin_panel.volume_list
         self.delete_volume_button = self.data_plugin_panel.delete_button
+        self.save_volume_button = self.data_plugin_panel.save_button
         self.reorder_hint_label = self.data_plugin_panel.reorder_hint
         self.overlay_status_label = self.data_plugin_panel.overlay_status
         self.transfer_editor = self.data_plugin_panel.transfer_editor
@@ -491,6 +495,9 @@ class MainWindowView(QMainWindow):
     def set_perturbation_progress(self, current: int, total: int) -> None:
         self.xai_family_panels["perturbation"].set_progress_value(current, total)
 
+    def set_perturbation_preview_running(self, running: bool) -> None:
+        self.xai_family_panels["perturbation"].set_preview_running(running)
+
     def set_perturbation_method_options(
         self, options: list[dict[str, str]], selected: str | None
     ) -> None:
@@ -542,6 +549,16 @@ class MainWindowView(QMainWindow):
     def set_overlay_status_message(self, message: str) -> None:
         self.overlay_status_label.setText(message)
 
+    def set_data_controls_enabled(self, enabled: bool) -> None:
+        if hasattr(self.data_plugin_panel, "set_data_controls_enabled"):
+            self.data_plugin_panel.set_data_controls_enabled(enabled)
+
+    def set_camera_controls_enabled(self, enabled: bool) -> None:
+        if hasattr(self.camera_plugin_panel, "set_camera_controls_enabled"):
+            self.camera_plugin_panel.set_camera_controls_enabled(enabled)
+        if hasattr(self.workspace, "set_camera_interaction_enabled"):
+            self.workspace.set_camera_interaction_enabled(enabled)
+
     def selected_model_path(self) -> str | None:
         return self.model_combo.currentData()
 
@@ -587,6 +604,9 @@ class MainWindowView(QMainWindow):
     def selected_perturbation_answer_data(self) -> str:
         return self.xai_family_panels["perturbation"].selected_answer_data()
 
+    def selected_perturbation_preview_enabled(self) -> bool:
+        return self.xai_family_panels["perturbation"].preview_enabled()
+
     def selected_xai_method(self, family_id: str) -> str:
         return self.xai_family_panels[family_id].selected_method()
 
@@ -622,6 +642,12 @@ class MainWindowView(QMainWindow):
             self, "Save Screenshot", "screenshot", "PNG Files (*.png)"
         )
         return file_name[:-4] if file_name.lower().endswith(".png") else file_name
+
+    def choose_volume_save_file(self, default_name: str = "volume.nii.gz") -> str:
+        file_name, _ = QFileDialog.getSaveFileName(
+            self, "Save Volume", default_name, "NIfTI Files (*.nii.gz *.nii)"
+        )
+        return file_name
 
     def choose_video_file(self) -> str:
         file_name, _ = QFileDialog.getSaveFileName(

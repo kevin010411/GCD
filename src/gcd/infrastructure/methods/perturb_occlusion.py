@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 
 from .base import CamPatchContext, XaiLayerSelection, XaiMethod, XaiParameterSpec
@@ -51,15 +52,29 @@ def _score_batch(logits, target_class: int, objective, reference_mask=None):
 
 
 def _forward_scores(
-    model, samples, target_class: int, objective, batch_size: int, reference_mask=None
+    model,
+    samples,
+    target_class: int,
+    objective,
+    batch_size: int,
+    reference_mask=None,
+    params: Mapping[str, object] | None = None,
+    preview_regions: list[tuple[slice, slice, slice]] | None = None,
 ):
     import torch
 
+    params = params or {}
     scores = []
     batch_size = max(1, int(batch_size))
     with torch.no_grad():
         for start in range(0, int(samples.size(0)), batch_size):
-            logits = model(samples[start : start + batch_size])
+            batch = samples[start : start + batch_size]
+            _wait_if_paused(params)
+            preview_region = None
+            if preview_regions:
+                preview_region = preview_regions[start]
+            _report_preview(params, batch[0], preview_region)
+            logits = model(batch)
             scores.append(_score_batch(logits, target_class, objective, reference_mask))
     return torch.cat(scores)
 
@@ -76,8 +91,6 @@ def _log_score(params: Mapping[str, object], message: str) -> None:
     logger = params.get("_score_logger")
     if callable(logger):
         logger(message)
-    if params.get("_score_print", False) or not callable(logger):
-        print(message)
 
 
 def _region_bounds(region: tuple[slice, slice, slice]) -> tuple[int, int, int, int, int, int]:
@@ -101,9 +114,126 @@ def _progress_offset(params: Mapping[str, object]) -> int:
 
 def _report_progress(params: Mapping[str, object], done: int) -> None:
     callback = params.get("_progress_callback")
-    if callable(callback):
-        total = _progress_total(params)
-        callback({"current": min(total, _progress_offset(params) + int(done)), "total": total})
+    if not callable(callback):
+        return
+    total = _progress_total(params)
+    current = min(total, _progress_offset(params) + int(done))
+    if not _progress_due(params, current, total):
+        return
+    callback({"current": current, "total": total})
+
+
+def _progress_due(params: Mapping[str, object], current: int, total: int) -> bool:
+    if not isinstance(params, dict):
+        return True
+    if current >= total:
+        return True
+    now = time.monotonic()
+    min_interval = float(params.get("_progress_min_interval_sec", 0.1) or 0.0)
+    last_emit = params.get("_progress_last_emit")
+    if last_emit is not None and now - float(last_emit) < min_interval:
+        return False
+    params["_progress_last_emit"] = now
+    return True
+
+
+def _wait_if_paused(params: Mapping[str, object]) -> None:
+    controller = params.get("_pause_controller")
+    waiter = getattr(controller, "wait_if_paused", None)
+    if callable(waiter):
+        waiter()
+
+
+def _report_preview(
+    params: Mapping[str, object],
+    sample,
+    region: tuple[slice, slice, slice] | None = None,
+) -> None:
+    callback = params.get("_preview_callback")
+    if not callable(callback):
+        return
+    if not _preview_due(params):
+        return
+    try:
+        data = _preview_sample_data(params, sample, region)
+        if data.ndim == 4:
+            data = data[0]
+        permute = params.get("_preview_permute")
+        preview_box = None
+        if region is not None:
+            preview_box = _preview_box(params, region)
+        if permute is not None and data.ndim == 3:
+            data = data.permute(*(int(v) for v in permute))
+        callback(
+            {
+                "kind": "perturb_preview",
+                "data": data.to("cpu"),
+                "spacing": params.get("_preview_spacing"),
+                "metadata": params.get("_preview_metadata", {}),
+                "preview_box": preview_box,
+            }
+        )
+    except Exception:
+        return
+
+
+def _preview_due(params: Mapping[str, object]) -> bool:
+    if not isinstance(params, dict):
+        return True
+    now = time.monotonic()
+    min_interval = float(params.get("_preview_min_interval_sec", 0.2) or 0.0)
+    last_emit = params.get("_preview_last_emit")
+    if last_emit is not None and now - float(last_emit) < min_interval:
+        return False
+    params["_preview_last_emit"] = now
+    return True
+
+
+def _preview_sample_data(
+    params: Mapping[str, object],
+    sample,
+    region: tuple[slice, slice, slice] | None,
+):
+    data = sample.detach()
+    full_input = params.get("_preview_full_input")
+    if full_input is None or region is None:
+        return data
+    origin = tuple(int(v) for v in params.get("_preview_tile_origin", (0, 0, 0)))
+    full_data = full_input.detach().clone()
+    if full_data.ndim == 5:
+        full_data = full_data[0]
+    if full_data.ndim != 4:
+        return data
+    tile_data = data[0] if data.ndim == 5 else data
+    full_region = _offset_region(region, origin)
+    full_data[:, full_region[0], full_region[1], full_region[2]] = tile_data[
+        :, region[0], region[1], region[2]
+    ]
+    return full_data
+
+
+def _offset_region(
+    region: tuple[slice, slice, slice], origin: tuple[int, int, int]
+) -> tuple[slice, slice, slice]:
+    return tuple(
+        slice(origin[index] + int(axis.start or 0), origin[index] + int(axis.stop or 0))
+        for index, axis in enumerate(region)
+    )
+
+
+def _preview_box(
+    params: Mapping[str, object], region: tuple[slice, slice, slice]
+) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    origin = tuple(int(v) for v in params.get("_preview_tile_origin", (0, 0, 0)))
+    full_region = _offset_region(region, origin)
+    starts = [int(axis.start or 0) for axis in full_region]
+    ends = [max(int(axis.stop or 0) - 1, starts[index]) for index, axis in enumerate(full_region)]
+    permute = params.get("_preview_permute")
+    if permute is not None:
+        axes = tuple(int(v) for v in permute)
+        starts = [starts[axis] for axis in axes]
+        ends = [ends[axis] for axis in axes]
+    return tuple(starts), tuple(ends)
 
 
 class _InputPerturbationMethod(XaiMethod):
@@ -170,6 +300,7 @@ class PerturbationOcclusionMethod(_InputPerturbationMethod):
         for z in _axis_starts(depth, block_size, stride):
             for y in _axis_starts(height, block_size, stride):
                 for x in _axis_starts(width, block_size, stride):
+                    _wait_if_paused(params)
                     zs = slice(z, min(z + block_size, depth))
                     ys = slice(y, min(y + block_size, height))
                     xs = slice(x, min(x + block_size, width))
@@ -187,6 +318,8 @@ class PerturbationOcclusionMethod(_InputPerturbationMethod):
                             context.objective,
                             batch_size,
                             reference_mask,
+                            params,
+                            regions,
                         )
                         for score, region in zip(scores, regions):
                             drop = original_score - score
@@ -218,6 +351,8 @@ class PerturbationOcclusionMethod(_InputPerturbationMethod):
                 context.objective,
                 batch_size,
                 reference_mask,
+                params,
+                regions,
             )
             for score, region in zip(scores, regions):
                 drop = original_score - score
@@ -283,6 +418,7 @@ class PerturbationLimeMethod(_InputPerturbationMethod):
         scores = []
         completed = 0
         for start in range(0, num_samples, batch_size):
+            _wait_if_paused(params)
             current = min(batch_size, num_samples - start)
             batch_masks = torch.as_tensor(
                 samples_np[start : start + batch_size],
@@ -299,6 +435,7 @@ class PerturbationLimeMethod(_InputPerturbationMethod):
                     context.objective,
                     batch_size,
                     reference_mask,
+                    params,
                 )
             )
             completed += current
@@ -352,6 +489,7 @@ class PerturbationRiseMethod(_InputPerturbationMethod):
         exposure = torch.zeros_like(importance)
 
         for start in range(0, num_masks, batch_size):
+            _wait_if_paused(params)
             current = min(batch_size, num_masks - start)
             low_res = (
                 torch.rand(
@@ -372,6 +510,7 @@ class PerturbationRiseMethod(_InputPerturbationMethod):
                 context.objective,
                 batch_size,
                 reference_mask,
+                params,
             )
             drops = (original_score - scores).reshape(current, 1, 1, 1, 1)
             importance += torch.sum(drops * masks, dim=0, keepdim=True)

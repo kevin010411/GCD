@@ -14,6 +14,7 @@ class VolumeListWidget(QListWidget):
     order_changed = pyqtSignal(list)
     name_changed = pyqtSignal(str, str)
     delete_requested = pyqtSignal(str)
+    save_requested = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -182,6 +183,10 @@ class TransferVolumePluginPanel(PluginPanel):
         self.content_layout.addWidget(self.delete_button)
         self.delete_button.clicked.connect(self._emit_delete_selected)
 
+        self.save_button = QPushButton("Save")
+        self.content_layout.addWidget(self.save_button)
+        self.save_button.clicked.connect(self._emit_save_selected)
+
         self.reorder_hint = QLabel("Reorder is enabled only in ROI mode.")
         self.content_layout.addWidget(self.reorder_hint)
 
@@ -199,3 +204,14 @@ class TransferVolumePluginPanel(PluginPanel):
         volume_id = self.volume_list.selected_volume_id()
         if volume_id:
             self.volume_list.delete_requested.emit(volume_id)
+
+    def _emit_save_selected(self) -> None:
+        volume_id = self.volume_list.selected_volume_id()
+        if volume_id:
+            self.volume_list.save_requested.emit(volume_id)
+
+    def set_data_controls_enabled(self, enabled: bool) -> None:
+        self.volume_list.setEnabled(enabled)
+        self.delete_button.setEnabled(enabled)
+        self.save_button.setEnabled(enabled)
+        self.transfer_editor.setEnabled(enabled)

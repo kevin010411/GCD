@@ -30,7 +30,7 @@ def _loaded_result():
         "spacing": (1.5, 1.5, 2.0),
         "display_metadata": {"vtk_origin": (1.0, 2.0, 3.0)},
         "volume_data_range": DataRange(0.0, 1.0),
-        "volume_transfer_function": TransferFunction.heatmap_preset(),
+        "volume_transfer_function": TransferFunction.base_preset(),
     }
 
 

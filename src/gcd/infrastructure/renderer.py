@@ -262,6 +262,8 @@ class VtkVolumeRenderer:
         self.interactor = self.render_window.GetInteractor()
         self.camera_interactor_style = vtkInteractorStyleTrackballCamera()
         self.annotation_interactor_style = vtkInteractorStyleUser()
+        self.disabled_camera_interactor_style = vtkInteractorStyleUser()
+        self.camera_interaction_enabled = True
         self.interactor.SetInteractorStyle(self.camera_interactor_style)
 
         self.volumes = []
@@ -391,6 +393,41 @@ class VtkVolumeRenderer:
         if render:
             self.render()
         return port
+
+    def update_volume_data(
+        self,
+        index: int,
+        data,
+        spacing,
+        metadata: dict[str, object] | None = None,
+        *,
+        render: bool = True,
+    ) -> bool:
+        if not (0 <= int(index) < len(self.volumes)):
+            return False
+        metadata = metadata or {}
+        volume_item = self.volumes[int(index)]
+        np_array, image_data, vtk_spacing, vtk_origin = _build_vtk_image_data(
+            data, spacing, (0.0, 0.0, 0.0), metadata
+        )
+        volume_item["image"] = image_data
+        volume_item["mapper"].SetInputData(image_data)
+        vtk_direction = _apply_vtk_direction(
+            volume_item["volume"], vtk_origin, metadata
+        )
+        volume_item["affine"] = self._render_affine(
+            vtk_origin, vtk_spacing, vtk_direction
+        )
+        volume_item["inverse_affine"] = self._safe_inverse_affine(
+            volume_item["affine"]
+        )
+        self.volume_shape = tuple(int(v) for v in np_array.shape)
+        volume_item["mapper"].Modified()
+        volume_item["volume"].Modified()
+        self.renderer.ResetCameraClippingRange()
+        if render:
+            self.render()
+        return True
 
     def clear_volumes(self, *, render: bool = True) -> None:
         self.renderer.RemoveAllViewProps()
@@ -643,7 +680,11 @@ class VtkVolumeRenderer:
         if mode in {"point", "box"}:
             self.interactor.SetInteractorStyle(self.annotation_interactor_style)
         else:
-            self.interactor.SetInteractorStyle(self.camera_interactor_style)
+            self.interactor.SetInteractorStyle(
+                self.camera_interactor_style
+                if self.camera_interaction_enabled
+                else self.disabled_camera_interactor_style
+            )
 
     def set_annotations(
         self,
@@ -929,6 +970,18 @@ class VtkVolumeRenderer:
     def set_rotation_speed(self, speed: float) -> None:
         self.rotation_speed = speed
 
+    def set_camera_interaction_enabled(self, enabled: bool) -> None:
+        if self.interactor is None:
+            return
+        self.camera_interaction_enabled = bool(enabled)
+        if self.annotation_mode in {"point", "box"}:
+            return
+        self.interactor.SetInteractorStyle(
+            self.camera_interactor_style
+            if self.camera_interaction_enabled
+            else self.disabled_camera_interactor_style
+        )
+
     def start_rotation(self) -> None:
         if self.rotating:
             self.stop_rotation()
@@ -1175,6 +1228,46 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         if render:
             self.render()
         return port
+
+    def update_volume_data(
+        self,
+        index: int,
+        data,
+        spacing,
+        metadata: dict[str, object] | None = None,
+        *,
+        render: bool = True,
+    ) -> bool:
+        if not (0 <= int(index) < len(self.volumes)):
+            return False
+        metadata = metadata or {}
+        volume_item = self.volumes[int(index)]
+        np_array, image_data, vtk_spacing, vtk_origin = _build_vtk_image_data(
+            data, spacing, (0.0, 0.0, 0.0), metadata
+        )
+        volume_item["image"] = image_data
+        render_port = volume_item.get("render_port")
+        if render_port is None:
+            return False
+        self.multi_mapper.SetInputDataObject(int(render_port), image_data)
+        vtk_direction = _apply_vtk_direction(
+            volume_item["volume"], vtk_origin, metadata
+        )
+        volume_item["affine"] = self._render_affine(
+            vtk_origin, vtk_spacing, vtk_direction
+        )
+        volume_item["inverse_affine"] = self._safe_inverse_affine(
+            volume_item["affine"]
+        )
+        volume_item["volume_id"] = str(metadata.get("volume_id", volume_item["volume_id"]))
+        self.volume_shape = tuple(int(v) for v in np_array.shape)
+        volume_item["volume"].Modified()
+        self.multi_mapper.Modified()
+        self.multi_volume.Modified()
+        self.renderer.ResetCameraClippingRange()
+        if render:
+            self.render()
+        return True
 
     def clear_volumes(self, *, render: bool = True) -> None:
         self.renderer.RemoveAllViewProps()

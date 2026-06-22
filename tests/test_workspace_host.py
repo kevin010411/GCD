@@ -11,10 +11,19 @@ class _FakeRenderer:
         self.render_calls = 0
         self.applied_snapshots = []
         self.show_volumes_calls = []
+        self.update_volume_data_calls = []
+        self.camera_interaction_enabled_calls = []
 
     def show_volumes(self, volumes, spacing, metadata=None, **kwargs) -> None:
         self.show_volumes_calls.append((volumes, spacing, metadata, kwargs))
         self.volumes = [{} for _ in volumes]
+
+    def update_volume_data(self, *args, **kwargs) -> bool:
+        self.update_volume_data_calls.append((args, kwargs))
+        return True
+
+    def set_camera_interaction_enabled(self, enabled: bool) -> None:
+        self.camera_interaction_enabled_calls.append(enabled)
 
     def render(self) -> None:
         self.render_calls += 1
@@ -147,6 +156,44 @@ class WorkspaceHostTests(unittest.TestCase):
         self.assertEqual(host.sync_camera_calls, 0)
         self.assertEqual(host.apply_shared_calls, 2)
         self.assertEqual(host._scene_signature, (("new", ()),))
+
+    def test_update_volume_data_does_not_apply_camera_snapshot(self) -> None:
+        host = self._make_host(
+            initialized=True,
+            previous_count=1,
+            snapshot={"position": (9, 9, 9)},
+        )
+
+        updated = WorkspaceHost.update_volume_data(
+            host,
+            0,
+            object(),
+            (1.0, 1.0, 1.0),
+            {"volume_id": "perturb-preview"},
+        )
+
+        self.assertTrue(updated)
+        self.assertEqual(host.apply_shared_calls, 0)
+        self.assertEqual(host.sync_camera_calls, 0)
+        self.assertEqual(
+            len(host.standard_workspace.renderer.update_volume_data_calls), 1
+        )
+        self.assertEqual(len(host.roi_workspace.renderer.update_volume_data_calls), 1)
+
+    def test_camera_interaction_enabled_updates_all_renderers(self) -> None:
+        host = self._make_host(initialized=True, previous_count=1)
+
+        WorkspaceHost.set_camera_interaction_enabled(host, False)
+        WorkspaceHost.set_camera_interaction_enabled(host, True)
+
+        self.assertEqual(
+            host.standard_workspace.renderer.camera_interaction_enabled_calls,
+            [False, True],
+        )
+        self.assertEqual(
+            host.roi_workspace.renderer.camera_interaction_enabled_calls,
+            [False, True],
+        )
 
     def test_show_volumes_resets_when_previous_scene_had_no_visible_volumes(self) -> None:
         host = self._make_host(

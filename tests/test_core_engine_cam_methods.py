@@ -227,6 +227,26 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         self.assertEqual(by_id["predicted_mask_iou"], "Predicted Mask IoU")
         self.assertEqual(by_id["target_probability_sum"], "Target Probability Sum")
 
+    def test_perturbation_runner_pause_waits_only_for_perturbation_methods(self) -> None:
+        class _PauseController:
+            def __init__(self) -> None:
+                self.waits = 0
+
+            def wait_if_paused(self) -> None:
+                self.waits += 1
+
+        controller = _PauseController()
+        GradCamEngine._wait_for_perturbation_pause(
+            type("Method", (), {"family": "perturbation"})(),
+            {"_pause_controller": controller},
+        )
+        GradCamEngine._wait_for_perturbation_pause(
+            type("Method", (), {"family": "gradient"})(),
+            {"_pause_controller": controller},
+        )
+
+        self.assertEqual(controller.waits, 1)
+
     def test_predicted_mask_scores_compare_prediction_to_reference_mask(self) -> None:
         logits = torch.tensor(
             [[[[[0.1, 3.0]]], [[[2.0, 1.0]]]]],

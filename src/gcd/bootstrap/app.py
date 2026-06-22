@@ -6,6 +6,7 @@ from ..application.presenter import MainWindowPresenter
 from ..application.services import (
     AnnotationJsonService,
     TransferFunctionAppService,
+    VolumePersistenceService,
     WorkflowService,
 )
 from ..infrastructure.core_engine import GradCamEngine
@@ -31,6 +32,7 @@ def main(argv=None) -> None:
         annotation_service=AnnotationJsonService(),
         task_runner=QtBackgroundTaskRunner(),
         error_store=error_store,
+        volume_service=VolumePersistenceService(),
     )
     presenter.initialize()
 

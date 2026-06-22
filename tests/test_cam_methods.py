@@ -156,6 +156,13 @@ class GradCamMethodTests(unittest.TestCase):
         method = PerturbationOcclusionMethod()
         logs = []
         progress = []
+        preview_payloads = []
+        full_input = torch.ones((1, 3, 3, 3), dtype=torch.float32)
+        pause_controller = type(
+            "PauseController",
+            (),
+            {"waits": 0, "wait_if_paused": lambda self: setattr(self, "waits", self.waits + 1)},
+        )()
 
         payload = method.collect_patch_data(
             CamPatchContext(
@@ -175,6 +182,12 @@ class GradCamMethodTests(unittest.TestCase):
                     "_progress_callback": progress.append,
                     "_progress_total": 16,
                     "_progress_offset": 8,
+                    "_progress_min_interval_sec": 0,
+                    "_preview_callback": preview_payloads.append,
+                    "_preview_full_input": full_input,
+                    "_preview_tile_origin": (1, 1, 1),
+                    "_preview_permute": (0, 1, 2),
+                    "_pause_controller": pause_controller,
                 },
             )
         )
@@ -190,6 +203,41 @@ class GradCamMethodTests(unittest.TestCase):
         self.assertIn("drop=1.000000", logs[0])
         self.assertEqual(progress[0], {"current": 9, "total": 16})
         self.assertEqual(progress[-1], {"current": 16, "total": 16})
+        self.assertGreater(len(preview_payloads), 0)
+        self.assertEqual(preview_payloads[0]["data"].shape, torch.Size((3, 3, 3)))
+        self.assertEqual(preview_payloads[0]["preview_box"], ((1, 1, 1), (1, 1, 1)))
+        self.assertEqual(float(preview_payloads[0]["data"][1, 1, 1]), 0.0)
+        self.assertEqual(float(preview_payloads[0]["data"][0, 0, 0]), 1.0)
+        self.assertGreaterEqual(pause_controller.waits, 8)
+
+    def test_perturbation_progress_is_throttled_but_keeps_final_update(self) -> None:
+        from src.gcd.infrastructure.methods.perturb_occlusion import _report_progress
+
+        progress = []
+        params = {
+            "_progress_callback": progress.append,
+            "_progress_total": 4,
+            "_progress_min_interval_sec": 60,
+        }
+
+        _report_progress(params, 1)
+        _report_progress(params, 2)
+        _report_progress(params, 3)
+        _report_progress(params, 4)
+
+        self.assertEqual(progress, [{"current": 1, "total": 4}, {"current": 4, "total": 4}])
+
+    def test_perturbation_progress_default_throttle_reduces_ui_signal_pressure(self) -> None:
+        from src.gcd.infrastructure.methods.perturb_occlusion import _report_progress
+
+        progress = []
+        params = {"_progress_callback": progress.append, "_progress_total": 4}
+
+        _report_progress(params, 1)
+        _report_progress(params, 2)
+        _report_progress(params, 3)
+
+        self.assertEqual(progress, [{"current": 1, "total": 4}])
 
     def test_lime_returns_reproducible_input_importance_map(self) -> None:
         class _ToyModel(torch.nn.Module):

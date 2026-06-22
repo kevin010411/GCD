@@ -91,6 +91,7 @@ class GradCamEngine:
         self.volume_data = None
         self.img0 = None
         self.img1 = None
+        self.model_input_metadata = self._default_display_metadata()
         self.origin_img = None
         self.origin_meta = {}
         self.origin_shape = None
@@ -204,7 +205,11 @@ class GradCamEngine:
     def dataset_input(self) -> DatasetInput:
         return DatasetInput(
             img0=deepcopy(self.img0),
-            img1=deepcopy(self.img1),
+            img1=(
+                deepcopy(self.img1)
+                if self.origin_img is None and getattr(self, "img1", None) is not None
+                else None
+            ),
             origin_img=deepcopy(self.origin_img),
             origin_meta=deepcopy(self.origin_meta),
             origin_shape=deepcopy(self.origin_shape),
@@ -218,18 +223,24 @@ class GradCamEngine:
                 self, "active_objective_id", "predicted_target_mask"
             ),
             xai_cache_key=self.xai_cache_key,
+            raw_display_data=deepcopy(self.volume_data),
+            raw_spacing=deepcopy(self.display_metadata.get("spacing", self.img1_spacing)),
+            raw_display_metadata=deepcopy(self.display_metadata),
         )
 
     def load_dataset_input(self, dataset_input: DatasetInput) -> None:
         self.cam = None
         self.volume_data = None
         self.img0 = deepcopy(dataset_input.img0)
-        self.img1 = deepcopy(dataset_input.img1)
+        self.img1 = None
         self.origin_img = deepcopy(dataset_input.origin_img)
         self.origin_meta = deepcopy(dataset_input.origin_meta)
         self.origin_shape = deepcopy(dataset_input.origin_shape)
         self.img1_spacing = deepcopy(dataset_input.img1_spacing)
-        self.display_metadata = deepcopy(dataset_input.display_metadata)
+        self.display_metadata = deepcopy(
+            dataset_input.raw_display_metadata or dataset_input.display_metadata
+        )
+        self.model_input_metadata = deepcopy(dataset_input.display_metadata)
         self.layers = deepcopy(dataset_input.layers)
         self.file_name = str(dataset_input.file_name)
         self.patch = []
@@ -240,6 +251,10 @@ class GradCamEngine:
         )
         self.model_output = None
         self.xai_cache_key = str(dataset_input.xai_cache_key)
+        self.volume_data = deepcopy(dataset_input.raw_display_data)
+        if self.volume_data is None and dataset_input.img1 is not None:
+            self.img1 = deepcopy(dataset_input.img1)
+            self.volume_data = self.img1[0].permute(*self.PERMUTE)
 
     def _resolve_cam_method(self, method: str | None) -> CamMethod:
         requested = (method or self.active_method_id or GradCamMethod.id).strip().lower()
@@ -417,22 +432,70 @@ class GradCamEngine:
         )
         self.img0 = mt.EnsureChannelFirst()(self.origin_img, self.origin_meta)
 
-        with _timer("資料前處理"):
+        with _timer("載入展示資料"):
             try:
                 self.origin_meta = dict(self.img0.meta)
             except Exception:
                 self.origin_meta = {}
             self.origin_shape = tuple(self.img0.shape)
+            raw_affine = self._extract_affine(self.img0)
+            self.display_metadata = self._build_display_metadata(raw_affine)
+            self.display_metadata.update(
+                {
+                    "source_affine": self._safe_affine(),
+                    "source_shape": tuple(int(v) for v in self.origin_shape[1:]),
+                    "display_permute": tuple(int(v) for v in self.PERMUTE),
+                }
+            )
+            self.volume_data = self.img0[0].permute(*self.PERMUTE).to(torch.float32)
+            self.cam = torch.zeros_like(self.volume_data)
+            self.img1 = None
+            self.img1_spacing = (
+                self.SPACING[self.PERMUTE[0]],
+                self.SPACING[self.PERMUTE[1]],
+                self.SPACING[self.PERMUTE[2]],
+            )
+            self.model_input_metadata = self._default_display_metadata()
+            self.model_output = None
+            self.patch = []
+            self.layers = {self.cfg["default_layer"]: 1}
+            self.xai_cache_key = ""
 
-            self.img1 = mt.Spacing(mode="bilinear", pixdim=self.SPACING)(self.img0)
+        for message in messages:
+            self._log(message)
+        return messages
+
+    def prepare_model_input(self) -> list[str]:
+        if getattr(self, "img0", None) is None:
+            if getattr(self, "img1", None) is not None:
+                self.model_input_metadata = deepcopy(
+                    getattr(self, "display_metadata", self._default_display_metadata())
+                )
+                return []
+            if getattr(self, "origin_img", None) is None:
+                raise ValueError("缺少原始資料，無法產生模型輸入。")
+            import monai.transforms as mt
+
+            self.img0 = mt.EnsureChannelFirst()(self.origin_img, self.origin_meta)
+            try:
+                self.origin_meta = dict(self.img0.meta)
+            except Exception:
+                self.origin_meta = dict(self.origin_meta or {})
+            self.origin_shape = tuple(self.img0.shape)
+
+        import monai.transforms as mt
+        import torch
+
+        messages: list[str] = []
+        with _timer("資料前處理"):
+            img1 = mt.Spacing(mode="bilinear", pixdim=self.SPACING)(self.img0)
             width, depth = self.SIZE + self.STRIDE, self.SIZE
-            self.img1 = mt.SpatialPad(
+            img1 = mt.SpatialPad(
                 spatial_size=(width, width, depth), mode="constant", value=0
-            )(self.img1)
-            img1_affine = self._extract_affine(self.img1)
+            )(img1)
+            img1_affine = self._extract_affine(img1)
 
-            width, depth = self.SIZE + self.STRIDE, self.SIZE
-            shape = list(self.img1.shape)
+            shape = list(img1.shape)
             slices = [slice(None), slice(None), slice(None), slice(None)]
             pad_offsets = [0, 0, 0]
             if shape[1] < width:
@@ -452,29 +515,28 @@ class GradCamEngine:
                 pad_offsets[2] = x
             if any(current.start is not None for current in slices):
                 image = torch.zeros(shape)
-                image[tuple(slices)] = self.img1
-                self.img1 = image
+                image[tuple(slices)] = img1
+                img1 = image
                 messages.append("info: image is zero padded")
                 img1_affine = self._shift_affine_for_padding(img1_affine, pad_offsets)
 
-            self.img1 = mt.ScaleIntensityRange(
+            img1 = mt.ScaleIntensityRange(
                 a_min=-42, a_max=423, b_min=0, b_max=1, clip=True
-            )(self.img1)
+            )(img1)
+            self.img1 = img1
             self.img1_spacing = (
                 self.SPACING[self.PERMUTE[0]],
                 self.SPACING[self.PERMUTE[1]],
                 self.SPACING[self.PERMUTE[2]],
             )
-            self.display_metadata = self._build_display_metadata(img1_affine)
-            self.volume_data = self.img1[0].permute(*self.PERMUTE).to(torch.float32)
-            self.cam = torch.zeros_like(self.volume_data)
-            self.model_output = None
-            self.patch = []
-            self.layers = {self.cfg["default_layer"]: 1}
-            self.xai_cache_key = ""
-
-        for message in messages:
-            self._log(message)
+            self.model_input_metadata = self._build_display_metadata(img1_affine)
+            self.model_input_metadata.update(
+                {
+                    "source_affine": self._safe_affine(),
+                    "source_shape": tuple(int(v) for v in self.origin_shape[1:]),
+                    "display_permute": tuple(int(v) for v in self.PERMUTE),
+                }
+            )
         return messages
 
     def prepare_xai_inputs(
@@ -485,8 +547,9 @@ class GradCamEngine:
     ) -> None:
         import torch
 
-        if not self.file_name or self.img1 is None:
+        if not self.file_name:
             raise ValueError("尚未載入檔案，無法準備 XAI 輸入。")
+        self.prepare_model_input()
         cam_method = self._resolve_cam_method(method)
         selected_objective_id, objective = self._resolve_objective(
             objective_id, cam_method.family
@@ -573,6 +636,7 @@ class GradCamEngine:
             hook_context = hook_manager if hook_manager is not None else _NullContext()
             with hook_context:
                 for x, y in tiles:
+                    self._wait_for_perturbation_pause(cam_method, method_params or {})
                     model.zero_grad(set_to_none=True)
                     if img2.grad is not None:
                         img2.grad = None
@@ -593,11 +657,26 @@ class GradCamEngine:
                     )
                     tile_method_params = dict(method_params or {})
                     tile_method_params["_score_logger"] = self._log
-                    tile_method_params["_score_print"] = True
                     tile_method_params["_tile_index"] = len(self.patch)
                     tile_method_params["_progress_total"] = progress_total
                     tile_method_params["_progress_offset"] = (
                         len(self.patch) * tile_progress_units
+                    )
+                    tile_method_params["_preview_spacing"] = getattr(
+                        self, "img1_spacing", getattr(self, "SPACING", (1.0, 1.0, 1.0))
+                    )
+                    tile_method_params["_preview_metadata"] = {
+                        **self.model_input_metadata,
+                        "volume_id": "perturb-preview",
+                    }
+                    tile_method_params["_preview_full_input"] = img2[0].detach()
+                    tile_method_params["_preview_tile_origin"] = (
+                        int(x0 + x),
+                        int(y0 + y),
+                        int(z0),
+                    )
+                    tile_method_params["_preview_permute"] = tuple(
+                        getattr(self, "PERMUTE", (0, 1, 2))
                     )
                     if perturb_reference_volume is not None:
                         tile_method_params["reference_mask"] = perturb_reference_volume[
@@ -606,6 +685,7 @@ class GradCamEngine:
                             z0 : z0 + self.SIZE,
                         ]
 
+                    self._wait_for_perturbation_pause(cam_method, tile_method_params)
                     self.patch.append(
                         cam_method.collect_patch_data(
                             CamPatchContext(
@@ -677,6 +757,15 @@ class GradCamEngine:
         if method == "perturb_rise":
             return max(1, int(method_params.get("num_masks", 64) or 64))
         return 1
+
+    @staticmethod
+    def _wait_for_perturbation_pause(cam_method, method_params: dict[str, object]) -> None:
+        if getattr(cam_method, "family", "") != "perturbation":
+            return
+        controller = method_params.get("_pause_controller")
+        waiter = getattr(controller, "wait_if_paused", None)
+        if callable(waiter):
+            waiter()
 
     @staticmethod
     def _perturb_axis_count(size: int, block_size: int, stride: int) -> int:
@@ -841,7 +930,8 @@ class GradCamEngine:
                 cam = torch.ones_like(cam)
 
             self.cam = cam.permute(*self.PERMUTE)
-            self.volume_data = self.img1[0].permute(*self.PERMUTE)
+            if getattr(self, "volume_data", None) is None:
+                self.volume_data = self.img1[0].permute(*self.PERMUTE)
             self.model_output = torch.argmax(model_out, dim=1)[0].permute(*self.PERMUTE)
 
         if self.save_dir:
@@ -901,6 +991,15 @@ class GradCamEngine:
             if tuple(volume.shape) != tuple(want)
             else volume.to(torch.float32)
         )
+
+    def to_raw_display_space(self, tensor):
+        import torch
+
+        if tensor is None:
+            return tensor
+        data = torch.as_tensor(tensor).to(torch.float32)
+        source_space = self._to_origin_space(data)
+        return source_space.permute(*self.PERMUTE)
 
     def _safe_affine(self):
         import numpy as np

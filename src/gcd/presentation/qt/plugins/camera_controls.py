@@ -40,3 +40,14 @@ class CameraControlsPluginPanel(PluginPanel):
         camera_io_layout.addWidget(self.export_camera_button)
         self.content_layout.addLayout(camera_io_layout)
         self.content_layout.addStretch()
+
+    def set_camera_controls_enabled(self, enabled: bool) -> None:
+        for control in (
+            self.speed_slider,
+            self.start_button,
+            self.stop_button,
+            self.reset_camera_button,
+            self.import_camera_button,
+            self.export_camera_button,
+        ):
+            control.setEnabled(bool(enabled))

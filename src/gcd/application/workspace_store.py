@@ -85,6 +85,12 @@ class WorkspaceDataStore:
         base_shape = tuple(int(v) for v in result["volume_data"].shape)
         base_spacing = tuple(float(v) for v in result["spacing"])
         display_metadata = dict(result["display_metadata"])
+        source_shape = tuple(
+            int(v) for v in display_metadata.get("source_shape", base_shape)
+        )
+        source_affine = display_metadata.get(
+            "source_affine", display_metadata.get("affine")
+        )
         self.datasets[dataset_id] = DatasetRecord(
             id=dataset_id,
             name=dataset_name,
@@ -112,9 +118,9 @@ class WorkspaceDataStore:
             metadata={**display_metadata, "volume_id": base_item_id},
             shape=base_shape,
             source_base_item_id=base_item_id,
-            source_shape=base_shape,
+            source_shape=source_shape,
             source_spacing=base_spacing,
-            source_affine=display_metadata.get("affine"),
+            source_affine=source_affine,
         )
         volume_order = (*self.selection.volume_order, base_item_id)
         active = dict(self.selection.active_dataset_by_plugin)
@@ -154,7 +160,7 @@ class WorkspaceDataStore:
     def current_transfer_state(self) -> tuple[TransferFunction, DataRange]:
         current = self.volumes.get(self.current_transfer_target())
         if current is None:
-            return TransferFunction.heatmap_preset(), DataRange(0.0, 1.0)
+            return TransferFunction.base_preset(), DataRange(0.0, 1.0)
         return current.transfer_function, current.data_range
 
     def update_current_transfer_state(
@@ -257,9 +263,19 @@ class WorkspaceDataStore:
                 ),
                 metadata={**source_volume.metadata, "volume_id": volume_id},
                 source_base_item_id=dataset.base_volume_id,
-                source_shape=dataset.base_shape,
+                source_shape=tuple(
+                    int(v)
+                    for v in source_volume.metadata.get(
+                        "source_shape", dataset.display_metadata.get("source_shape", dataset.base_shape)
+                    )
+                ),
                 source_spacing=dataset.base_spacing,
-                source_affine=dataset.display_metadata.get("affine"),
+                source_affine=source_volume.metadata.get(
+                    "source_affine",
+                    dataset.display_metadata.get(
+                        "source_affine", dataset.display_metadata.get("affine")
+                    ),
+                ),
             )
         else:
             compute_result = None
@@ -279,9 +295,20 @@ class WorkspaceDataStore:
                 metadata={**item_payload["metadata"], "volume_id": volume_id},
                 shape=tuple(int(v) for v in item_payload["shape"]),
                 source_base_item_id=dataset.base_volume_id,
-                source_shape=dataset.base_shape,
+                source_shape=tuple(
+                    int(v)
+                    for v in item_payload["metadata"].get(
+                        "source_shape",
+                        dataset.display_metadata.get("source_shape", dataset.base_shape),
+                    )
+                ),
                 source_spacing=dataset.base_spacing,
-                source_affine=dataset.display_metadata.get("affine"),
+                source_affine=item_payload["metadata"].get(
+                    "source_affine",
+                    dataset.display_metadata.get(
+                        "source_affine", dataset.display_metadata.get("affine")
+                    ),
+                ),
             )
 
         updated_dataset = dataset

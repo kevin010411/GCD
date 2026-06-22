@@ -89,6 +89,21 @@ class TransferFunction:
         return cls(tuple(control_points))
 
     @classmethod
+    def base_preset(cls) -> "TransferFunction":
+        return cls.from_iterable(
+            [
+                ControlPoint(0, "#9D5B2F", 0.0),
+                ControlPoint(0.3, "#D24D21", 0.0),
+                ControlPoint(0.35, "#E19A4A", 0.65),
+                ControlPoint(0.4, "#FFFFFF", 0.7),
+                ControlPoint(0.5, "#FFFFFF", 0.8),
+                ControlPoint(0.65, "#FFFFFF", 0.8),
+                ControlPoint(0.875, "#FFEFF4", 0.0),
+                ControlPoint(1, "#FFEFF4", 0.0),
+            ]
+        )
+
+    @classmethod
     def heatmap_preset(cls) -> "TransferFunction":
         return cls.from_iterable(
             [
