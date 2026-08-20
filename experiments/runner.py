@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .metrics import segmentation_metrics
+from .outputs import export_csv_files, export_faithfulness_plots
 from .xai import (
     compute_attribution,
     insertion_deletion_metrics,
@@ -64,18 +65,32 @@ def _synchronize(device) -> None:
         torch.cuda.synchronize(device)
 
 
+def _nifti_stem(path: Path) -> str:
+    name = path.name
+    return name[:-7] if name.lower().endswith(".nii.gz") else path.stem
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     import nibabel as nib
     import numpy as np
     import torch
     from mmengine import Config
     from monai.inferers import sliding_window_inference
+    from tqdm.auto import tqdm
 
     if not args.input.is_file():
         raise FileNotFoundError(f"Input not found: {args.input}")
     if args.ground_truth is not None and not args.ground_truth.is_file():
         raise FileNotFoundError(f"Ground truth not found: {args.ground_truth}")
+    if args.output.exists() and not args.output.is_dir():
+        raise NotADirectoryError(f"--output must be a result directory: {args.output}")
+    output_dir = args.output
+    output_dir.mkdir(parents=True, exist_ok=True)
+    case_name = _nifti_stem(args.input)
+    prediction_output = output_dir / f"{case_name}_prediction.nii.gz"
 
+    stages = tqdm(total=5, desc="Experiment", unit="stage")
+    stages.set_postfix_str("loading config/model")
     cfg = Config.fromfile(str(args.config))
     if args.cfg_options:
         cfg.merge_from_dict(args.cfg_options)
@@ -102,9 +117,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"unexpected={incompatible.unexpected_keys}"
         )
     model.eval()
+    stages.update()
 
+    stages.set_postfix_str("preprocessing volume")
     image = _load_image(args.input, cfg).to(device=device, dtype=torch.float32)
     batch = image.unsqueeze(0)
+    stages.update()
 
     def predictor(tile):
         return _extract_logits(model(tile))
@@ -119,24 +137,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             mode=str(cfg.inference.blend_mode),
         )
 
+    stages.set_postfix_str("inference benchmark")
     with torch.inference_mode():
-        for _ in range(int(cfg.inference.warmup_runs)):
+        for _ in tqdm(range(int(cfg.inference.warmup_runs)), desc="Warmup", unit="run", leave=False):
             infer()
         _synchronize(device)
         durations = []
         logits = None
-        for _ in range(int(cfg.inference.benchmark_runs)):
+        for _ in tqdm(range(int(cfg.inference.benchmark_runs)), desc="Benchmark", unit="run", leave=False):
             started = time.perf_counter()
             logits = infer()
             _synchronize(device)
             durations.append(time.perf_counter() - started)
+    stages.update()
     if logits is None:
         raise ValueError("inference.benchmark_runs must be at least 1")
 
     prediction = torch.argmax(logits, dim=1)[0].cpu()
     affine = np.asarray(getattr(image, "affine", np.eye(4)), dtype=np.float64)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    nib.save(nib.Nifti1Image(prediction.numpy().astype(np.int16), affine), args.output)
+    nib.save(nib.Nifti1Image(prediction.numpy().astype(np.int16), affine), prediction_output)
 
     parameters = sum(parameter.numel() for parameter in model.parameters())
     parameter_bytes = sum(
@@ -149,7 +168,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     }
     metrics: dict[str, Any] = {
         "input": str(args.input.resolve()),
-        "output": str(args.output.resolve()),
+        "output_directory": str(output_dir.resolve()),
+        "output": str(prediction_output.resolve()),
         "config": str(args.config.resolve()),
         "checkpoint": str(checkpoint.resolve()),
         "device": str(device),
@@ -165,7 +185,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "parameter_count": parameters,
             "parameter_bytes": parameter_bytes,
             "checkpoint_bytes": checkpoint.stat().st_size,
-            "prediction_bytes": args.output.stat().st_size,
+            "prediction_bytes": prediction_output.stat().st_size,
         },
         "environment": {
             "python": platform.python_version(),
@@ -181,6 +201,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     if bool(cfg.xai.enabled):
+        stages.set_postfix_str("XAI and faithfulness")
         target_class = target_class_from_prediction(prediction, cfg.xai.target_class)
         if not 0 <= target_class < class_count:
             raise ValueError(
@@ -188,14 +209,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
         target_mask = (prediction == target_class).to(device)
         xai_results: dict[str, Any] = {}
-        for method in cfg.xai.methods:
+        for method in tqdm(cfg.xai.methods, desc="XAI methods", unit="method", leave=False):
             method = str(method)
             attribution = compute_attribution(
-                batch, predictor, method, target_class, target_mask, cfg
+                batch, model, predictor, method, target_class, target_mask, cfg
             )
-            xai_output = args.output.with_name(
-                f"{args.output.name}.{method}.xai.nii.gz"
-            )
+            xai_output = output_dir / f"{case_name}_{method}_xai.nii.gz"
             nib.save(
                 nib.Nifti1Image(attribution.cpu().numpy().astype(np.float32), affine),
                 xai_output,
@@ -211,15 +230,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 **faithfulness,
             }
         metrics["xai"] = xai_results
+    stages.update()
 
-    metrics_output = args.metrics_output or args.output.with_suffix(
-        args.output.suffix + ".metrics.json"
-    )
-    metrics_output.parent.mkdir(parents=True, exist_ok=True)
+    stages.set_postfix_str("writing JSON/CSV/plots")
+    metrics_output = output_dir / (args.metrics_output.name if args.metrics_output else "metrics.json")
     metrics_output.write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    csv_outputs = export_csv_files(metrics, output_dir)
+    plot_outputs = export_faithfulness_plots(metrics, output_dir)
+    stages.update()
+    stages.set_postfix_str("complete")
+    stages.close()
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
-    print(f"Prediction: {args.output}")
+    print(f"Result directory: {output_dir}")
+    print(f"Prediction: {prediction_output}")
     print(f"Metrics: {metrics_output}")
+    print(f"CSV files: {len(csv_outputs)}")
+    print(f"Plots: {len(plot_outputs)}")
     return metrics

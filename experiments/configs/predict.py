@@ -21,16 +21,21 @@ metrics = dict(
     include_background=False,
     empty_score=1.0,
     # Insertion/deletion evaluate 0%, 10%, ..., 100% of ranked voxels.
-    perturbation_steps=10,
+    perturbation_steps=20,
     perturbation_baseline=0.0,
+    insertion_enabled=True,
+    deletion_enabled=True,
 )
 
 xai = dict(
     enabled=True,
-    # Supported: saliency_map, input_x_gradient, smoothgrad.
-    methods=("saliency_map",),
+    # Method IDs come from the same XaiMethodRegistry used by the GUI.
+    # Examples: gradcam, xrescam, saliency_map, perturb_occlusion,
+    # perturb_lime, perturb_rise.
+    methods=("xrescam",),
     # "auto" selects the largest predicted foreground class.
     target_class="auto",
-    smoothgrad_samples=8,
-    smoothgrad_noise_std=0.05,
+    # Empty uses the model config's default_layer; only CAM methods need it.
+    layer="",
+    method_params=dict(),
 )

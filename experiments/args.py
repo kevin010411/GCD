@@ -31,14 +31,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("input", type=Path, help="Input .nii or .nii.gz volume")
     parser.add_argument("--config", type=Path, required=True, help="MMEngine config")
-    parser.add_argument("--output", type=Path, required=True, help="Prediction NIfTI")
+    parser.add_argument(
+        "--output", type=Path, required=True,
+        help="Result directory containing NIfTI, JSON, CSV, and plots",
+    )
     parser.add_argument(
         "--ground-truth", type=Path, help="Optional label NIfTI for Dice/IoU"
     )
     parser.add_argument(
         "--metrics-output",
         type=Path,
-        help="Metrics JSON (default: <output>.metrics.json)",
+        help="Metrics JSON filename inside the result directory (default: metrics.json)",
     )
     parser.add_argument(
         "--cfg-options",

@@ -56,6 +56,22 @@ class _FakeProperty:
 
 
 class StandardMultiVolumeTransferTests(unittest.TestCase):
+    def test_visible_volumes_never_exceed_mapper_input_limit(self) -> None:
+        renderer = object.__new__(StandardMultiVolumeRenderer)
+        renderer.multi_mapper = type(
+            "Mapper", (), {"GetNumberOfInputPorts": lambda self: 10}
+        )()
+        renderer.volumes = [
+            {"visible": True, "volume_id": f"volume-{index}"}
+            for index in range(12)
+        ]
+
+        visible = renderer._visible_multi_volume_items()
+
+        self.assertEqual(len(visible), 10)
+        self.assertEqual(visible[0][1]["volume_id"], "volume-0")
+        self.assertEqual(visible[-1][1]["volume_id"], "volume-11")
+
     def _renderer_with_one_volume(self):
         renderer = object.__new__(StandardMultiVolumeRenderer)
         renderer.volumes = [

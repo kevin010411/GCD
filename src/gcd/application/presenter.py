@@ -877,6 +877,7 @@ class MainWindowPresenter:
                     "spacing": dataset.base_spacing,
                     "metadata": dict(dataset.display_metadata),
                     "shape": tuple(int(v) for v in data.shape),
+                    "visible": False,
                     "plugin_metadata": {"organ_id": record.id},
                 },
                 emit=False,
@@ -1025,7 +1026,6 @@ class MainWindowPresenter:
                 self.view.set_organ_status("Organ Occlusion result is ready.")
                 self._organ_result_stale = False
                 self._render_current_items(camera_policy="preserve")
-                self.view.workspace.apply_layout("compare")
             finally:
                 self.view.set_organ_running(False)
                 self._set_xai_running(False)

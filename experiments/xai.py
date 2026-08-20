@@ -36,47 +36,92 @@ def _objective(logits, target_class: int, mask):
 
 def compute_attribution(
     batch,
+    model,
     predictor: Callable[[Any], Any],
     method: str,
     target_class: int,
     target_mask,
     cfg: Any,
 ):
-    """Compute an input-gradient 3-D XAI map."""
+    """Compute a 3-D map with the same XAI registry/methods used by the GUI."""
     import torch
-
-    method = str(method).lower()
-    supported = {"saliency_map", "input_x_gradient", "smoothgrad"}
-    if method not in supported:
-        raise ValueError(f"Unsupported experiments XAI method {method!r}; choose {sorted(supported)}")
-
-    samples = int(cfg.xai.smoothgrad_samples) if method == "smoothgrad" else 1
-    noise_std = float(cfg.xai.smoothgrad_noise_std) if method == "smoothgrad" else 0.0
     import torch.nn.functional as F
+    from src.gcd.infrastructure.xai.engine.core_engine import GradCamEngine
+    from src.gcd.infrastructure.xai.methods import CamPatchContext, XaiLayerSelection
+    from src.gcd.infrastructure.xai.methods.registry import XaiMethodRegistry
+    from src.gcd.infrastructure.xai.runtime.layer_hooks import XaiLayerHookManager
 
+    method_id = str(method).lower()
+    objective = GradCamEngine._predicted_target_mask_objective
+    registry = XaiMethodRegistry.default(objective)
+    available = registry.methods_by_id
+    if method_id not in available:
+        raise ValueError(
+            f"Unknown GUI XAI method {method_id!r}; choose {sorted(available)}"
+        )
+    xai_method = registry.resolve(method_id)
     volume_shape = tuple(batch.shape[2:])
     roi_size = tuple(int(value) for value in cfg.inference.roi_size)
-    attribution_sum = torch.zeros_like(batch[0, 0], dtype=torch.float32)
-
-    for _ in range(samples):
-        sample = F.interpolate(batch.detach(), size=roi_size, mode="trilinear", align_corners=False)
-        if noise_std:
-            sample.add_(torch.randn_like(sample) * noise_std)
+    sample = F.interpolate(
+        batch.detach(), size=roi_size, mode="trilinear", align_corners=False
+    )
+    if xai_method.family == "gradient":
         sample.requires_grad_(True)
+    method_params = dict(cfg.xai.get("method_params", {}).get(method_id, {}))
+    hook_manager = XaiLayerHookManager(model) if xai_method.uses_layer_controls else None
+
+    model.zero_grad(set_to_none=True)
+    if hook_manager is None:
         logits = predictor(sample)
-        local_mask = F.interpolate(
-            target_mask[None, None].float(), size=roi_size, mode="nearest"
-        )[0, 0].bool()
-        score = _objective(logits, target_class, local_mask)
-        gradient = torch.autograd.grad(score, sample)[0]
-        if method == "input_x_gradient":
-            attribution = (gradient * sample).abs().amax(dim=1, keepdim=True)
-        else:
-            attribution = gradient.abs().amax(dim=1, keepdim=True)
-        attribution_sum += F.interpolate(
-            attribution, size=volume_shape, mode="trilinear", align_corners=False
-        )[0, 0].detach()
-    return normalize_attribution(attribution_sum / samples)
+        layers_by_name = {}
+    else:
+        with hook_manager:
+            logits = predictor(sample)
+            layers_by_name = hook_manager.layers_by_name()
+            payload = xai_method.collect_patch_data(
+                CamPatchContext(
+                    input_tensor=sample,
+                    logits=logits,
+                    layers_by_name=layers_by_name,
+                    target_class=target_class,
+                    objective=objective,
+                    model=model,
+                    method_params=method_params,
+                    device=batch.device,
+                )
+            )
+    if hook_manager is None:
+        payload = xai_method.collect_patch_data(
+            CamPatchContext(
+                input_tensor=sample,
+                logits=logits,
+                layers_by_name=layers_by_name,
+                target_class=target_class,
+                objective=objective,
+                model=model,
+                method_params=method_params,
+                device=batch.device,
+            )
+        )
+
+    if xai_method.uses_layer_controls:
+        requested_layer = str(cfg.xai.get("layer", "") or cfg.get("default_layer", ""))
+        layer = requested_layer if requested_layer in layers_by_name else next(iter(layers_by_name))
+        channel_count = int(layers_by_name[layer].shape[1])
+    else:
+        layer = "input"
+        channel_count = 1
+    attribution = xai_method.build_tile_cam(
+        payload,
+        XaiLayerSelection(layer, 0, channel_count, roi_size),
+        method_params=method_params,
+    )
+    if xai_method.family == "gradient":
+        attribution = torch.relu(attribution)
+    attribution = F.interpolate(
+        attribution, size=volume_shape, mode="trilinear", align_corners=False
+    )[0, 0]
+    return normalize_attribution(attribution.detach())
 
 
 def _fractions(steps: int) -> list[float]:
@@ -101,6 +146,8 @@ def insertion_deletion_metrics(
     target_class: int,
     target_mask,
     cfg: Any,
+    *,
+    progress: bool = True,
 ) -> dict[str, Any]:
     """Evaluate attribution faithfulness by inserting/deleting top-ranked voxels."""
     import torch
@@ -110,24 +157,37 @@ def insertion_deletion_metrics(
     voxel_count = flat_order.numel()
     original = batch.detach()
     baseline = torch.full_like(original, float(cfg.metrics.perturbation_baseline))
+    insertion_enabled = bool(getattr(cfg.metrics, "insertion_enabled", True))
+    deletion_enabled = bool(getattr(cfg.metrics, "deletion_enabled", True))
     insertion_scores: list[float] = []
     deletion_scores: list[float] = []
 
     with torch.inference_mode():
-        for fraction in fractions:
+        from tqdm.auto import tqdm
+
+        for fraction in tqdm(
+            fractions,
+            desc="Insertion/deletion",
+            unit="step",
+            leave=False,
+            disable=not progress,
+        ):
             count = round(fraction * voxel_count)
             selected = flat_order[:count]
-            insertion = baseline.clone()
-            deletion = original.clone()
-            insertion.flatten()[selected] = original.flatten()[selected]
-            deletion.flatten()[selected] = baseline.flatten()[selected]
-            insertion_scores.append(float(_objective(infer(insertion), target_class, target_mask)))
-            deletion_scores.append(float(_objective(infer(deletion), target_class, target_mask)))
+            if insertion_enabled:
+                insertion = baseline.clone()
+                insertion.flatten()[selected] = original.flatten()[selected]
+                insertion_scores.append(float(_objective(infer(insertion), target_class, target_mask)))
+            if deletion_enabled:
+                deletion = original.clone()
+                deletion.flatten()[selected] = baseline.flatten()[selected]
+                deletion_scores.append(float(_objective(infer(deletion), target_class, target_mask)))
 
-    return {
+    result = {
         "fractions": fractions,
-        "insertion_scores": insertion_scores,
-        "deletion_scores": deletion_scores,
-        "insertion_auc": _auc(fractions, insertion_scores),
-        "deletion_auc": _auc(fractions, deletion_scores),
     }
+    if insertion_enabled:
+        result.update(insertion_scores=insertion_scores, insertion_auc=_auc(fractions, insertion_scores))
+    if deletion_enabled:
+        result.update(deletion_scores=deletion_scores, deletion_auc=_auc(fractions, deletion_scores))
+    return result

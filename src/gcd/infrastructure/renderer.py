@@ -300,7 +300,7 @@ class VtkVolumeRenderer:
             "LeftButtonPressEvent", self._on_left_button_press, 1.0
         )
         self.camera_interactor_style.AddObserver(
-            "LeftButtonReleaseEvent", self._on_organ_pick_release
+            "EndInteractionEvent", self._on_organ_interaction_finished
         )
         self.annotation_interactor_style.AddObserver(
             "MouseMoveEvent", self._on_mouse_move, 1.0
@@ -918,7 +918,11 @@ class VtkVolumeRenderer:
                 return volume_index, position
         return None
 
-    def _on_organ_pick_release(self, _obj, _event) -> None:
+    def _on_organ_interaction_finished(self, _obj, _event) -> None:
+        # Observing LeftButtonReleaseEvent directly on a VTK interactor style
+        # prevents the style from completing its own button-up handling on some
+        # VTK/Qt combinations. EndInteractionEvent is emitted after that native
+        # cleanup, so camera rotation stops as soon as the button is released.
         if not callable(self.organ_pick_handler):
             return
         x, y = self.interactor.GetEventPosition()
@@ -1121,6 +1125,10 @@ class VtkVolumeRenderer:
 
 
 class StandardMultiVolumeRenderer(VtkVolumeRenderer):
+    # vtkOpenGLGPUVolumeRayCastMapper currently exposes ten input ports.
+    # Keep a fallback for test doubles and VTK builds that do not report it.
+    DEFAULT_MAX_MULTI_VOLUME_INPUTS = 10
+
     def __init__(self, vtk_widget) -> None:
         super().__init__(vtk_widget)
         self._reset_multi_volume_backend()
@@ -1212,16 +1220,9 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         oset = opacity_settings if opacity_settings is not None else []
         self._apply_transfer_functions_to_property(prop, cset, oset)
 
-        port = len(self.volumes)
-        self.multi_mapper.SetInputDataObject(port, image_data)
-        self.multi_volume.SetVolume(child_volume, port)
         child_volume.Modified()
         prop.Modified()
-        self.multi_mapper.Modified()
-        self.multi_volume.Modified()
-        if not self.multi_volume_added:
-            self.renderer.AddVolume(self.multi_volume)
-            self.multi_volume_added = True
+        volume_index = len(self.volumes)
 
         self.volumes.append(
             {
@@ -1235,9 +1236,9 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
                     vtk_origin, vtk_spacing, vtk_direction
                 ),
                 "inverse_affine": None,
-                "volume_id": str(metadata.get("volume_id", port)),
+                "volume_id": str(metadata.get("volume_id", volume_index)),
                 "visible": bool(visible),
-                "render_port": port,
+                "render_port": None,
             }
         )
         self.volumes[-1]["inverse_affine"] = self._safe_inverse_affine(
@@ -1248,10 +1249,10 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         self.volume_shape = tuple(int(v) for v in np_array.shape)
         self.renderer.ResetCameraClippingRange()
         self.store_initial_camera()
-        self.multi_volume.Modified()
         if render:
+            self._rebuild_visible_multi_volume()
             self.render()
-        return port
+        return volume_index
 
     def update_volume_data(
         self,
@@ -1306,11 +1307,30 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
             self.render()
 
     def _visible_multi_volume_items(self):
-        return [
+        visible_items = [
             (index, volume)
             for index, volume in enumerate(self.volumes)
             if bool(volume.get("visible", True))
         ]
+        maximum = self._maximum_multi_volume_inputs()
+        if len(visible_items) <= maximum:
+            return visible_items
+        if maximum <= 1:
+            return visible_items[:1]
+        # Preserve the base CT (normally the first item) and favor the newest
+        # outputs so Run results remain visible when old organ layers overflow.
+        return [visible_items[0], *visible_items[-(maximum - 1) :]]
+
+    def _maximum_multi_volume_inputs(self) -> int:
+        getter = getattr(self.multi_mapper, "GetNumberOfInputPorts", None)
+        if callable(getter):
+            try:
+                reported = int(getter())
+                if reported > 0:
+                    return reported
+            except (TypeError, ValueError):
+                pass
+        return self.DEFAULT_MAX_MULTI_VOLUME_INPUTS
 
     def _add_single_volume_dummy_input(self, source_volume, port: int) -> None:
         if self.multi_volume_dummy_port is not None:

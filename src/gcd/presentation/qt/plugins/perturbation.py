@@ -75,7 +75,7 @@ class OrganOcclusionControls(QWidget):
         self._records = [dict(record) for record in records]
         for record in self._records:
             record.setdefault("enabled", False)
-            record.setdefault("visible", True)
+            record.setdefault("visible", False)
             record.setdefault("mode", "local_mean")
             record.setdefault("fill_hu", 0.0)
         self.rerun_button.setEnabled(bool(self._records))

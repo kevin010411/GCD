@@ -322,7 +322,7 @@ class WorkflowService:
                 mode="nearest",
             )[0, 0]
         permute = tuple(int(v) for v in getattr(self.engine, "PERMUTE", (0, 1, 2)))
-        return restored.permute(*permute).round().to("int16")
+        return restored.permute(*permute).round().to(dtype=torch.int16)
 
     @staticmethod
     def _source_spacing(dataset_input: DatasetInput) -> tuple[float, float, float]:
