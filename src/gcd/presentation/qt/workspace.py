@@ -868,6 +868,7 @@ class SliceViewWidget(QWidget):
 class ViewerWorkspace(QWidget):
     layout_changed = pyqtSignal(str, str)
     annotations_changed = pyqtSignal()
+    organ_volume_selected = pyqtSignal(str)
     volume_view_title = "3d view"
 
     def __init__(
@@ -953,6 +954,7 @@ class ViewerWorkspace(QWidget):
         self.vtk_widget.Initialize()
         self.vtk_widget.Start()
         self._renderer = self._create_renderer(self.vtk_widget)
+        self._renderer.set_organ_pick_handler(self.organ_volume_selected.emit)
         if self.enable_annotations:
             self._renderer.set_annotation_event_handler(
                 self._handle_renderer_annotation_event
@@ -1820,6 +1822,7 @@ class RoiWorkspace(ViewerWorkspace):
 class WorkspaceHost(QWidget):
     layout_changed = pyqtSignal(str, str)
     annotations_changed = pyqtSignal()
+    organ_volume_selected = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1848,6 +1851,10 @@ class WorkspaceHost(QWidget):
         self.standard_workspace.layout_changed.connect(self.layout_changed.emit)
         self.roi_workspace.layout_changed.connect(self.layout_changed.emit)
         self.roi_workspace.annotations_changed.connect(self.annotations_changed.emit)
+        self.standard_workspace.organ_volume_selected.connect(
+            self.organ_volume_selected.emit
+        )
+        self.roi_workspace.organ_volume_selected.connect(self.organ_volume_selected.emit)
 
         self.stack.setCurrentWidget(self.standard_workspace)
         QTimer.singleShot(0, self.standard_workspace.ensure_3d_viewer)

@@ -116,6 +116,33 @@ class TransferFunction:
             ]
         )
 
+    @classmethod
+    def label_preset(cls) -> "TransferFunction":
+        return cls.from_iterable(
+            [
+                ControlPoint(0.0, "#000000", 0.0),
+                ControlPoint(0.01, "#22C55E", 0.7),
+                ControlPoint(0.34, "#38BDF8", 0.75),
+                ControlPoint(0.67, "#F59E0B", 0.8),
+                ControlPoint(1.0, "#E879F9", 0.85),
+            ]
+        )
+
+    @classmethod
+    def difference_preset(cls) -> "TransferFunction":
+        # Values are 0=unchanged background, 1=shared target, 2=lost, 3=added.
+        return cls.from_iterable(
+            [
+                ControlPoint(0.0, "#000000", 0.0),
+                ControlPoint(0.32, "#22C55E", 0.0),
+                ControlPoint(1.0 / 3.0, "#22C55E", 0.75),
+                ControlPoint(0.65, "#EF4444", 0.75),
+                ControlPoint(2.0 / 3.0, "#EF4444", 0.85),
+                ControlPoint(0.98, "#3B82F6", 0.85),
+                ControlPoint(1.0, "#3B82F6", 0.9),
+            ]
+        )
+
     def with_points(self, control_points: Iterable[ControlPoint]) -> "TransferFunction":
         return TransferFunction.from_iterable(control_points)
 

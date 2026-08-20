@@ -12,6 +12,7 @@ from .perturb_occlusion import (
     PerturbationRiseMethod,
 )
 from .saliency_map import SaliencyMapMethod
+from .organ_occlusion import OrganOcclusionMethod
 from .xrescam import XResCamMethod
 
 if TYPE_CHECKING:
@@ -36,6 +37,7 @@ class XaiMethodRegistry:
                 PerturbationOcclusionMethod(),
                 PerturbationLimeMethod(),
                 PerturbationRiseMethod(),
+                OrganOcclusionMethod(),
             )
         )
 

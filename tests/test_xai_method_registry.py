@@ -18,7 +18,7 @@ class XaiMethodRegistryTests(unittest.TestCase):
         )
         self.assertEqual(
             perturbation_ids,
-            ["perturb_occlusion", "perturb_lime", "perturb_rise"],
+            ["perturb_occlusion", "perturb_lime", "perturb_rise", "organ_occlusion"],
         )
 
     def test_registered_methods_follow_xai_method_interface(self) -> None:
@@ -43,6 +43,11 @@ class XaiMethodRegistryTests(unittest.TestCase):
             [item["id"] for item in by_id["perturb_occlusion"]["parameters"]],
             ["block_size", "stride", "baseline", "batch_size"],
         )
+        self.assertEqual(by_id["organ_occlusion"]["execution_scope"], "dataset")
+        self.assertEqual(
+            by_id["organ_occlusion"]["result_kind"], "intervention_comparison"
+        )
+        self.assertEqual(by_id["organ_occlusion"]["custom_ui"], "organ_occlusion")
         self.assertEqual(
             [item["id"] for item in by_id["perturb_lime"]["parameters"]],
             [

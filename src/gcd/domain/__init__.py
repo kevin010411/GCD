@@ -1,4 +1,10 @@
 from .transfer_function import ControlPoint, DataRange, TransferFunction
+from .organ_occlusion import (
+    OrganIntervention,
+    OrganMaskRecord,
+    OrganOcclusionResult,
+    OrganOcclusionSpec,
+)
 from .workspace_data import (
     DatasetAdded,
     DatasetDeleted,
@@ -21,6 +27,10 @@ from .workspace_data import (
 __all__ = [
     "ControlPoint",
     "DataRange",
+    "OrganIntervention",
+    "OrganMaskRecord",
+    "OrganOcclusionResult",
+    "OrganOcclusionSpec",
     "DatasetAdded",
     "DatasetDeleted",
     "DatasetInput",

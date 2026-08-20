@@ -5,7 +5,15 @@ from inspect import signature
 from pathlib import Path
 from uuid import uuid4
 
-from ..domain import DataRange, TransferFunction
+import numpy as np
+
+from ..domain import (
+    ControlPoint,
+    DataRange,
+    OrganIntervention,
+    OrganOcclusionSpec,
+    TransferFunction,
+)
 from ..domain.workspace_data import WorkspaceEvent, XaiComputeRequest
 from .perturbation_preview import (
     PerturbationPauseController,
@@ -48,6 +56,10 @@ class MainWindowPresenter:
         self._perturb_pause_controller: PerturbationPauseController | None = None
         self._pre_perturb_preview_rotation_running = False
         self._last_scene_signature: tuple[tuple[str, tuple[int, ...]], ...] = ()
+        self._organ_masks_by_dataset: dict[str, list[object]] = {}
+        self._organ_request_id = ""
+        self._organ_preview_request_id = ""
+        self._organ_result_stale = False
         self.data_store.subscribe(self._on_store_event)
         self.perturbation_preview = PerturbationPreviewAdapter(
             view=self.view,
@@ -125,6 +137,16 @@ class MainWindowPresenter:
             self.view.perturbation_preview_pause_button.toggled.connect(
                 self.on_perturbation_preview_pause_toggled
             )
+        if hasattr(self.view, "organ_occlusion_controls"):
+            controls = self.view.organ_occlusion_controls
+            controls.total_requested.connect(self.on_total_segmentator_requested)
+            controls.interventions_changed.connect(self.on_organ_interventions_changed)
+            controls.organ_visibility_changed.connect(self.on_organ_visibility_changed)
+            controls.organ_selected.connect(self.on_organ_selected)
+            if hasattr(self.view.workspace, "organ_volume_selected"):
+                self.view.workspace.organ_volume_selected.connect(
+                    self.on_organ_volume_picked
+                )
         self.view.save_screenshot_button.clicked.connect(
             self.on_save_screenshot_requested
         )
@@ -643,6 +665,9 @@ class MainWindowPresenter:
         if dataset is None:
             return
         method = self._selected_xai_method(family_id)
+        if family_id == "perturbation" and method == "organ_occlusion":
+            self._run_organ_occlusion(dataset_id)
+            return
         objective_id = self._selected_xai_objective(family_id)
         model_name = self._selected_model_name()
         uses_layer_controls = self._selected_xai_method_uses_layer_controls(family_id)
@@ -781,6 +806,247 @@ class MainWindowPresenter:
 
     def on_perturbation_run_requested(self) -> None:
         self.on_xai_run_requested("perturbation")
+
+    def on_total_segmentator_requested(self, force: bool = False) -> None:
+        dataset_id = self._selected_xai_dataset("perturbation")
+        dataset = self.datasets.get(dataset_id)
+        if dataset is None:
+            self.view.set_organ_status("Load and select a CT dataset first.", error=True)
+            return
+        request_id = uuid4().hex
+        self._organ_request_id = request_id
+        self.view.set_organ_running(True)
+        self.view.set_organ_status("Running TotalSegmentator in the background…")
+
+        def _compute():
+            return self.workflow.segment_organs(dataset.file_name, force=bool(force))
+
+        def _success(records) -> None:
+            if request_id != self._organ_request_id:
+                return
+            self._organ_masks_by_dataset[dataset_id] = list(records)
+            self.view.set_organ_masks(
+                [
+                    {
+                        "id": record.id,
+                        "display_name": record.display_name,
+                        "source_labels": record.source_labels,
+                        "color": record.color,
+                        "group": record.group,
+                    }
+                    for record in records
+                ]
+            )
+            self._publish_organ_mask_volumes(dataset_id, records)
+            self.view.set_organ_running(False)
+
+        def _error(exc: Exception) -> None:
+            if request_id != self._organ_request_id:
+                return
+            self.view.set_organ_running(False)
+            self.view.set_organ_status(str(exc), error=True)
+            self._on_background_error(exc)
+
+        self.task_runner.submit(_compute, _success, _error)
+
+    def _publish_organ_mask_volumes(self, dataset_id: str, records) -> None:
+        import torch
+
+        dataset = self.datasets[dataset_id]
+        permute = tuple(int(v) for v in getattr(self.workflow.engine, "PERMUTE", (0, 1, 2)))
+        published_volume_ids: list[str] = []
+        for record in records:
+            if record.group != "curated":
+                continue
+            mask_array = np.asarray(record.mask, dtype=np.float32)
+            data = torch.from_numpy(mask_array).permute(*permute)
+            transfer = TransferFunction.from_iterable(
+                [ControlPoint(0.0, record.color, 0.0), ControlPoint(1.0, record.color, 0.72)]
+            )
+            volume_id = f"{dataset_id}:organ:{record.id}"
+            self.data_store.upsert_named_volume(
+                dataset_id,
+                volume_id,
+                {
+                    "name": record.display_name,
+                    "source": "organ_mask",
+                    "method_id": f"organ_mask_{record.id}",
+                    "data": data,
+                    "data_range": DataRange(0.0, 1.0),
+                    "transfer_function": transfer,
+                    "spacing": dataset.base_spacing,
+                    "metadata": dict(dataset.display_metadata),
+                    "shape": tuple(int(v) for v in data.shape),
+                    "plugin_metadata": {"organ_id": record.id},
+                },
+                emit=False,
+            )
+            published_volume_ids.append(volume_id)
+        # A TotalSegmentator result can contain dozens of organs.  Publish the
+        # whole group at once so VTK rebuilds and renders the scene only once.
+        self.data_store.notify_volumes_upserted(dataset_id, published_volume_ids)
+
+    def _selected_organ_spec(self) -> OrganOcclusionSpec:
+        interventions = tuple(
+            OrganIntervention(
+                organ_id=str(item["organ_id"]),
+                enabled=bool(item.get("enabled", False)),
+                visible=bool(item.get("visible", True)),
+                mode=str(item.get("mode", "local_mean")),
+                fill_hu=float(item.get("fill_hu", 0.0)),
+            )
+            for item in self.view.selected_organ_interventions()
+        )
+        return OrganOcclusionSpec(interventions=interventions)
+
+    def on_organ_interventions_changed(self) -> None:
+        self._organ_result_stale = True
+        dataset_id = self._selected_xai_dataset("perturbation")
+        dataset = self.datasets.get(dataset_id)
+        records = self._organ_masks_by_dataset.get(dataset_id, [])
+        if dataset is None or not records:
+            return
+        spec = self._selected_organ_spec()
+        if not spec.enabled():
+            self.view.set_organ_status("Select at least one organ to preview an intervention.")
+            return
+        request_id = uuid4().hex
+        self._organ_preview_request_id = request_id
+        self.view.set_organ_status("Updating organ occlusion preview…")
+
+        def _compute():
+            return self.workflow.preview_organ_occlusion(
+                dataset.input_state, records, spec
+            )
+
+        def _success(payload) -> None:
+            if request_id != self._organ_preview_request_id:
+                return
+            occluded, modified = payload
+            metadata = dict(dataset.display_metadata)
+            for suffix, name, data, transfer in (
+                ("preview_ct", "Organ occlusion preview", occluded, TransferFunction.base_preset()),
+                ("preview_mask", "Modified region", modified, TransferFunction.from_iterable([
+                    ControlPoint(0.0, "#FF00AA", 0.0), ControlPoint(1.0, "#FF00AA", 0.78)
+                ])),
+            ):
+                self.data_store.upsert_named_volume(
+                    dataset_id,
+                    f"{dataset_id}:organ:{suffix}",
+                    {
+                        "name": name,
+                        "source": "organ_preview",
+                        "method_id": f"organ_{suffix}",
+                        "data": data,
+                        "data_range": DataRange.from_data([data], method="minmax"),
+                        "transfer_function": transfer,
+                        "spacing": dataset.base_spacing,
+                        "metadata": metadata,
+                        "shape": tuple(int(v) for v in data.shape),
+                    },
+                )
+            self.view.set_organ_status("Preview updated. Press Run to evaluate the model.")
+            self._render_current_items(camera_policy="preserve")
+
+        def _error(exc: Exception) -> None:
+            if request_id != self._organ_preview_request_id:
+                return
+            self.view.set_organ_status(str(exc), error=True)
+
+        self.task_runner.submit(_compute, _success, _error)
+
+    def on_organ_visibility_changed(self, organ_id: str, visible: bool) -> None:
+        dataset_id = self._selected_xai_dataset("perturbation")
+        self.data_store.set_volume_visibility(
+            f"{dataset_id}:organ:{organ_id}", bool(visible)
+        )
+
+    def on_organ_selected(self, organ_id: str) -> None:
+        dataset_id = self._selected_xai_dataset("perturbation")
+        volume_id = f"{dataset_id}:organ:{organ_id}"
+        if volume_id in self.data_store.volumes:
+            self.data_store.set_selected_transfer_volume(volume_id)
+
+    def on_organ_volume_picked(self, volume_id: str) -> None:
+        marker = ":organ:"
+        if marker not in str(volume_id):
+            return
+        organ_id = str(volume_id).split(marker, 1)[1]
+        if organ_id.startswith("preview_"):
+            return
+        self.view.organ_occlusion_controls.select_organ(organ_id)
+
+    def _run_organ_occlusion(self, dataset_id: str) -> None:
+        if self._xai_is_running:
+            self.view.set_overlay_status_message("XAI is already running.")
+            return
+        dataset = self.datasets.get(dataset_id)
+        records = self._organ_masks_by_dataset.get(dataset_id, [])
+        if dataset is None or not records:
+            self.view.set_organ_status("Run TotalSegmentator before Organ Occlusion.", error=True)
+            return
+        spec = self._selected_organ_spec()
+        if not spec.enabled():
+            self.view.set_organ_status("Select at least one organ before running.", error=True)
+            return
+        request_id = uuid4().hex
+        self._organ_request_id = request_id
+        target_class = self._selected_xai_class("perturbation")
+        answer_id = self._selected_perturbation_answer_data()
+        answer_volume = self.data_store.volumes.get(answer_id)
+        ground_truth = answer_volume.data if answer_volume is not None else None
+        self._set_xai_running(True, "perturbation")
+        self.view.set_organ_running(True)
+        self.view.set_organ_status("Running original and organ-occluded model inference…")
+
+        def _compute(progress_callback=None):
+            return self.workflow.compute_organ_occlusion(
+                dataset.input_state,
+                organ_masks=records,
+                spec=spec,
+                target_class=target_class,
+                ground_truth=ground_truth,
+                model_name=self._selected_model_name(),
+                progress_callback=progress_callback,
+            )
+
+        def _success(payload) -> None:
+            try:
+                if request_id != self._organ_request_id:
+                    return
+                for item in payload["renderable_items"]:
+                    self.data_store.upsert_named_volume(
+                        dataset_id,
+                        f"{dataset_id}:{item['method_id']}",
+                        item,
+                    )
+                metrics = dict(payload["result"].metrics)
+                self.view.set_organ_metrics(metrics)
+                self.view.set_organ_status("Organ Occlusion result is ready.")
+                self._organ_result_stale = False
+                self._render_current_items(camera_policy="preserve")
+                self.view.workspace.apply_layout("compare")
+            finally:
+                self.view.set_organ_running(False)
+                self._set_xai_running(False)
+
+        def _error(exc: Exception) -> None:
+            self.view.set_organ_status(str(exc), error=True)
+            self.view.set_organ_running(False)
+            self._set_xai_running(False)
+            self._on_background_error(exc)
+
+        def _progress(progress: object) -> None:
+            if isinstance(progress, dict):
+                self.view.set_perturbation_progress(
+                    int(progress.get("current", 0)), int(progress.get("total", 3))
+                )
+
+        submit = self.task_runner.submit
+        if len(signature(submit).parameters) >= 4:
+            submit(_compute, _success, _error, _progress)
+        else:
+            submit(_compute, _success, _error)
 
     def _on_xai_result_loaded(self, dataset_id: str, result) -> None:
         result_id = self.data_store.upsert_xai_result(dataset_id, result)

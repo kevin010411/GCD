@@ -344,6 +344,61 @@ class WorkspaceDataStore:
     def create_prediction_volume_id(self, dataset_id: str, method_id: str) -> str:
         return f"{dataset_id}:{method_id}:{uuid4().hex[:6]}"
 
+    def upsert_named_volume(
+        self,
+        dataset_id: str,
+        volume_id: str,
+        item_payload: dict[str, Any],
+        *,
+        emit: bool = True,
+    ) -> str | None:
+        dataset = self.datasets.get(dataset_id)
+        if dataset is None:
+            return None
+        existing = self.volumes.get(volume_id)
+        display_name = str(item_payload["name"])
+        volume = VolumeRecord(
+            id=volume_id,
+            dataset_id=dataset_id,
+            display_name=(existing.display_name if existing is not None else display_name),
+            source=str(item_payload["source"]),
+            method_id=str(item_payload["method_id"]),
+            data=item_payload["data"],
+            data_range=item_payload["data_range"],
+            transfer_function=item_payload["transfer_function"],
+            spacing=tuple(float(v) for v in item_payload["spacing"]),
+            metadata={**item_payload["metadata"], "volume_id": volume_id},
+            shape=tuple(int(v) for v in item_payload["shape"]),
+            source_base_item_id=dataset.base_volume_id,
+            source_shape=tuple(
+                int(v)
+                for v in item_payload["metadata"].get(
+                    "source_shape", dataset.display_metadata.get("source_shape", dataset.base_shape)
+                )
+            ),
+            source_spacing=dataset.base_spacing,
+            source_affine=item_payload["metadata"].get(
+                "source_affine",
+                dataset.display_metadata.get("source_affine", dataset.display_metadata.get("affine")),
+            ),
+            visible=existing.visible if existing is not None else bool(item_payload.get("visible", True)),
+            plugin_metadata=dict(item_payload.get("plugin_metadata", {})),
+        )
+        self.volumes[volume_id] = volume
+        self.datasets[dataset_id] = dataset.with_result_id(volume_id)
+        if volume_id not in self.selection.volume_order:
+            self.selection = replace(
+                self.selection, volume_order=(*self.selection.volume_order, volume_id)
+            )
+        if emit:
+            self._emit(VolumeUpserted(volume_id, dataset_id))
+        return volume_id
+
+    def notify_volumes_upserted(self, dataset_id: str, volume_ids: list[str]) -> None:
+        """Publish one store update after a group of volumes has been inserted."""
+        if volume_ids:
+            self._emit(VolumeUpserted(volume_ids[-1], dataset_id))
+
     def unique_volume_display_name(self, base_name: str) -> str:
         existing = {volume.display_name for volume in self.volumes.values()}
         if base_name not in existing:

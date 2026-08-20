@@ -88,3 +88,34 @@ class PerturbationPluginPanelTests(unittest.TestCase):
 
         self.assertTrue(panel.preview_pause_button.isHidden())
         self.assertEqual(panel.preview_pause_button.text(), "Pause")
+
+    def test_organ_method_uses_special_controls_and_requires_masks(self) -> None:
+        panel = PerturbationPluginPanel()
+        panel.set_method_options(
+            [
+                {
+                    "id": "organ_occlusion",
+                    "name": "Organ Occlusion",
+                    "uses_layer_controls": False,
+                    "uses_objective": False,
+                    "parameters": [],
+                }
+            ],
+            "organ_occlusion",
+        )
+        self.assertFalse(panel.organ_controls.isHidden())
+        self.assertFalse(panel.run_button.isEnabled())
+
+        panel.set_organ_masks(
+            [
+                {
+                    "id": "aorta",
+                    "display_name": "Aorta",
+                    "group": "curated",
+                    "color": "#FF0000",
+                }
+            ]
+        )
+
+        self.assertTrue(panel.run_button.isEnabled())
+        self.assertEqual(panel.organ_controls.table.rowCount(), 1)

@@ -340,6 +340,9 @@ class MainWindowView(QMainWindow):
         self.perturbation_preview_pause_button = (
             self.perturbation_plugin_panel.preview_pause_button
         )
+        self.organ_occlusion_controls = self.perturbation_plugin_panel.organ_controls
+        self.organ_total_button = self.organ_occlusion_controls.total_button
+        self.organ_rerun_button = self.organ_occlusion_controls.rerun_button
 
         self.data_plugin_panel = self.plugin_panels["data"]
         self.transfer_plugin_panel = self.data_plugin_panel
@@ -497,6 +500,21 @@ class MainWindowView(QMainWindow):
 
     def set_perturbation_preview_running(self, running: bool) -> None:
         self.xai_family_panels["perturbation"].set_preview_running(running)
+
+    def set_organ_masks(self, records: list[dict[str, object]]) -> None:
+        self.perturbation_plugin_panel.set_organ_masks(records)
+
+    def set_organ_status(self, text: str, *, error: bool = False) -> None:
+        self.organ_occlusion_controls.set_status(text, error=error)
+
+    def set_organ_running(self, running: bool) -> None:
+        self.perturbation_plugin_panel.set_organ_running(running)
+
+    def set_organ_metrics(self, metrics: dict[str, float]) -> None:
+        self.organ_occlusion_controls.set_metrics(metrics)
+
+    def selected_organ_interventions(self) -> list[dict[str, object]]:
+        return self.organ_occlusion_controls.selected_interventions()
 
     def set_perturbation_method_options(
         self, options: list[dict[str, str]], selected: str | None

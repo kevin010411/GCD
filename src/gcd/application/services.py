@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,10 @@ from ..domain import (
     VolumeRecord,
     XaiComputeRequest,
     XaiComputeResult,
+    OrganIntervention,
+    OrganMaskRecord,
+    OrganOcclusionResult,
+    OrganOcclusionSpec,
 )
 from ..presentation.qt.workspace_models import (
     AnnotationMode,
@@ -23,6 +27,12 @@ from ..presentation.qt.workspace_models import (
     SliceOrientation,
 )
 from ..infrastructure.volume_loading import VolumeLoadingService
+from ..infrastructure.organ_occlusion import (
+    TotalSegmentatorOrganService,
+    apply_organ_occlusion,
+    prediction_metrics,
+    result_metadata,
+)
 
 
 class TransferFunctionAppService:
@@ -153,10 +163,192 @@ class VolumePersistenceService:
 
 
 class WorkflowService:
-    def __init__(self, engine, volume_loader: VolumeLoadingService | None = None) -> None:
+    def __init__(
+        self,
+        engine,
+        volume_loader: VolumeLoadingService | None = None,
+        organ_service: TotalSegmentatorOrganService | None = None,
+    ) -> None:
         self.engine = engine
         self.transfer_function_service = TransferFunctionAppService()
         self.volume_loader = volume_loader or getattr(engine, "volume_loader", None)
+        self.organ_service = organ_service or TotalSegmentatorOrganService()
+
+    def segment_organs(
+        self, file_name: str, *, force: bool = False, device: str = "gpu"
+    ) -> list[OrganMaskRecord]:
+        return self.organ_service.run(file_name, force=force, device=device, task="total")
+
+    def preview_organ_occlusion(
+        self,
+        dataset_input: DatasetInput,
+        organ_masks: list[OrganMaskRecord],
+        spec: OrganOcclusionSpec,
+    ) -> tuple[object, object]:
+        import torch
+
+        source = torch.as_tensor(dataset_input.img0)[0].detach().cpu().numpy()
+        spacing = self._source_spacing(dataset_input)
+        occluded, modified = apply_organ_occlusion(
+            source,
+            {record.id: record for record in organ_masks},
+            spec,
+            spacing=spacing,
+        )
+        permute = tuple(int(v) for v in getattr(self.engine, "PERMUTE", (0, 1, 2)))
+        return (
+            torch.from_numpy(occluded).permute(*permute),
+            torch.from_numpy(modified.astype("float32")).permute(*permute),
+        )
+
+    def compute_organ_occlusion(
+        self,
+        dataset_input: DatasetInput,
+        *,
+        organ_masks: list[OrganMaskRecord],
+        spec: OrganOcclusionSpec,
+        target_class: int,
+        ground_truth=None,
+        model_name: str = "",
+        progress_callback=None,
+    ) -> dict[str, Any]:
+        import torch
+
+        source_tensor = torch.as_tensor(dataset_input.img0)
+        if source_tensor.ndim != 4 or int(source_tensor.shape[0]) != 1:
+            raise ValueError("Organ Occlusion requires a channel-first 3D CT input.")
+        source = source_tensor[0].detach().cpu().numpy()
+        affine = dataset_input.origin_meta.get("affine")
+        enabled_ids = {item.organ_id for item in spec.enabled()}
+        for record in organ_masks:
+            if record.id not in enabled_ids:
+                continue
+            from ..infrastructure.organ_occlusion import validate_mask_geometry
+
+            validate_mask_geometry(source, affine, record.mask, record.affine)
+        if callable(progress_callback):
+            progress_callback({"current": 0, "total": 3})
+        occluded, modified = apply_organ_occlusion(
+            source,
+            {record.id: record for record in organ_masks},
+            spec,
+            spacing=self._source_spacing(dataset_input),
+        )
+        if callable(progress_callback):
+            progress_callback({"current": 1, "total": 3})
+
+        original_prediction = self._predict_dataset(dataset_input, target_class)
+        modified_img0 = dataset_input.img0.clone()
+        modified_img0[0] = torch.as_tensor(
+            occluded, dtype=modified_img0.dtype, device=modified_img0.device
+        )
+        perturbed_input = replace(
+            dataset_input,
+            img0=modified_img0,
+            raw_display_data=torch.from_numpy(occluded).permute(
+                *tuple(int(v) for v in getattr(self.engine, "PERMUTE", (0, 1, 2)))
+            ),
+            active_method_id="organ_occlusion",
+            xai_cache_key="",
+        )
+        if callable(progress_callback):
+            progress_callback({"current": 2, "total": 3})
+        perturbed_prediction = self._predict_dataset(perturbed_input, target_class)
+        permute = tuple(int(v) for v in getattr(self.engine, "PERMUTE", (0, 1, 2)))
+        modified_display = torch.from_numpy(modified).permute(*permute)
+        source_display = torch.from_numpy(source).permute(*permute)
+        occluded_display = torch.from_numpy(occluded).permute(*permute)
+        truth = ground_truth
+        difference, metrics = prediction_metrics(
+            original_prediction,
+            perturbed_prediction,
+            target_class,
+            modified_display,
+            valid_mask=torch.isfinite(source_display),
+            ground_truth=truth,
+        )
+        metadata = dict(dataset_input.raw_display_metadata or dataset_input.display_metadata)
+        result = OrganOcclusionResult(
+            occluded_ct=occluded_display,
+            original_prediction=original_prediction,
+            perturbed_prediction=perturbed_prediction,
+            difference=torch.from_numpy(difference),
+            modified_mask=modified_display,
+            metrics=metrics,
+            spec=spec,
+            metadata={
+                "model_name": model_name,
+                "target_class": int(target_class),
+                "method": "organ_occlusion",
+            },
+        )
+        if callable(progress_callback):
+            progress_callback({"current": 3, "total": 3})
+        common_metadata = {**metadata, **result_metadata(result)}
+        spacing = tuple(float(v) for v in metadata.get("spacing", dataset_input.img1_spacing))
+        return {
+            "result": result,
+            "dataset_input": perturbed_input,
+            "renderable_items": [
+                self._organ_renderable("Original prediction", "organ_occlusion_original_prediction", result.original_prediction, spacing, common_metadata, TransferFunction.label_preset()),
+                self._organ_renderable("Occluded CT", "organ_occlusion_ct", result.occluded_ct, spacing, common_metadata, TransferFunction.base_preset()),
+                self._organ_renderable("Perturbed prediction", "organ_occlusion_prediction", result.perturbed_prediction, spacing, common_metadata, TransferFunction.label_preset()),
+                self._organ_renderable("Prediction difference", "organ_occlusion_difference", result.difference, spacing, common_metadata, TransferFunction.difference_preset()),
+            ],
+        }
+
+    def _predict_dataset(self, dataset_input: DatasetInput, target_class: int):
+        import torch
+        import torch.nn.functional as F
+
+        self.engine.load_dataset_input(dataset_input)
+        self.engine.set_target_class(target_class)
+        self.engine.prepare_xai_inputs(
+            method="organ_occlusion",
+            objective_id="predicted_mask_dice",
+            method_params={},
+        )
+        self.engine.run_xai_method(
+            layer="input", n1=0, n2=1, method="organ_occlusion", method_params={}
+        )
+        model_output = self.engine.model_output
+        model_space = self.engine._inv_permute(model_output)
+        source_shape = tuple(int(v) for v in tuple(dataset_input.origin_shape or ())[1:])
+        restored = model_space
+        if source_shape and tuple(restored.shape) != source_shape:
+            restored = F.interpolate(
+                restored.to(torch.float32).unsqueeze(0).unsqueeze(0),
+                size=source_shape,
+                mode="nearest",
+            )[0, 0]
+        permute = tuple(int(v) for v in getattr(self.engine, "PERMUTE", (0, 1, 2)))
+        return restored.permute(*permute).round().to("int16")
+
+    @staticmethod
+    def _source_spacing(dataset_input: DatasetInput) -> tuple[float, float, float]:
+        import numpy as np
+
+        affine = dataset_input.origin_meta.get("affine")
+        if affine is None:
+            return (1.0, 1.0, 1.0)
+        spacing = np.linalg.norm(np.asarray(affine)[:3, :3], axis=0)
+        return tuple(float(value if value > 0 else 1.0) for value in spacing)
+
+    @staticmethod
+    def _organ_renderable(
+        name: str, method_id: str, data, spacing, metadata, transfer_function
+    ) -> dict[str, object]:
+        return {
+            "name": name,
+            "source": "organ_occlusion",
+            "method_id": method_id,
+            "data": data,
+            "data_range": DataRange.from_data([data], method="minmax"),
+            "transfer_function": transfer_function,
+            "spacing": spacing,
+            "metadata": dict(metadata),
+            "shape": tuple(int(v) for v in data.shape),
+        }
 
     def list_model_configs(self) -> list[dict[str, str]]:
         root = Path("src/config/model")

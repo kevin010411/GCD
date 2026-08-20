@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -620,6 +621,36 @@ class _FakeErrorStore:
 
 
 class PresenterMethodTests(unittest.TestCase):
+    def test_total_segmentator_volumes_are_rendered_as_one_batch(self) -> None:
+        view = _FakeView()
+        workflow = _FakeWorkflow()
+        presenter = MainWindowPresenter(
+            view,
+            workflow,
+            transfer_service=object(),
+            annotation_service=object(),
+            task_runner=_FakeTaskRunner(),
+            error_store=_FakeErrorStore(),
+        )
+        presenter.on_open_file_requested()
+        dataset_id = presenter.dataset_order[0]
+        render_count = len(view.workspace.show_volumes_calls)
+        records = [
+            SimpleNamespace(
+                id=f"organ-{index}",
+                display_name=f"Organ {index}",
+                group="curated",
+                mask=np.ones((2, 2, 2), dtype=np.float32),
+                color="#ff0000",
+            )
+            for index in range(3)
+        ]
+
+        presenter._publish_organ_mask_volumes(dataset_id, records)
+
+        self.assertEqual(len(view.workspace.show_volumes_calls) - render_count, 1)
+        self.assertEqual(len(presenter.volume_order), 4)
+
     def test_model_change_refreshes_layer_options_before_forward(self) -> None:
         view = _FakeView()
         workflow = _FakeWorkflow()

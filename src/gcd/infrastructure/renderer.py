@@ -274,6 +274,7 @@ class VtkVolumeRenderer:
         self.observer_tag = None
         self.annotation_mode = "off"
         self.annotation_event_handler = None
+        self.organ_pick_handler = None
         self.annotation_point_size = 8
         self.annotation_points = []
         self.annotation_boxes = []
@@ -297,6 +298,9 @@ class VtkVolumeRenderer:
         self.add_axes_indicator()
         self.annotation_interactor_style.AddObserver(
             "LeftButtonPressEvent", self._on_left_button_press, 1.0
+        )
+        self.camera_interactor_style.AddObserver(
+            "LeftButtonReleaseEvent", self._on_organ_pick_release
         )
         self.annotation_interactor_style.AddObserver(
             "MouseMoveEvent", self._on_mouse_move, 1.0
@@ -674,6 +678,9 @@ class VtkVolumeRenderer:
     def set_annotation_event_handler(self, handler) -> None:
         self.annotation_event_handler = handler
 
+    def set_organ_pick_handler(self, handler) -> None:
+        self.organ_pick_handler = handler
+
     def set_annotation_mode(self, mode: str) -> None:
         self.annotation_mode = mode
         self.roi_interaction_controller.set_mode(mode)
@@ -889,6 +896,10 @@ class VtkVolumeRenderer:
         return None
 
     def _pick_world(self, x: int, y: int):
+        picked = self._pick_volume(x, y)
+        return None if picked is None else picked[1]
+
+    def _pick_volume(self, x: int, y: int):
         if not self.volumes:
             return None
         from vtkmodules.vtkRenderingVolume import vtkVolumePicker
@@ -904,8 +915,21 @@ class VtkVolumeRenderer:
                 return None
             position = tuple(float(v) for v in volume_picker.GetPickPosition())
             if all(np.isfinite(value) for value in position):
-                return position
+                return volume_index, position
         return None
+
+    def _on_organ_pick_release(self, _obj, _event) -> None:
+        if not callable(self.organ_pick_handler):
+            return
+        x, y = self.interactor.GetEventPosition()
+        picked = self._pick_volume(x, y)
+        if picked is None:
+            return
+        index, _position = picked
+        metadata = self.volumes[index].get("metadata", {})
+        volume_id = str(metadata.get("volume_id", ""))
+        if ":organ:" in volume_id and ":preview_" not in volume_id:
+            self.organ_pick_handler(volume_id)
 
     def _volume_index_for_prop(self, prop) -> int | None:
         if prop is None:

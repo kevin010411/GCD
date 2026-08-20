@@ -15,6 +15,7 @@ from .perturb_occlusion import (
 from .registry import XaiMethodRegistry
 from .saliency_map import SaliencyMapMethod
 from .xrescam import XResCamMethod
+from .organ_occlusion import OrganOcclusionMethod
 
 __all__ = [
     "CamPatchContext",
@@ -30,4 +31,5 @@ __all__ = [
     "XaiMethodDefinition",
     "XaiMethodRegistry",
     "XaiParameterSpec",
+    "OrganOcclusionMethod",
 ]

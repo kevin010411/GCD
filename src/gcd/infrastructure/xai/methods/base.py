@@ -70,6 +70,9 @@ class XaiMethodDefinition:
     uses_layer_controls: bool
     uses_objective: bool
     parameters: tuple[XaiParameterSpec, ...] = ()
+    execution_scope: str = "tile"
+    result_kind: str = "saliency"
+    custom_ui: str = ""
 
     def to_option(self) -> dict[str, object]:
         return {
@@ -78,6 +81,9 @@ class XaiMethodDefinition:
             "family": self.family,
             "uses_layer_controls": self.uses_layer_controls,
             "uses_objective": self.uses_objective,
+            "execution_scope": self.execution_scope,
+            "result_kind": self.result_kind,
+            "custom_ui": self.custom_ui,
             "parameters": [parameter.to_dict() for parameter in self.parameters],
         }
 
@@ -88,6 +94,9 @@ class XaiMethod(ABC):
     family = ""
     uses_layer_controls = True
     uses_objective = True
+    execution_scope = "tile"
+    result_kind = "saliency"
+    custom_ui = ""
 
     def parameter_schema(self) -> Sequence[XaiParameterSpec]:
         return ()
@@ -100,6 +109,9 @@ class XaiMethod(ABC):
             uses_layer_controls=bool(self.uses_layer_controls),
             uses_objective=bool(self.uses_objective),
             parameters=tuple(self.parameter_schema()),
+            execution_scope=str(self.execution_scope),
+            result_kind=str(self.result_kind),
+            custom_ui=str(self.custom_ui),
         )
 
     @abstractmethod
