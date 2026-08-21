@@ -20,22 +20,34 @@ preprocessing = dict(
 metrics = dict(
     include_background=False,
     empty_score=1.0,
-    # Insertion/deletion evaluate 0%, 10%, ..., 100% of ranked voxels.
-    perturbation_steps=20,
-    perturbation_baseline=0.0,
-    insertion_enabled=True,
-    deletion_enabled=True,
 )
+
+# Each list accepts any number of independent configs; an empty list disables
+# that operation. Empty method/target_class lists also skip one config. ``None``
+# runs the standard curve; numeric values additionally keep at least that
+# fraction of the class GT untouched at every step.
+PerturbationInsertion = [
+    dict(
+        target_class=[1, 2, 3],
+        steps=11,
+        method=["xrescam"],
+        baseline=0.0,
+        answer_retention=[None, 0.5, 1.0],
+    ),
+]
+
+PerturbationDeletion = [
+    dict(
+        target_class=[1, 2, 3],
+        steps=11,
+        method=["xrescam"],
+        baseline=0.0,
+        answer_retention=[None, 0.5, 1.0],
+    ),
+]
 
 xai = dict(
     enabled=True,
-    # Method IDs come from the same XaiMethodRegistry used by the GUI.
-    # Examples: gradcam, xrescam, saliency_map, perturb_occlusion,
-    # perturb_lime, perturb_rise.
-    methods=("xrescam",),
-    # "auto" selects the largest predicted foreground class.
-    target_class="auto",
-    # Empty uses the model config's default_layer; only CAM methods need it.
     layer="",
     method_params=dict(),
 )

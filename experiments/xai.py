@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from math import ceil
 from typing import Any
 
 
@@ -139,6 +141,206 @@ def _auc(fractions: list[float], scores: list[float]) -> float:
     )
 
 
+def _binary_overlap(prediction, mask) -> tuple[float, float]:
+    prediction = prediction.bool()
+    mask = mask.bool()
+    intersection = int((prediction & mask).sum())
+    prediction_count = int(prediction.sum())
+    mask_count = int(mask.sum())
+    union = prediction_count + mask_count - intersection
+    dice = 1.0 if prediction_count + mask_count == 0 else 2.0 * intersection / (prediction_count + mask_count)
+    iou = 1.0 if union == 0 else intersection / union
+    return dice, iou
+
+
+def _retention_values(config: Any) -> list[float | None]:
+    values = config.get("answer_retention", (None,))
+    if values is None or isinstance(values, (int, float)):
+        values = (values,)
+    result: list[float | None] = []
+    for value in values:
+        if value is None:
+            result.append(None)
+            continue
+        retention = float(value)
+        if not 0.0 <= retention <= 1.0:
+            raise ValueError("answer_retention values must be between 0 and 1")
+        result.append(retention)
+    return result
+
+
+@dataclass
+class _PerturbationMetric:
+    """One independently configured insertion or deletion experiment."""
+
+    config: Any
+    operation: str = ""
+    config_index: int = 0
+
+    @property
+    def result_id(self) -> str:
+        return f"{self.operation}_{self.config_index}"
+
+    def progress_steps(self, answer_mask=None) -> int:
+        """Number of inference steps that will actually run."""
+        variants = 0
+        answer_exists = answer_mask is not None and int(answer_mask.sum()) > 0
+        for retention in _retention_values(self.config):
+            if retention is None or answer_exists:
+                variants += 1
+        return variants * (int(self.config.get("steps", 20)) + 1)
+
+    def _initial_and_order(self, original, baseline, flat_order, answer_mask, retention):
+        import torch
+
+        if retention is None:
+            return self._initial(original, baseline), flat_order
+        answer_flat = answer_mask.flatten().bool()
+        answer_indices = torch.nonzero(answer_flat, as_tuple=False).flatten()
+        keep_count = ceil(retention * answer_indices.numel())
+        # Choose the retained subset independently of the attribution method so
+        # answer-preserving curves remain comparable between methods.
+        retained = answer_indices[:keep_count]
+        protected = torch.zeros_like(answer_flat)
+        protected[retained] = True
+        eligible_order = flat_order[~protected[flat_order]]
+        initial = self._initial(original, baseline)
+        initial.flatten()[retained] = original.flatten()[retained]
+        return initial, eligible_order
+
+    def _initial(self, original, baseline):
+        raise NotImplementedError
+
+    def _apply(self, perturbed, original, baseline, selected) -> None:
+        raise NotImplementedError
+
+    def evaluate(
+        self,
+        batch,
+        attribution,
+        infer: Callable[[Any], Any],
+        target_class: int,
+        target_mask,
+        answer_mask=None,
+        *,
+        progress: bool = True,
+        progress_callback: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        import torch
+        from tqdm.auto import tqdm
+
+        fractions = _fractions(int(self.config.get("steps", 20)))
+        original = batch.detach()
+        baseline = torch.full_like(original, float(self.config.get("baseline", 0.0)))
+        flat_order = torch.argsort(attribution.flatten(), descending=True)
+        variants: dict[str, Any] = {}
+        original_prediction = target_mask.bool()
+
+        for retention in _retention_values(self.config):
+            key = "standard" if retention is None else f"answer_retention_{retention:g}"
+            if retention is not None and answer_mask is None:
+                variants[key] = {
+                    "status": "skipped",
+                    "reason": "answer-preserving perturbation requires ground truth",
+                    "answer_retention": retention,
+                }
+                continue
+            if retention is not None and int(answer_mask.sum()) == 0:
+                variants[key] = {
+                    "status": "skipped",
+                    "reason": "target class is absent from ground truth",
+                    "answer_retention": retention,
+                }
+                continue
+            initial, order = self._initial_and_order(
+                original, baseline, flat_order, answer_mask, retention
+            )
+            scores: list[float] = []
+            prediction_dice: list[float] = []
+            prediction_iou: list[float] = []
+            ground_truth_dice: list[float] = []
+            ground_truth_iou: list[float] = []
+            with torch.inference_mode():
+                for fraction in tqdm(
+                    fractions,
+                    desc=f"{self.operation} {key}",
+                    unit="step",
+                    leave=False,
+                    disable=not progress,
+                ):
+                    selected = order[: round(fraction * order.numel())]
+                    perturbed = initial.clone()
+                    self._apply(perturbed, original, baseline, selected)
+                    logits = infer(perturbed)
+                    scores.append(float(_objective(logits, target_class, target_mask)))
+                    perturbed_prediction = torch.argmax(logits, dim=1)[0] == target_class
+                    dice, iou = _binary_overlap(perturbed_prediction, original_prediction)
+                    prediction_dice.append(dice)
+                    prediction_iou.append(iou)
+                    if answer_mask is not None:
+                        dice, iou = _binary_overlap(perturbed_prediction, answer_mask)
+                        ground_truth_dice.append(dice)
+                        ground_truth_iou.append(iou)
+                    if progress_callback is not None:
+                        progress_callback()
+            variants[key] = {
+                "status": "completed",
+                "answer_retention": retention,
+                "fractions": fractions,
+                "scores": scores,
+                "auc": _auc(fractions, scores),
+                "prediction_dice": prediction_dice,
+                "prediction_iou": prediction_iou,
+                "ground_truth_dice": ground_truth_dice,
+                "ground_truth_iou": ground_truth_iou,
+            }
+        return variants
+
+
+class PerturbationInsertion(_PerturbationMetric):
+    operation = "insertion"
+
+    def __init__(self, config: Any, config_index: int = 0):
+        super().__init__(
+            config=config, operation="insertion", config_index=config_index
+        )
+
+    def _initial(self, original, baseline):
+        return baseline.clone()
+
+    def _apply(self, perturbed, original, baseline, selected) -> None:
+        perturbed.flatten()[selected] = original.flatten()[selected]
+
+
+class PerturbationDeletion(_PerturbationMetric):
+    operation = "deletion"
+
+    def __init__(self, config: Any, config_index: int = 0):
+        super().__init__(
+            config=config, operation="deletion", config_index=config_index
+        )
+
+    def _initial(self, original, baseline):
+        return original.clone()
+
+    def _apply(self, perturbed, original, baseline, selected) -> None:
+        perturbed.flatten()[selected] = baseline.flatten()[selected]
+
+
+def configured_perturbations(cfg: Any) -> Iterable[_PerturbationMetric]:
+    """Presence of a config block enables that operation; no booleans needed."""
+    insertion_configs = cfg.get("PerturbationInsertion", ())
+    deletion_configs = cfg.get("PerturbationDeletion", ())
+    if hasattr(insertion_configs, "get"):
+        insertion_configs = (insertion_configs,)
+    if hasattr(deletion_configs, "get"):
+        deletion_configs = (deletion_configs,)
+    for index, config in enumerate(insertion_configs or ()):
+        yield PerturbationInsertion(config, index)
+    for index, config in enumerate(deletion_configs or ()):
+        yield PerturbationDeletion(config, index)
+
+
 def insertion_deletion_metrics(
     batch,
     attribution,
@@ -149,45 +351,32 @@ def insertion_deletion_metrics(
     *,
     progress: bool = True,
 ) -> dict[str, Any]:
-    """Evaluate attribution faithfulness by inserting/deleting top-ranked voxels."""
-    import torch
-
-    fractions = _fractions(int(cfg.metrics.perturbation_steps))
-    flat_order = torch.argsort(attribution.flatten(), descending=True)
-    voxel_count = flat_order.numel()
-    original = batch.detach()
-    baseline = torch.full_like(original, float(cfg.metrics.perturbation_baseline))
-    insertion_enabled = bool(getattr(cfg.metrics, "insertion_enabled", True))
-    deletion_enabled = bool(getattr(cfg.metrics, "deletion_enabled", True))
-    insertion_scores: list[float] = []
-    deletion_scores: list[float] = []
-
-    with torch.inference_mode():
-        from tqdm.auto import tqdm
-
-        for fraction in tqdm(
-            fractions,
-            desc="Insertion/deletion",
-            unit="step",
-            leave=False,
-            disable=not progress,
-        ):
-            count = round(fraction * voxel_count)
-            selected = flat_order[:count]
-            if insertion_enabled:
-                insertion = baseline.clone()
-                insertion.flatten()[selected] = original.flatten()[selected]
-                insertion_scores.append(float(_objective(infer(insertion), target_class, target_mask)))
-            if deletion_enabled:
-                deletion = original.clone()
-                deletion.flatten()[selected] = baseline.flatten()[selected]
-                deletion_scores.append(float(_objective(infer(deletion), target_class, target_mask)))
-
-    result = {
-        "fractions": fractions,
+    """Compatibility adapter for callers using the former combined API."""
+    metrics = cfg.metrics
+    config = {
+        "steps": int(metrics.perturbation_steps),
+        "baseline": float(metrics.perturbation_baseline),
+        "answer_retention": (None,),
     }
-    if insertion_enabled:
-        result.update(insertion_scores=insertion_scores, insertion_auc=_auc(fractions, insertion_scores))
-    if deletion_enabled:
-        result.update(deletion_scores=deletion_scores, deletion_auc=_auc(fractions, deletion_scores))
+    result = {"fractions": _fractions(config["steps"])}
+    if bool(getattr(metrics, "insertion_enabled", True)):
+        curve = PerturbationInsertion(config).evaluate(
+            batch,
+            attribution,
+            infer,
+            target_class,
+            target_mask,
+            progress=progress,
+        )["standard"]
+        result.update(insertion_scores=curve["scores"], insertion_auc=curve["auc"])
+    if bool(getattr(metrics, "deletion_enabled", True)):
+        curve = PerturbationDeletion(config).evaluate(
+            batch,
+            attribution,
+            infer,
+            target_class,
+            target_mask,
+            progress=progress,
+        )["standard"]
+        result.update(deletion_scores=curve["scores"], deletion_auc=curve["auc"])
     return result

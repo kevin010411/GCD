@@ -9,7 +9,7 @@ from typing import Any
 class ConfigOptionsAction(argparse.Action):
     """Parse KEY=VALUE overrides without loading MMEngine for ``--help``."""
 
-    def __call__(self, parser, namespace, values, option_string=None) -> None:
+    def __call__(self, parser, namespace, values: list, option_string=None) -> None:
         options: dict[str, Any] = {}
         for item in values:
             if "=" not in item:
@@ -27,12 +27,16 @@ class ConfigOptionsAction(argparse.Action):
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run GCD segmentation on one NIfTI volume."
+        description="Run GCD segmentation on one NIfTI volume or a dataset directory."
     )
-    parser.add_argument("input", type=Path, help="Input .nii or .nii.gz volume")
+    parser.add_argument(
+        "input", type=Path, help="Input .nii/.nii.gz volume or dataset directory"
+    )
     parser.add_argument("--config", type=Path, required=True, help="MMEngine config")
     parser.add_argument(
-        "--output", type=Path, required=True,
+        "--output",
+        type=Path,
+        required=True,
         help="Result directory containing NIfTI, JSON, CSV, and plots",
     )
     parser.add_argument(

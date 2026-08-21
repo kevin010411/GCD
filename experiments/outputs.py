@@ -64,31 +64,69 @@ def export_csv_files(metrics: dict[str, Any], output_dir: Path) -> list[Path]:
         curve_path = output_dir / "xai_curves.csv"
         summary_rows = []
         curve_rows = []
-        for method, result in metrics["xai"].items():
-            summary_rows.append(
-                {
-                    "method": method,
-                    "target_class": result["target_class"],
-                    "attribution": result["attribution"],
-                    "insertion_auc": result.get("insertion_auc"),
-                    "deletion_auc": result.get("deletion_auc"),
-                }
-            )
-            fractions = result.get("fractions", [])
-            insertion = result.get("insertion_scores", [])
-            deletion = result.get("deletion_scores", [])
-            for index, fraction in enumerate(fractions):
-                curve_rows.append(
+        for result_id, result in metrics["xai"].items():
+            if "perturbations" not in result:
+                summary_rows.append(
                     {
-                        "method": method,
-                        "step": index,
-                        "fraction": fraction,
-                        "insertion_score": insertion[index] if index < len(insertion) else None,
-                        "deletion_score": deletion[index] if index < len(deletion) else None,
+                        "method": result_id,
+                        "target_class": result["target_class"],
+                        "operation": "insertion/deletion",
+                        "variant": "legacy",
+                        "status": "completed",
+                        "attribution": result["attribution"],
                     }
                 )
-        _write_csv(summary_path, ["method", "target_class", "attribution", "insertion_auc", "deletion_auc"], summary_rows)
-        _write_csv(curve_path, ["method", "step", "fraction", "insertion_score", "deletion_score"], curve_rows)
+                fractions = result.get("fractions", [])
+                insertion = result.get("insertion_scores", [])
+                deletion = result.get("deletion_scores", [])
+                for index, fraction in enumerate(fractions):
+                    curve_rows.append(
+                        {
+                            "method": result_id,
+                            "target_class": result["target_class"],
+                            "operation": "insertion/deletion",
+                            "variant": "legacy",
+                            "step": index,
+                            "fraction": fraction,
+                            "target_probability": insertion[index] if index < len(insertion) else None,
+                            "insertion_score": insertion[index] if index < len(insertion) else None,
+                            "deletion_score": deletion[index] if index < len(deletion) else None,
+                        }
+                    )
+                continue
+            for operation, variants in result.get("perturbations", {}).items():
+                for variant, curve in variants.items():
+                    summary_rows.append(
+                        {
+                            "method": result["method"],
+                            "target_class": result["target_class"],
+                            "operation": operation,
+                            "variant": variant,
+                            "status": curve.get("status"),
+                            "answer_retention": curve.get("answer_retention"),
+                            "attribution": result["attribution"],
+                            "auc": curve.get("auc"),
+                            "reason": curve.get("reason"),
+                        }
+                    )
+                    for index, fraction in enumerate(curve.get("fractions", [])):
+                        curve_rows.append(
+                            {
+                                "method": result["method"],
+                                "target_class": result["target_class"],
+                                "operation": operation,
+                                "variant": variant,
+                                "step": index,
+                                "fraction": fraction,
+                                "target_probability": curve["scores"][index],
+                                "prediction_dice": curve["prediction_dice"][index],
+                                "prediction_iou": curve["prediction_iou"][index],
+                                "ground_truth_dice": curve["ground_truth_dice"][index] if curve["ground_truth_dice"] else None,
+                                "ground_truth_iou": curve["ground_truth_iou"][index] if curve["ground_truth_iou"] else None,
+                            }
+                        )
+        _write_csv(summary_path, ["method", "target_class", "operation", "variant", "status", "answer_retention", "attribution", "auc", "reason"], summary_rows)
+        _write_csv(curve_path, ["method", "target_class", "operation", "variant", "step", "fraction", "target_probability", "insertion_score", "deletion_score", "prediction_dice", "prediction_iou", "ground_truth_dice", "ground_truth_iou"], curve_rows)
         paths.extend((summary_path, curve_path))
     return paths
 
@@ -101,23 +139,91 @@ def export_faithfulness_plots(metrics: dict[str, Any], output_dir: Path) -> list
     import matplotlib.pyplot as plt
 
     paths: list[Path] = []
-    for method, result in metrics.get("xai", {}).items():
-        fractions = result.get("fractions", [])
-        insertion = result.get("insertion_scores", [])
-        deletion = result.get("deletion_scores", [])
-        if not fractions or (not insertion and not deletion):
+    for result_id, result in metrics.get("xai", {}).items():
+        if "perturbations" not in result:
+            fractions = result.get("fractions", [])
+            insertion = result.get("insertion_scores", [])
+            deletion = result.get("deletion_scores", [])
+            if not fractions or (not insertion and not deletion):
+                continue
+            figure, axis = plt.subplots(figsize=(7, 4.5))
+            if insertion:
+                axis.plot(fractions, insertion, marker="o", label="Insertion")
+            if deletion:
+                axis.plot(fractions, deletion, marker="o", label="Deletion")
+            axis.set(
+                title=f"{result_id} faithfulness",
+                xlabel="Perturbed fraction",
+                ylabel="Target probability",
+            )
+            axis.grid(True, alpha=0.3)
+            axis.legend()
+            figure.tight_layout()
+            path = output_dir / f"{result_id}_insertion_deletion.png"
+            figure.savefig(path, dpi=160)
+            plt.close(figure)
+            paths.append(path)
             continue
-        figure, axis = plt.subplots(figsize=(7, 4.5))
-        if insertion:
-            axis.plot(fractions, insertion, marker="o", label=f"Insertion (AUC={result['insertion_auc']:.4f})")
-        if deletion:
-            axis.plot(fractions, deletion, marker="o", label=f"Deletion (AUC={result['deletion_auc']:.4f})")
-        axis.set(title=f"{method} faithfulness", xlabel="Perturbed fraction", ylabel="Target probability")
-        axis.grid(True, alpha=0.3)
-        axis.legend()
-        figure.tight_layout()
-        path = output_dir / f"{method}_insertion_deletion.png"
-        figure.savefig(path, dpi=160)
-        plt.close(figure)
-        paths.append(path)
+        for operation, variants in result.get("perturbations", {}).items():
+            completed = {
+                name: curve
+                for name, curve in variants.items()
+                if curve.get("status") == "completed"
+            }
+            if not completed:
+                continue
+            operation_name = operation.rsplit("_", 1)[0]
+            plot_dir = (
+                output_dir
+                / "plots"
+                / result["method"]
+                / f"class_{result['target_class']}"
+                / operation
+            )
+            plot_dir.mkdir(parents=True, exist_ok=True)
+            plot_specs = (
+                ("target_probability", "scores", "Target-class probability", False),
+                ("prediction_dice", "prediction_dice", "Prediction Dice", True),
+                ("prediction_iou", "prediction_iou", "Prediction IoU", True),
+                ("ground_truth_dice", "ground_truth_dice", "Ground-truth Dice", True),
+                ("ground_truth_iou", "ground_truth_iou", "Ground-truth IoU", True),
+            )
+            for metric_name, value_key, title, bounded in plot_specs:
+                available = {
+                    variant: curve
+                    for variant, curve in completed.items()
+                    if curve[value_key]
+                }
+                if not available:
+                    continue
+                figure, axis = plt.subplots(figsize=(7, 4.5))
+                for variant, curve in available.items():
+                    label = variant
+                    if metric_name == "target_probability":
+                        label += f" (AUC={curve['auc']:.4f})"
+                    axis.plot(
+                        curve["fractions"],
+                        curve[value_key],
+                        marker="o",
+                        label=label,
+                    )
+                axis.set(
+                    title=(
+                        f"{result['method']} / class {result['target_class']} / "
+                        f"{operation} / {title}"
+                    ),
+                    xlabel="Perturbed eligible fraction",
+                    ylabel=title,
+                )
+                if bounded:
+                    axis.set_ylim(-0.02, 1.02)
+                axis.grid(True, alpha=0.3)
+                axis.legend(fontsize="small")
+                figure.tight_layout()
+                path = plot_dir / (
+                    f"{operation_name}_{result['target_class']}_{metric_name}.png"
+                )
+                figure.savefig(path, dpi=160)
+                plt.close(figure)
+                paths.append(path)
     return paths

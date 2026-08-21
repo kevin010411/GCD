@@ -11,7 +11,7 @@ from .metrics import segmentation_metrics
 from .outputs import export_csv_files, export_faithfulness_plots
 from .xai import (
     compute_attribution,
-    insertion_deletion_metrics,
+    configured_perturbations,
     target_class_from_prediction,
 )
 
@@ -70,7 +70,19 @@ def _nifti_stem(path: Path) -> str:
     return name[:-7] if name.lower().endswith(".nii.gz") else path.stem
 
 
-def run(args: argparse.Namespace) -> dict[str, Any]:
+def _configured_values(config: Any, singular: str, plural: str) -> list[Any]:
+    values = config.get(singular, config.get(plural, ()))
+    if isinstance(values, (str, int)):
+        return [values]
+    return list(values or ())
+
+
+def _run_single(
+    args: argparse.Namespace,
+    *,
+    display_progress: bool = True,
+    display_perturbation_progress: bool = True,
+) -> dict[str, Any]:
     import nibabel as nib
     import numpy as np
     import torch
@@ -89,7 +101,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     case_name = _nifti_stem(args.input)
     prediction_output = output_dir / f"{case_name}_prediction.nii.gz"
 
-    stages = tqdm(total=5, desc="Experiment", unit="stage")
+    stages = tqdm(
+        total=5,
+        desc="Experiment",
+        unit="stage",
+        disable=not display_progress,
+    )
     stages.set_postfix_str("loading config/model")
     cfg = Config.fromfile(str(args.config))
     if args.cfg_options:
@@ -139,12 +156,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     stages.set_postfix_str("inference benchmark")
     with torch.inference_mode():
-        for _ in tqdm(range(int(cfg.inference.warmup_runs)), desc="Warmup", unit="run", leave=False):
+        for _ in tqdm(range(int(cfg.inference.warmup_runs)), desc="Warmup", unit="run", leave=False, disable=not display_progress):
             infer()
         _synchronize(device)
         durations = []
         logits = None
-        for _ in tqdm(range(int(cfg.inference.benchmark_runs)), desc="Benchmark", unit="run", leave=False):
+        for _ in tqdm(range(int(cfg.inference.benchmark_runs)), desc="Benchmark", unit="run", leave=False, disable=not display_progress):
             started = time.perf_counter()
             logits = infer()
             _synchronize(device)
@@ -193,6 +210,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "cuda": torch.version.cuda,
         },
     }
+    target = None
     if args.ground_truth is not None:
         target = _load_image(args.ground_truth, cfg, label=True)[0].cpu()
         metrics["ground_truth"] = str(args.ground_truth.resolve())
@@ -200,35 +218,89 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             prediction, target, class_count, cfg
         )
 
-    if bool(cfg.xai.enabled):
+    perturbations = list(configured_perturbations(cfg))
+    if bool(cfg.xai.enabled) and perturbations:
         stages.set_postfix_str("XAI and faithfulness")
-        target_class = target_class_from_prediction(prediction, cfg.xai.target_class)
-        if not 0 <= target_class < class_count:
-            raise ValueError(
-                f"xai.target_class={target_class} is outside [0, {class_count - 1}]"
-            )
-        target_mask = (prediction == target_class).to(device)
         xai_results: dict[str, Any] = {}
-        for method in tqdm(cfg.xai.methods, desc="XAI methods", unit="method", leave=False):
-            method = str(method)
+        work: dict[tuple[str, int], list[Any]] = {}
+        for perturbation in perturbations:
+            methods = _configured_values(perturbation.config, "method", "methods")
+            classes = _configured_values(
+                perturbation.config, "target_class", "target_classes"
+            )
+            for configured_class in classes:
+                target_class = target_class_from_prediction(
+                    prediction, configured_class
+                )
+                if not 0 <= target_class < class_count:
+                    raise ValueError(
+                        f"{perturbation.__class__.__name__}.target_class="
+                        f"{target_class} is outside [0, {class_count - 1}]"
+                    )
+                for configured_method in methods:
+                    key = (str(configured_method), target_class)
+                    pair_metrics = work.setdefault(key, [])
+                    if perturbation not in pair_metrics:
+                        pair_metrics.append(perturbation)
+
+        perturbation_step_total = 0
+        for (_, target_class), metrics_for_pair in work.items():
+            answer_mask = (
+                (target == target_class).to(device) if target is not None else None
+            )
+            perturbation_step_total += sum(
+                perturbation.progress_steps(answer_mask)
+                for perturbation in metrics_for_pair
+            )
+        perturbation_progress = tqdm(
+            total=perturbation_step_total,
+            desc=f"{case_name} perturbations",
+            unit="step",
+            leave=False,
+            disable=not display_perturbation_progress,
+        )
+
+        for (method, target_class), metrics_for_pair in tqdm(
+            work.items(),
+            desc="XAI method/classes",
+            unit="pair",
+            leave=False,
+            disable=not display_progress,
+        ):
+            target_mask = (prediction == target_class).to(device)
             attribution = compute_attribution(
                 batch, model, predictor, method, target_class, target_mask, cfg
             )
-            xai_output = output_dir / f"{case_name}_{method}_xai.nii.gz"
+            result_id = f"{method}_class_{target_class}"
+            xai_output = output_dir / f"{case_name}_{result_id}_xai.nii.gz"
             nib.save(
                 nib.Nifti1Image(attribution.cpu().numpy().astype(np.float32), affine),
                 xai_output,
             )
-            faithfulness = insertion_deletion_metrics(
-                batch, attribution.to(device), infer, target_class, target_mask, cfg
-            )
-            xai_results[method] = {
+            result = {
+                "method": method,
                 "attribution": str(xai_output.resolve()),
                 "target_class": target_class,
                 "attribution_min": float(attribution.min()),
                 "attribution_max": float(attribution.max()),
-                **faithfulness,
+                "perturbations": {},
             }
+            answer_mask = (
+                (target == target_class).to(device) if target is not None else None
+            )
+            for perturbation in metrics_for_pair:
+                result["perturbations"][perturbation.result_id] = perturbation.evaluate(
+                    batch,
+                    attribution.to(device),
+                    infer,
+                    target_class,
+                    target_mask,
+                    answer_mask,
+                    progress=False,
+                    progress_callback=perturbation_progress.update,
+                )
+            xai_results[result_id] = result
+        perturbation_progress.close()
         metrics["xai"] = xai_results
     stages.update()
 
@@ -242,10 +314,87 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     stages.update()
     stages.set_postfix_str("complete")
     stages.close()
-    print(json.dumps(metrics, ensure_ascii=False, indent=2))
-    print(f"Result directory: {output_dir}")
-    print(f"Prediction: {prediction_output}")
-    print(f"Metrics: {metrics_output}")
-    print(f"CSV files: {len(csv_outputs)}")
-    print(f"Plots: {len(plot_outputs)}")
+    if display_progress:
+        print(f"Complete: {case_name}")
+        print(f"Result directory: {output_dir}")
+        print(f"Metrics: {metrics_output}")
+        print(f"CSV files: {len(csv_outputs)}, plots: {len(plot_outputs)}")
     return metrics
+
+
+def _dataset_cases(input_dir: Path) -> list[tuple[Path, Path | None]]:
+    volumes = sorted(
+        path
+        for pattern in ("*.nii", "*.nii.gz")
+        for path in input_dir.glob(pattern)
+        if not _nifti_stem(path).endswith("_gt")
+    )
+    cases = []
+    seen_stems: set[str] = set()
+    for volume in volumes:
+        stem = _nifti_stem(volume)
+        if stem in seen_stems:
+            raise ValueError(
+                f"Dataset contains more than one input with stem {stem!r}"
+            )
+        seen_stems.add(stem)
+        ground_truth = next(
+            (
+                candidate
+                for candidate in (
+                    input_dir / f"{stem}_gt.nii.gz",
+                    input_dir / f"{stem}_gt.nii",
+                )
+                if candidate.is_file()
+            ),
+            None,
+        )
+        cases.append((volume, ground_truth))
+    return cases
+
+
+def run(args: argparse.Namespace) -> dict[str, Any]:
+    """Run one volume, or auto-pair every volume and ``*_gt`` in a directory."""
+    if not args.input.is_dir():
+        return _run_single(args)
+    if args.ground_truth is not None:
+        raise ValueError("--ground-truth cannot be used when input is a dataset directory")
+    cases = _dataset_cases(args.input)
+    if not cases:
+        raise FileNotFoundError(f"No .nii or .nii.gz volumes found in {args.input}")
+    from tqdm.auto import tqdm
+
+    dataset_results: dict[str, str] = {}
+    for input_path, ground_truth in tqdm(
+        cases, desc="Dataset inference", unit="case"
+    ):
+        case_name = _nifti_stem(input_path)
+        case_args = argparse.Namespace(
+            **{
+                **vars(args),
+                "input": input_path,
+                "ground_truth": ground_truth,
+                "output": args.output / case_name,
+                "metrics_output": None,
+            }
+        )
+        result = _run_single(
+            case_args,
+            display_progress=False,
+            display_perturbation_progress=True,
+        )
+        dataset_results[case_name] = result["output_directory"]
+    summary = {
+        "input_directory": str(args.input.resolve()),
+        "output_directory": str(args.output.resolve()),
+        "case_count": len(dataset_results),
+        "cases": dataset_results,
+    }
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "dataset_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"Dataset complete: {len(dataset_results)} cases")
+    print(f"Result directory: {args.output}")
+    print(f"Summary: {args.output / 'dataset_summary.json'}")
+    return summary
