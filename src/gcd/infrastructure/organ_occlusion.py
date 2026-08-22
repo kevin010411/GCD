@@ -285,6 +285,7 @@ def prediction_metrics(
 class TotalSegmentatorOrganService:
     def __init__(self, cache_root: str | Path = "output/organ_masks") -> None:
         self.cache_root = Path(cache_root)
+        self.last_run_metadata: dict[str, object] = {}
 
     @staticmethod
     def source_hash(path: str | Path) -> str:
@@ -306,6 +307,7 @@ class TotalSegmentatorOrganService:
         force: bool = False,
         device: str = "gpu",
         task: str = "total",
+        merge_organs: bool = True,
     ) -> list[OrganMaskRecord]:
         import nibabel as nib
         import totalsegmentator
@@ -317,7 +319,11 @@ class TotalSegmentatorOrganService:
         if task == "total" and self._has_totalsegmentator_license():
             tasks.append("heartchambers_highres")
         records_by_id: dict[str, OrganMaskRecord] = {}
+        task_metadata: list[dict[str, object]] = []
         for current_task in tasks:
+            key = self.cache_key(source_path, version, current_task)
+            label_path = self.cache_root / key / f"{current_task}.nii.gz"
+            cache_hit = label_path.exists() and not force
             label_path = self._ensure_task_output(
                 source_path,
                 version=version,
@@ -333,9 +339,24 @@ class TotalSegmentatorOrganService:
                 labels.affine,
             )
             for record in self._records_from_labelmap(
-                np.asarray(labels.dataobj), labels.affine, get_task_classes(current_task)
+                np.asarray(labels.dataobj), labels.affine, get_task_classes(current_task),
+                merge_organs=merge_organs,
             ):
                 records_by_id[record.id] = record
+            task_metadata.append(
+                {
+                    "task": current_task,
+                    "cache_key": key,
+                    "cache_hit": cache_hit,
+                    "label_path": str(label_path.resolve()),
+                }
+            )
+        self.last_run_metadata = {
+            "version": version,
+            "cache_root": str(self.cache_root.resolve()),
+            "tasks": task_metadata,
+            "merge_organs": bool(merge_organs),
+        }
         return list(records_by_id.values())
 
     @staticmethod
@@ -393,13 +414,19 @@ class TotalSegmentatorOrganService:
 
     @staticmethod
     def _records_from_labelmap(
-        labelmap: np.ndarray, affine, class_map: dict[int, str]
+        labelmap: np.ndarray,
+        affine,
+        class_map: dict[int, str],
+        *,
+        merge_organs: bool = True,
     ) -> list[OrganMaskRecord]:
         inverse = {str(name): int(index) for index, name in class_map.items()}
         present_ids = {int(value) for value in np.unique(labelmap)}
         records: list[OrganMaskRecord] = []
         consumed: set[str] = set()
-        for organ_id, name, source_labels, color in CURATED_ORGANS:
+        for organ_id, name, source_labels, color in (
+            CURATED_ORGANS if merge_organs else ()
+        ):
             ids = [inverse[label] for label in source_labels if label in inverse]
             ids = [value for value in ids if value in present_ids]
             if not ids:

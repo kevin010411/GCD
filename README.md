@@ -68,6 +68,24 @@ uv run main.py
 
 ## Usage
 
+### Dataset inference CLI
+
+From the repository root, pass the dataset directory as the positional input:
+
+```powershell
+uv run python -m experiments.predict data/chgh `
+  --config experiments/configs/predict.py `
+  --output output/chgh
+```
+
+Input volumes such as `patient0001.nii.gz` are automatically paired with
+`patient0001_gt.nii.gz`. Each patient is written to a separate directory under
+`output/chgh`, and the dataset-level index is written to
+`output/chgh/dataset_summary.json`.
+
+For all experiment CLI options and output files, see
+[`experiments/README.md`](experiments/README.md).
+
 1. Run the application:
    ```bash
    uv run main.py

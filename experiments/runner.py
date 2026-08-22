@@ -10,9 +10,15 @@ from typing import Any
 from .metrics import segmentation_metrics
 from .outputs import export_csv_files, export_faithfulness_plots
 from .xai import (
-    compute_attribution,
     configured_perturbations,
     target_class_from_prediction,
+)
+from .xai_design import (
+    RegistryXaiMethod,
+    XaiExecutionContext,
+    build_xai_answer,
+    build_xai_methods,
+    build_xai_metrics,
 )
 
 
@@ -31,6 +37,31 @@ def _load_image(path: Path, cfg: Any, *, label: bool = False):
 
     image = mt.LoadImage(image_only=True)(str(path))
     image = mt.EnsureChannelFirst()(image)
+    image = mt.Spacing(
+        pixdim=tuple(cfg.preprocessing.spacing),
+        mode="nearest" if label else "bilinear",
+    )(image)
+    if not label:
+        image = mt.ScaleIntensityRange(
+            a_min=float(cfg.preprocessing.intensity_input_range[0]),
+            a_max=float(cfg.preprocessing.intensity_input_range[1]),
+            b_min=float(cfg.preprocessing.intensity_output_range[0]),
+            b_max=float(cfg.preprocessing.intensity_output_range[1]),
+            clip=True,
+        )(image)
+    return image
+
+
+def _preprocess_array(array, affine, cfg: Any, *, label: bool = False):
+    """Apply the experiment preprocessing pipeline to an in-memory volume."""
+    import torch
+    import monai.transforms as mt
+    from monai.data import MetaTensor
+
+    image = MetaTensor(
+        torch.as_tensor(array, dtype=torch.float32).unsqueeze(0),
+        affine=torch.as_tensor(affine, dtype=torch.float64),
+    )
     image = mt.Spacing(
         pixdim=tuple(cfg.preprocessing.spacing),
         mode="nearest" if label else "bilinear",
@@ -77,6 +108,10 @@ def _configured_values(config: Any, singular: str, plural: str) -> list[Any]:
     return list(values or ())
 
 
+def _xai_execution_enabled(cfg: Any, *, using_legacy: bool) -> bool:
+    return not using_legacy or bool(cfg.get("xai", {}).get("enabled", True))
+
+
 def _run_single(
     args: argparse.Namespace,
     *,
@@ -101,13 +136,6 @@ def _run_single(
     case_name = _nifti_stem(args.input)
     prediction_output = output_dir / f"{case_name}_prediction.nii.gz"
 
-    stages = tqdm(
-        total=5,
-        desc="Experiment",
-        unit="stage",
-        disable=not display_progress,
-    )
-    stages.set_postfix_str("loading config/model")
     cfg = Config.fromfile(str(args.config))
     if args.cfg_options:
         cfg.merge_from_dict(args.cfg_options)
@@ -134,12 +162,9 @@ def _run_single(
             f"unexpected={incompatible.unexpected_keys}"
         )
     model.eval()
-    stages.update()
 
-    stages.set_postfix_str("preprocessing volume")
     image = _load_image(args.input, cfg).to(device=device, dtype=torch.float32)
     batch = image.unsqueeze(0)
-    stages.update()
 
     def predictor(tile):
         return _extract_logits(model(tile))
@@ -154,7 +179,6 @@ def _run_single(
             mode=str(cfg.inference.blend_mode),
         )
 
-    stages.set_postfix_str("inference benchmark")
     with torch.inference_mode():
         for _ in tqdm(range(int(cfg.inference.warmup_runs)), desc="Warmup", unit="run", leave=False, disable=not display_progress):
             infer()
@@ -166,7 +190,6 @@ def _run_single(
             logits = infer()
             _synchronize(device)
             durations.append(time.perf_counter() - started)
-    stages.update()
     if logits is None:
         raise ValueError("inference.benchmark_runs must be at least 1")
 
@@ -218,9 +241,21 @@ def _run_single(
             prediction, target, class_count, cfg
         )
 
-    perturbations = list(configured_perturbations(cfg))
-    if bool(cfg.xai.enabled) and perturbations:
-        stages.set_postfix_str("XAI and faithfulness")
+    xai_methods = build_xai_methods(cfg)
+    perturbations = build_xai_metrics(cfg)
+    using_legacy_xai = not xai_methods and not perturbations
+    if not perturbations:
+        perturbations = list(configured_perturbations(cfg))
+    if not xai_methods and perturbations:
+        method_ids = {
+            str(method)
+            for perturbation in perturbations
+            for method in _configured_values(perturbation.config, "method", "methods")
+        }
+        xai_methods = {
+            method_id: RegistryXaiMethod(method_id) for method_id in method_ids
+        }
+    if xai_methods and _xai_execution_enabled(cfg, using_legacy=using_legacy_xai):
         xai_results: dict[str, Any] = {}
         work: dict[tuple[str, int], list[Any]] = {}
         for perturbation in perturbations:
@@ -243,6 +278,22 @@ def _run_single(
                     if perturbation not in pair_metrics:
                         pair_metrics.append(perturbation)
 
+        # XAI attribution is useful independently of insertion/deletion metrics.
+        # When no perturbations are configured, methods provide their own target
+        # classes and each work item simply has an empty metric list.
+        if not perturbations:
+            for method_id, method in xai_methods.items():
+                for configured_class in method.target_classes:
+                    target_class = target_class_from_prediction(
+                        prediction, configured_class
+                    )
+                    if not 0 <= target_class < class_count:
+                        raise ValueError(
+                            f"XaiMethods[{method_id!r}].target_class={target_class} "
+                            f"is outside [0, {class_count - 1}]"
+                        )
+                    work.setdefault((method_id, target_class), [])
+
         perturbation_step_total = 0
         for (_, target_class), metrics_for_pair in work.items():
             answer_mask = (
@@ -260,7 +311,7 @@ def _run_single(
             disable=not display_perturbation_progress,
         )
 
-        for (method, target_class), metrics_for_pair in tqdm(
+        for (method_id, target_class), metrics_for_pair in tqdm(
             work.items(),
             desc="XAI method/classes",
             unit="pair",
@@ -268,21 +319,86 @@ def _run_single(
             disable=not display_progress,
         ):
             target_mask = (prediction == target_class).to(device)
-            attribution = compute_attribution(
-                batch, model, predictor, method, target_class, target_mask, cfg
+            organ_progress = None
+            if method_id not in xai_methods:
+                raise ValueError(
+                    f"XAI metric references unknown method {method_id!r}; "
+                    f"configured methods are {sorted(xai_methods)}"
+                )
+            method_instance = xai_methods[method_id]
+            if method_instance.execution_scope == "dataset":
+                organ_progress = tqdm(
+                    desc=f"{case_name} organs",
+                    unit="organ",
+                    leave=False,
+                    disable=not display_perturbation_progress,
+                )
+            source_image = nib.load(str(args.input)) if organ_progress is not None else None
+            source_array = (
+                np.asarray(source_image.dataobj, dtype=np.float32)
+                if source_image is not None
+                else None
             )
-            result_id = f"{method}_class_{target_class}"
+
+            def start_organ_progress(total: int) -> None:
+                if organ_progress is not None:
+                    organ_progress.total = total
+                    organ_progress.refresh()
+
+            try:
+                attribution, attribution_metadata = method_instance.explain(
+                    XaiExecutionContext(
+                        batch=batch,
+                        model=model,
+                        predictor=predictor,
+                        target_class=target_class,
+                        target_mask=target_mask,
+                        cfg=cfg,
+                        dataset_context={
+                            "input_path": args.input,
+                            "source": source_array,
+                            "affine": (
+                                np.asarray(source_image.affine)
+                                if source_image is not None
+                                else None
+                            ),
+                            "preprocess_image": (
+                                lambda data, source_affine, label: _preprocess_array(
+                                    data, source_affine, cfg, label=label
+                                )
+                            ),
+                            "infer": infer,
+                            "baseline_logits": logits,
+                            "answer_mask": (
+                                (target == target_class).to(device)
+                                if target is not None
+                                else target_mask
+                            ),
+                            "progress_callback": (
+                                organ_progress.update
+                                if organ_progress is not None
+                                else None
+                            ),
+                            "progress_start_callback": start_organ_progress,
+                        },
+                    )
+                )
+            finally:
+                if organ_progress is not None:
+                    organ_progress.close()
+            result_id = f"{method_id}_class_{target_class}"
             xai_output = output_dir / f"{case_name}_{result_id}_xai.nii.gz"
             nib.save(
                 nib.Nifti1Image(attribution.cpu().numpy().astype(np.float32), affine),
                 xai_output,
             )
             result = {
-                "method": method,
+                "method": method_id,
                 "attribution": str(xai_output.resolve()),
                 "target_class": target_class,
                 "attribution_min": float(attribution.min()),
                 "attribution_max": float(attribution.max()),
+                **attribution_metadata,
                 "perturbations": {},
             }
             answer_mask = (
@@ -302,18 +418,15 @@ def _run_single(
             xai_results[result_id] = result
         perturbation_progress.close()
         metrics["xai"] = xai_results
-    stages.update()
-
-    stages.set_postfix_str("writing JSON/CSV/plots")
+        answer_aggregator = build_xai_answer(cfg)
+        if answer_aggregator is not None and perturbations:
+            metrics["xai_answer"] = answer_aggregator.aggregate(xai_results)
     metrics_output = output_dir / (args.metrics_output.name if args.metrics_output else "metrics.json")
     metrics_output.write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     csv_outputs = export_csv_files(metrics, output_dir)
     plot_outputs = export_faithfulness_plots(metrics, output_dir)
-    stages.update()
-    stages.set_postfix_str("complete")
-    stages.close()
     if display_progress:
         print(f"Complete: {case_name}")
         print(f"Result directory: {output_dir}")

@@ -124,7 +124,26 @@ class OrganOcclusionTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertNotEqual(second, third)
 
+    def test_record_creation_can_disable_curated_organ_merging(self) -> None:
+        labelmap = np.array([[[1, 2]]], dtype=np.uint8)
+        class_map = {
+            1: "lung_upper_lobe_left",
+            2: "lung_lower_lobe_left",
+        }
+
+        merged = TotalSegmentatorOrganService._records_from_labelmap(
+            labelmap, np.eye(4), class_map, merge_organs=True
+        )
+        separate = TotalSegmentatorOrganService._records_from_labelmap(
+            labelmap, np.eye(4), class_map, merge_organs=False
+        )
+
+        self.assertEqual([record.id for record in merged], ["lung_left"])
+        self.assertEqual(
+            [record.id for record in separate],
+            ["lung_upper_lobe_left", "lung_lower_lobe_left"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
-

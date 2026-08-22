@@ -64,6 +64,7 @@ def export_csv_files(metrics: dict[str, Any], output_dir: Path) -> list[Path]:
         curve_path = output_dir / "xai_curves.csv"
         summary_rows = []
         curve_rows = []
+        metric_curve_rows = []
         for result_id, result in metrics["xai"].items():
             if "perturbations" not in result:
                 summary_rows.append(
@@ -110,6 +111,11 @@ def export_csv_files(metrics: dict[str, Any], output_dir: Path) -> list[Path]:
                         }
                     )
                     for index, fraction in enumerate(curve.get("fractions", [])):
+                        scores = curve.get("scores", [])
+                        prediction_dice = curve.get("prediction_dice", [])
+                        prediction_iou = curve.get("prediction_iou", [])
+                        ground_truth_dice = curve.get("ground_truth_dice", [])
+                        ground_truth_iou = curve.get("ground_truth_iou", [])
                         curve_rows.append(
                             {
                                 "method": result["method"],
@@ -118,16 +124,77 @@ def export_csv_files(metrics: dict[str, Any], output_dir: Path) -> list[Path]:
                                 "variant": variant,
                                 "step": index,
                                 "fraction": fraction,
-                                "target_probability": curve["scores"][index],
-                                "prediction_dice": curve["prediction_dice"][index],
-                                "prediction_iou": curve["prediction_iou"][index],
-                                "ground_truth_dice": curve["ground_truth_dice"][index] if curve["ground_truth_dice"] else None,
-                                "ground_truth_iou": curve["ground_truth_iou"][index] if curve["ground_truth_iou"] else None,
+                                "target_probability": scores[index] if index < len(scores) else None,
+                                "prediction_dice": prediction_dice[index] if index < len(prediction_dice) else None,
+                                "prediction_iou": prediction_iou[index] if index < len(prediction_iou) else None,
+                                "ground_truth_dice": ground_truth_dice[index] if index < len(ground_truth_dice) else None,
+                                "ground_truth_iou": ground_truth_iou[index] if index < len(ground_truth_iou) else None,
                             }
                         )
+                        for scorer_id, values in curve.get("curves", {}).items():
+                            if index < len(values):
+                                metric_curve_rows.append(
+                                    {
+                                        "method": result["method"],
+                                        "target_class": result["target_class"],
+                                        "operation": operation,
+                                        "variant": variant,
+                                        "scorer": scorer_id,
+                                        "step": index,
+                                        "fraction": fraction,
+                                        "score": values[index],
+                                        "auc": curve.get("aucs", {}).get(scorer_id),
+                                    }
+                                )
         _write_csv(summary_path, ["method", "target_class", "operation", "variant", "status", "answer_retention", "attribution", "auc", "reason"], summary_rows)
         _write_csv(curve_path, ["method", "target_class", "operation", "variant", "step", "fraction", "target_probability", "insertion_score", "deletion_score", "prediction_dice", "prediction_iou", "ground_truth_dice", "ground_truth_iou"], curve_rows)
         paths.extend((summary_path, curve_path))
+        if metric_curve_rows:
+            metric_curve_path = output_dir / "xai_metric_curves.csv"
+            _write_csv(
+                metric_curve_path,
+                [
+                    "method", "target_class", "operation", "variant",
+                    "scorer", "step", "fraction", "score", "auc",
+                ],
+                metric_curve_rows,
+            )
+            paths.append(metric_curve_path)
+        organ_rows = []
+        for result in metrics["xai"].values():
+            for organ in result.get("organs", []):
+                organ_rows.append(
+                    {
+                        "method": result.get("method"),
+                        "target_class": result.get("target_class"),
+                        "objective": result.get("objective"),
+                        **organ,
+                    }
+                )
+        if organ_rows:
+            organ_path = output_dir / "organ_occlusion_ranking.csv"
+            _write_csv(
+                organ_path,
+                [
+                    "method", "target_class", "objective", "rank", "organ_id",
+                    "display_name", "source_labels", "baseline_score",
+                    "occluded_score", "signed_delta", "voxel_count",
+                ],
+                organ_rows,
+            )
+            paths.append(organ_path)
+    answer = metrics.get("xai_answer")
+    if answer and answer.get("ranking"):
+        answer_path = output_dir / "xai_answer.csv"
+        _write_csv(
+            answer_path,
+            [
+                "rank", "result_id", "method", "target_class",
+                "insertion_auc", "deletion_auc", "final_score",
+            ],
+            answer["ranking"],
+        )
+        paths.append(answer_path)
     return paths
 
 
@@ -181,18 +248,28 @@ def export_faithfulness_plots(metrics: dict[str, Any], output_dir: Path) -> list
                 / operation
             )
             plot_dir.mkdir(parents=True, exist_ok=True)
-            plot_specs = (
-                ("target_probability", "scores", "Target-class probability", False),
-                ("prediction_dice", "prediction_dice", "Prediction Dice", True),
-                ("prediction_iou", "prediction_iou", "Prediction IoU", True),
-                ("ground_truth_dice", "ground_truth_dice", "Ground-truth Dice", True),
-                ("ground_truth_iou", "ground_truth_iou", "Ground-truth IoU", True),
+            scorer_ids = sorted(
+                {
+                    scorer_id
+                    for curve in completed.values()
+                    for scorer_id in curve.get("curves", {})
+                }
             )
-            for metric_name, value_key, title, bounded in plot_specs:
+            titles = {
+                "target_probability": "Target-class probability",
+                "prediction_dice": "Prediction Dice",
+                "prediction_iou": "Prediction IoU",
+                "ground_truth_dice": "Ground-truth Dice",
+                "ground_truth_iou": "Ground-truth IoU",
+            }
+            bounded_scorers = set(titles)
+            for metric_name in scorer_ids:
+                title = titles.get(metric_name, metric_name.replace("_", " ").title())
+                bounded = metric_name in bounded_scorers
                 available = {
                     variant: curve
                     for variant, curve in completed.items()
-                    if curve[value_key]
+                    if curve.get("curves", {}).get(metric_name)
                 }
                 if not available:
                     continue
@@ -200,10 +277,10 @@ def export_faithfulness_plots(metrics: dict[str, Any], output_dir: Path) -> list
                 for variant, curve in available.items():
                     label = variant
                     if metric_name == "target_probability":
-                        label += f" (AUC={curve['auc']:.4f})"
+                        label += f" (AUC={curve['aucs'][metric_name]:.4f})"
                     axis.plot(
                         curve["fractions"],
-                        curve[value_key],
+                        curve["curves"][metric_name],
                         marker="o",
                         label=label,
                     )
