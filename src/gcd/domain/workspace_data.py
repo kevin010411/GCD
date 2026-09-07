@@ -141,6 +141,7 @@ class XaiComputeResult:
     feature_size: int
     volume: VolumeRecord
     volume_data_range: DataRange
+    prediction_volume: VolumeRecord | None = None
 
 
 @dataclass(frozen=True)

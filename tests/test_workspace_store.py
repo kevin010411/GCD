@@ -3,7 +3,13 @@ import unittest
 import numpy as np
 
 from src.gcd.application.workspace_store import WorkspaceDataStore
-from src.gcd.domain import DataRange, DatasetInput, TransferFunction
+from src.gcd.domain import (
+    DataRange,
+    DatasetInput,
+    TransferFunction,
+    VolumeRecord,
+    XaiComputeResult,
+)
 
 
 def _loaded_result():
@@ -69,6 +75,64 @@ def _xai_result(data):
 
 
 class WorkspaceDataStoreTests(unittest.TestCase):
+    def test_typed_gradient_result_adds_cam_and_prediction_to_data_volumes(self) -> None:
+        store = WorkspaceDataStore()
+        loaded = _loaded_result()
+        store.add_loaded_dataset("dataset-1", loaded)
+        metadata = dict(loaded["display_metadata"])
+
+        def volume(name, source, method_id, data):
+            return VolumeRecord(
+                id="",
+                dataset_id="",
+                display_name=name,
+                source=source,
+                method_id=method_id,
+                data=data,
+                data_range=DataRange.from_data([data]),
+                transfer_function=TransferFunction.base_preset(),
+                spacing=(1.5, 1.5, 2.0),
+                metadata=metadata,
+                shape=tuple(int(v) for v in data.shape),
+                source_base_item_id="",
+                source_shape=tuple(int(v) for v in data.shape),
+                source_spacing=(1.5, 1.5, 2.0),
+                source_affine=None,
+            )
+
+        cam = np.array([0.1, 0.5, 1.0], dtype=np.float32)
+        prediction = np.array([0, 1, 1], dtype=np.int16)
+        result = XaiComputeResult(
+            dataset_input=loaded["dataset_input"],
+            layer_names=("layer-a",),
+            selected_layer="layer-a",
+            method_options=(),
+            selected_method="gradcam",
+            objective_options=(),
+            selected_objective="predicted_target_mask",
+            feature_size=8,
+            volume=volume("sample_gradcam", "xai", "gradcam", cam),
+            volume_data_range=DataRange.from_data([loaded["volume_data"]]),
+            prediction_volume=volume(
+                "sample_gradcam_prediction",
+                "prediction",
+                "gradcam:prediction",
+                prediction,
+            ),
+        )
+
+        cam_id = store.upsert_xai_result("dataset-1", result)
+
+        self.assertEqual(len(store.volume_order), 3)
+        prediction_id = store.volume_order[-1]
+        self.assertEqual(store.selected_transfer_volume_id, cam_id)
+        self.assertEqual(store.volumes[prediction_id].source, "prediction")
+        np.testing.assert_array_equal(store.volumes[prediction_id].data, prediction)
+        self.assertEqual(
+            store.datasets["dataset-1"].result_ids,
+            (cam_id, prediction_id),
+        )
+
     def test_grad_and_render_share_dataset_and_volume_source(self) -> None:
         store = WorkspaceDataStore()
         store.add_loaded_dataset("dataset-1", _loaded_result())

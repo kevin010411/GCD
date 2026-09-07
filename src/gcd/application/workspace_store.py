@@ -331,6 +331,41 @@ class WorkspaceDataStore:
                 feature_size=int(result.get("feature_size", dataset.feature_size)),
             )
         updated_dataset = updated_dataset.with_result_id(volume.id)
+        extra_volumes: list[VolumeRecord] = []
+        if compute_result is not None and compute_result.prediction_volume is not None:
+            source_prediction = compute_result.prediction_volume
+            prediction_id = self.create_prediction_volume_id(
+                dataset_id, source_prediction.method_id
+            )
+            prediction = replace(
+                source_prediction,
+                id=prediction_id,
+                dataset_id=dataset_id,
+                display_name=self.unique_volume_display_name(
+                    source_prediction.display_name
+                ),
+                metadata={
+                    **source_prediction.metadata,
+                    "volume_id": prediction_id,
+                },
+                source_base_item_id=dataset.base_volume_id,
+                source_shape=tuple(
+                    int(v)
+                    for v in source_prediction.metadata.get(
+                        "source_shape",
+                        dataset.display_metadata.get("source_shape", dataset.base_shape),
+                    )
+                ),
+                source_spacing=dataset.base_spacing,
+                source_affine=source_prediction.metadata.get(
+                    "source_affine",
+                    dataset.display_metadata.get(
+                        "source_affine", dataset.display_metadata.get("affine")
+                    ),
+                ),
+            )
+            updated_dataset = updated_dataset.with_result_id(prediction.id)
+            extra_volumes.append(prediction)
         self.datasets[dataset_id] = updated_dataset
         self.volumes[volume.id] = volume
         if volume.id not in self.selection.volume_order:
@@ -339,6 +374,14 @@ class WorkspaceDataStore:
             )
         self.selection = replace(self.selection, selected_volume_id=volume.id)
         self._emit(VolumeUpserted(volume.id, dataset_id))
+        for extra_volume in extra_volumes:
+            self.volumes[extra_volume.id] = extra_volume
+            if extra_volume.id not in self.selection.volume_order:
+                self.selection = replace(
+                    self.selection,
+                    volume_order=(*self.selection.volume_order, extra_volume.id),
+                )
+            self._emit(VolumeUpserted(extra_volume.id, dataset_id))
         return volume.id
 
     def create_prediction_volume_id(self, dataset_id: str, method_id: str) -> str:

@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from src.gcd.application.services import WorkflowService
-from src.gcd.domain import DatasetInput, TransferFunction
+from src.gcd.domain import DatasetInput, TransferFunction, XaiComputeRequest
 
 
 class _FakeEngine:
@@ -149,6 +149,35 @@ class _FakeRunnerEngine(_FakeEngine):
 
 
 class WorkflowServiceTests(unittest.TestCase):
+    def test_gradient_result_includes_prediction_volume_for_data_plugin(self) -> None:
+        engine = _FakeEngine()
+        engine.model_output = np.array([[[0, 1], [2, 1]]], dtype=np.int16)
+        service = WorkflowService(engine)
+
+        result = service.compute_xai(
+            engine.dataset_input(),
+            XaiComputeRequest(
+                target_class=1,
+                layer="layer-a",
+                n1=0,
+                n2=8,
+                method="gradcam",
+                result_name="sample_model_gradcam",
+            ),
+        )
+
+        self.assertIsNotNone(result.prediction_volume)
+        self.assertEqual(result.prediction_volume.source, "prediction")
+        self.assertEqual(result.prediction_volume.method_id, "gradcam:prediction")
+        self.assertEqual(
+            result.prediction_volume.display_name,
+            "sample_model_gradcam_prediction",
+        )
+        np.testing.assert_array_equal(
+            result.prediction_volume.data,
+            np.array([[[0, 1], [2, 1]]], dtype=np.int16),
+        )
+
     def test_compute_cam_returns_separate_transfer_defaults_and_ranges(self) -> None:
         service = WorkflowService(_FakeEngine())
 

@@ -565,6 +565,38 @@ class WorkflowService:
             family = getattr(self.engine._resolve_cam_method(request.method), "family", family)
         method_options = self.list_xai_methods(family)
         objective_options = self.engine.available_objectives(family)
+        prediction_volume = None
+        if family == "gradient" and getattr(self.engine, "model_output", None) is not None:
+            model_output = self.engine.model_output
+            display_prediction = (
+                self.engine.prediction_to_raw_display_space(model_output)
+                if hasattr(self.engine, "prediction_to_raw_display_space")
+                else model_output
+            )
+            prediction_range = DataRange.from_data([display_prediction], method="minmax")
+            prediction_volume = VolumeRecord(
+                id="",
+                dataset_id="",
+                display_name=f"{request.result_name}_prediction",
+                source="prediction",
+                method_id=f"{request.method}:prediction",
+                data=display_prediction,
+                data_range=prediction_range,
+                transfer_function=TransferFunction.base_preset(),
+                spacing=display_spacing,
+                metadata=display_metadata,
+                shape=tuple(int(v) for v in display_prediction.shape),
+                source_base_item_id="",
+                source_shape=tuple(int(v) for v in display_prediction.shape),
+                source_spacing=display_spacing,
+                source_affine=display_metadata.get("affine"),
+                plugin_metadata={
+                    "model_name": (request.method_params or {}).get("model_name"),
+                    "target_class": request.target_class,
+                    "xai_method": request.method,
+                    "data_kind": "class_prediction",
+                },
+            )
         return XaiComputeResult(
             dataset_input=self.engine.dataset_input(),
             layer_names=tuple(self.engine.layers.keys()),
@@ -599,6 +631,7 @@ class WorkflowService:
                 },
             ),
             volume_data_range=volume_data_range,
+            prediction_volume=prediction_volume,
         )
 
     def compute_cam(

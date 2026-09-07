@@ -5,6 +5,7 @@ model = dict(
     act="RELU",
     norm="BATCH",
     out_channels=8,
+    num_res_units=3,
     adn_ordering="ADN",
 )  # 模型
 # ckpt = "checkpoint/3d_unet_2025.pth"  # 權重檔

@@ -793,6 +793,27 @@ class GradCamEngine:
         source_space = self._to_origin_space(data)
         return source_space.permute(*self.PERMUTE)
 
+    def prediction_to_raw_display_space(self, tensor):
+        """Restore a categorical prediction volume without interpolating class IDs."""
+        import torch
+        import torch.nn.functional as F
+
+        if tensor is None:
+            return tensor
+        volume = self._inv_permute(torch.as_tensor(tensor).to(torch.float32))
+        target_shape = (
+            tuple(int(v) for v in self.origin_shape[1:])
+            if self.origin_shape is not None
+            else tuple(int(v) for v in volume.shape)
+        )
+        if tuple(volume.shape) != target_shape:
+            volume = F.interpolate(
+                volume.unsqueeze(0).unsqueeze(0),
+                size=target_shape,
+                mode="nearest",
+            )[0, 0]
+        return volume.permute(*self.PERMUTE).round().to(dtype=torch.int16)
+
     def _safe_affine(self):
         spacing = tuple(
             float(value) for value in (self.img1_spacing or (1.0, 1.0, 1.0))

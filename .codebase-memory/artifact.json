@@ -1,0 +1,11 @@
+{
+    "schema_version": 1,
+    "commit": "",
+    "indexed_at": "2026-09-01T05:37:41Z",
+    "project": "E-Python-GCD",
+    "nodes": 2544,
+    "edges": 10532,
+    "original_size": 7929856,
+    "compressed_size": 1915720,
+    "compression_level": 9
+}
