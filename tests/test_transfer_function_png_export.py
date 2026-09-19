@@ -38,6 +38,5 @@ class TransferFunctionPngExportTests(unittest.TestCase):
         self.assertEqual(image.pixelColor(93, 122).alpha(), 255)
         self.assertEqual(image.pixelColor(900, 122).alpha(), 255)
 
-
 if __name__ == "__main__":
     unittest.main()

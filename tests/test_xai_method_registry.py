@@ -14,7 +14,7 @@ class XaiMethodRegistryTests(unittest.TestCase):
 
         self.assertEqual(
             gradient_ids,
-            ["gradcam", "xrescam", "gradcam_test", "saliency_map"],
+            ["gradcam", "scorecam", "xrescam", "gradcam_test", "saliency_map"],
         )
         self.assertEqual(
             perturbation_ids,

@@ -528,10 +528,20 @@ class WorkflowService:
     ) -> XaiComputeResult:
         self.engine.load_dataset_input(dataset_input)
         self.engine.set_target_class(request.target_class)
+        preparation_params = request.method_params
+        if request.method == "scorecam":
+            preparation_params = dict(request.method_params or {})
+            preparation_params.update(
+                {
+                    "_selected_layer": request.layer or "",
+                    "_feature_start": int(request.n1),
+                    "_feature_stop": int(request.n2),
+                }
+            )
         self.engine.prepare_xai_inputs(
             method=request.method,
             objective_id=request.objective_id,
-            method_params=request.method_params,
+            method_params=preparation_params,
         )
         run_xai_method = getattr(self.engine, "run_xai_method", None)
         compute = run_xai_method if callable(run_xai_method) else self.engine.compute_cam

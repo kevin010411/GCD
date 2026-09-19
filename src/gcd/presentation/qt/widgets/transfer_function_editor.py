@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from decimal import Decimal, ROUND_HALF_UP
 
 from PyQt6.QtCore import QPointF, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import (
@@ -280,6 +281,7 @@ class TransferFunctionEditor(QWidget):
     load_requested = pyqtSignal()
     save_requested = pyqtSignal()
     export_png_requested = pyqtSignal()
+    EXPORT_TICK_COUNT = 9
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -317,6 +319,13 @@ class TransferFunctionEditor(QWidget):
         if abs(value - round(value)) < 1e-9:
             return str(int(round(value)))
         return f"{value:.6f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _format_export_label(value: float) -> str:
+        """Format exported-axis values consistently to two decimal places."""
+        return str(
+            Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        )
 
     def _on_transfer_function_changed(
         self, transfer_function: TransferFunction, data_range: DataRange
@@ -454,7 +463,7 @@ class TransferFunctionEditor(QWidget):
         font.setPointSize(14)
         painter.setFont(font)
         painter.setPen(QPen(QColor(35, 35, 35, 255), 1))
-        tick_count = 5
+        tick_count = self.EXPORT_TICK_COUNT
         for index in range(tick_count):
             ratio = index / (tick_count - 1)
             value = data_range.min_value + ratio * (
@@ -462,7 +471,7 @@ class TransferFunctionEditor(QWidget):
             )
             x = int(round(left + ratio * bar_width))
             painter.drawLine(x, axis_y, x, axis_y - 9)
-            label = self._format_label(value)
+            label = self._format_export_label(value)
             bounds = painter.boundingRect(
                 QRect(0, 0, 400, 80), Qt.AlignmentFlag.AlignCenter, label
             )

@@ -1377,6 +1377,7 @@ class MainWindowPresenter:
                 transfer_function, data_range
             ):
                 return
+            self._sync_transfer_editor()
         except Exception as exc:
             self.error_store.save(exc, context="load_transfer_function")
 

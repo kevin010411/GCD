@@ -8,6 +8,7 @@ from src.gcd.infrastructure.xai.methods.cam_methods import (
     GradCamMethod,
     PerturbationLimeMethod,
     SaliencyMapMethod,
+    ScoreCamMethod,
     PerturbationOcclusionMethod,
     PerturbationRiseMethod,
     XResCamMethod,
@@ -16,6 +17,40 @@ from src.gcd.infrastructure.xai.engine.core_engine import GradCamEngine
 
 
 class GradCamMethodTests(unittest.TestCase):
+    def test_scorecam_scores_normalized_activation_masks(self) -> None:
+        class _ToyModel(torch.nn.Module):
+            def forward(self, value):
+                return torch.cat([torch.zeros_like(value), value], dim=1)
+
+        model = _ToyModel()
+        input_tensor = torch.ones((1, 1, 2, 2, 2), dtype=torch.float32)
+        activation = torch.tensor(
+            [[[[[0.0, 1.0], [0.0, 1.0]], [[0.0, 1.0], [0.0, 1.0]]],
+              [[[1.0, 0.0], [1.0, 0.0]], [[1.0, 0.0], [1.0, 0.0]]]]]
+        )
+        method = ScoreCamMethod(GradCamEngine._target_logit_sum_objective)
+
+        payload = method.collect_patch_data(
+            CamPatchContext(
+                input_tensor=input_tensor,
+                logits=model(input_tensor),
+                layers_by_name={"layer-a": activation},
+                target_class=1,
+                objective=GradCamEngine._target_logit_sum_objective,
+                model=model,
+                method_params={
+                    "_selected_layer": "layer-a",
+                    "_feature_start": 0,
+                    "_feature_stop": 2,
+                },
+            )
+        )
+        actual = method.build_tile_cam(payload, "layer-a", 0, 2, (2, 2, 2))
+
+        self.assertEqual(payload["method"], "scorecam")
+        self.assertTrue(torch.allclose(payload["scores"], torch.tensor([4.0, 4.0])))
+        self.assertTrue(torch.allclose(actual, torch.full_like(actual, 0.5)))
+
     def test_collect_patch_data_keeps_method_pred_and_layer_tensors(self) -> None:
         layer = torch.randn((1, 2, 2, 2, 2), requires_grad=True)
         logits = layer.mean(dim=(2, 3, 4))

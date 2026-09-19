@@ -12,6 +12,7 @@ from .perturb_occlusion import (
     PerturbationRiseMethod,
 )
 from .saliency_map import SaliencyMapMethod
+from .scorecam import ScoreCamMethod
 from .organ_occlusion import OrganOcclusionMethod
 from .xrescam import XResCamMethod
 
@@ -31,6 +32,7 @@ class XaiMethodRegistry:
         return cls(
             (
                 GradCamMethod(objective),
+                ScoreCamMethod(objective),
                 XResCamMethod(objective),
                 GradCAMTestMethod(),
                 SaliencyMapMethod(objective),

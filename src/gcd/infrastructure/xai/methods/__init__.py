@@ -14,6 +14,7 @@ from .perturb_occlusion import (
 )
 from .registry import XaiMethodRegistry
 from .saliency_map import SaliencyMapMethod
+from .scorecam import ScoreCamMethod
 from .xrescam import XResCamMethod
 from .organ_occlusion import OrganOcclusionMethod
 
@@ -25,6 +26,7 @@ __all__ = [
     "PerturbationOcclusionMethod",
     "PerturbationRiseMethod",
     "SaliencyMapMethod",
+    "ScoreCamMethod",
     "XResCamMethod",
     "XaiLayerSelection",
     "XaiMethod",
