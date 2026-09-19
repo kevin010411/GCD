@@ -697,6 +697,18 @@ class MainWindowView(QMainWindow):
         )
         return file_name
 
+    def choose_plane_import_file(self) -> str:
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Import Plane", "", "JSON Files (*.json)"
+        )
+        return file_name
+
+    def choose_plane_export_file(self) -> str:
+        file_name, _ = QFileDialog.getSaveFileName(
+            self, "Export Plane", "plane.json", "JSON Files (*.json)"
+        )
+        return file_name
+
     def closeEvent(self, event) -> None:
         try:
             self.workspace.shutdown()

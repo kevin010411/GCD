@@ -1823,6 +1823,7 @@ class WorkspaceHost(QWidget):
     layout_changed = pyqtSignal(str, str)
     annotations_changed = pyqtSignal()
     organ_volume_selected = pyqtSignal(str)
+    plane_state_changed = pyqtSignal(dict)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1834,6 +1835,18 @@ class WorkspaceHost(QWidget):
         self._last_volume_render_request = None
         self._rotation_speed = 0.5
         self._rotation_requested = False
+        self._plane_state: dict[str, object] = {
+            "enabled": False,
+            "visible": False,
+            "center": [0.0, 0.0, 0.0],
+            "normal": [0.0, 0.0, 1.0],
+            "rotation": [0.0, 0.0, 0.0],
+            "show_rotation_axes": True,
+            "show_translation_arrows": True,
+            "size": 100.0,
+            "clipping_enabled": False,
+            "keep_side": "positive",
+        }
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1857,7 +1870,25 @@ class WorkspaceHost(QWidget):
         self.roi_workspace.organ_volume_selected.connect(self.organ_volume_selected.emit)
 
         self.stack.setCurrentWidget(self.standard_workspace)
-        QTimer.singleShot(0, self.standard_workspace.ensure_3d_viewer)
+        QTimer.singleShot(
+            0, lambda: self._ensure_workspace_renderer(self.standard_workspace)
+        )
+
+    def _ensure_workspace_renderer(self, workspace: ViewerWorkspace) -> None:
+        workspace.ensure_3d_viewer()
+        renderer = workspace.renderer
+        renderer.set_plane_interaction_handler(
+            lambda state, source=renderer: self._on_plane_interacted(source, state)
+        )
+        renderer.set_plane_state(self._plane_state, render=False)
+
+    def _on_plane_interacted(self, source_renderer, state: dict[str, object]) -> None:
+        self._plane_state = dict(state)
+        for workspace in self._initialized_workspaces():
+            if workspace.renderer is source_renderer:
+                continue
+            workspace.renderer.set_plane_state(self._plane_state, render=False)
+        self.plane_state_changed.emit(dict(self._plane_state))
 
     @property
     def active_workspace(self) -> ViewerWorkspace:
@@ -1889,7 +1920,7 @@ class WorkspaceHost(QWidget):
         if self.mode == WorkspaceMode.ROI:
             self.stack.setCurrentWidget(self.roi_workspace)
             if hasattr(self.roi_workspace, "ensure_3d_viewer"):
-                self.roi_workspace.ensure_3d_viewer()
+                self._ensure_workspace_renderer(self.roi_workspace)
             WorkspaceHost._sync_last_scene_to_workspace(self, self.roi_workspace)
             if (
                 self.roi_workspace.current_preset.id
@@ -1932,6 +1963,7 @@ class WorkspaceHost(QWidget):
         workspace.renderer.show_volumes(
             volumes, spacing, metadata, render_settings=render_settings
         )
+        workspace.renderer.set_plane_state(self._plane_state, render=False)
         if self.shared_state.camera_snapshot:
             workspace.renderer.apply_camera_state(self.shared_state.camera_snapshot)
 
@@ -1956,6 +1988,54 @@ class WorkspaceHost(QWidget):
         self.roi_workspace.set_workspace_payload(
             renderable_items=renderable_items,
         )
+
+    def set_plane_state(self, state: dict[str, object], *, render: bool = True) -> None:
+        """Apply one plane state to both workspace renderers."""
+        normalized_state = None
+        for workspace in WorkspaceHost._initialized_workspaces(self):
+            setter = getattr(workspace.renderer, "set_plane_state", None)
+            if callable(setter):
+                setter(state, render=False)
+                if normalized_state is None:
+                    normalized_state = dict(workspace.renderer.plane_state)
+        self._plane_state = normalized_state or dict(state)
+        if normalized_state is not None:
+            for workspace in WorkspaceHost._initialized_workspaces(self):
+                workspace.renderer.set_plane_state(self._plane_state, render=False)
+        if render:
+            self.render()
+
+    def export_plane_state(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "type": "gcd-plane",
+            "plane": dict(self._plane_state),
+        }
+
+    def import_plane_state(self, payload: dict[str, object]) -> None:
+        state = payload.get("plane", payload) if isinstance(payload, dict) else {}
+        if isinstance(state, dict):
+            self.set_plane_state(state)
+
+    def reset_plane(self) -> None:
+        state = None
+        for workspace in WorkspaceHost._initialized_workspaces(self):
+            reset = getattr(workspace.renderer, "default_plane_state", None)
+            if callable(reset):
+                state = reset()
+                break
+        self.set_plane_state(state or {
+            "enabled": False,
+            "visible": False,
+            "center": [0.0, 0.0, 0.0],
+            "normal": [0.0, 0.0, 1.0],
+            "rotation": [0.0, 0.0, 0.0],
+            "show_rotation_axes": True,
+            "show_translation_arrows": True,
+            "size": 100.0,
+            "clipping_enabled": False,
+            "keep_side": "positive",
+        })
 
     def set_annotation_mode(self, mode: str | AnnotationMode) -> None:
         self.roi_workspace.set_annotation_mode(mode)
@@ -2040,10 +2120,12 @@ class WorkspaceHost(QWidget):
         self.standard_workspace.renderer.show_volumes(
             volumes, spacing, metadata, render_settings=render_settings
         )
+        self.standard_workspace.renderer.set_plane_state(self._plane_state, render=False)
         if WorkspaceHost._workspace_has_renderer(self.roi_workspace):
             self.roi_workspace.renderer.show_volumes(
                 volumes, spacing, metadata, render_settings=render_settings
             )
+            self.roi_workspace.renderer.set_plane_state(self._plane_state, render=False)
         if reset_camera:
             self.sync_camera_to_visible_volumes()
             self._scene_initialized = True

@@ -1413,6 +1413,45 @@ class MainWindowPresenter:
         if mode:
             self.view.workspace.set_annotation_mode(mode)
 
+    def on_plane_state_changed(self, state: dict[str, object]) -> None:
+        self.view.workspace.set_plane_state(state)
+
+    def on_plane_interaction_changed(self, state: dict[str, object]) -> None:
+        self.view.plane_plugin_panel.set_state(state)
+
+    def on_plane_reset_requested(self) -> None:
+        self.view.workspace.reset_plane()
+        self.refresh_plane_panel()
+
+    def refresh_plane_panel(self) -> None:
+        state = self.view.workspace.export_plane_state().get("plane", {})
+        if isinstance(state, dict):
+            self.view.plane_plugin_panel.set_state(state)
+
+    def on_plane_export_requested(self) -> None:
+        try:
+            path = self.view.choose_plane_export_file()
+            if not path:
+                return
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(self.view.workspace.export_plane_state(), handle, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            self.error_store.save(exc, context="export_plane")
+
+    def on_plane_import_requested(self) -> None:
+        try:
+            path = self.view.choose_plane_import_file()
+            if not path:
+                return
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                raise ValueError("Plane JSON must contain an object")
+            self.view.workspace.import_plane_state(payload)
+            self.refresh_plane_panel()
+        except Exception as exc:
+            self.error_store.save(exc, context="import_plane")
+
     def on_roi_point_size_slider_changed(self, value: int) -> None:
         self.view.roi_point_size_spinbox.blockSignals(True)
         self.view.roi_point_size_spinbox.setValue(value)

@@ -259,6 +259,13 @@ class VtkVolumeRenderer:
         self.renderer = vtkRenderer()
         self.render_window = self.vtk_widget.GetRenderWindow()
         self.render_window.AddRenderer(self.renderer)
+        self.render_window.SetNumberOfLayers(2)
+        self.plane_overlay_renderer = vtkRenderer()
+        self.plane_overlay_renderer.SetLayer(1)
+        self.plane_overlay_renderer.SetBackgroundAlpha(0.0)
+        self.plane_overlay_renderer.PreserveDepthBufferOff()
+        self.plane_overlay_renderer.SetActiveCamera(self.renderer.GetActiveCamera())
+        self.render_window.AddRenderer(self.plane_overlay_renderer)
         self.interactor = self.render_window.GetInteractor()
         self.camera_interactor_style = vtkInteractorStyleTrackballCamera()
         self.annotation_interactor_style = vtkInteractorStyleUser()
@@ -294,6 +301,28 @@ class VtkVolumeRenderer:
         self.box_creation_start = None
         self.box_creation_active = False
         self.volume_shape = (0, 0, 0)
+        self.plane_state: dict[str, object] = {
+            "enabled": False,
+            "visible": False,
+            "center": [0.0, 0.0, 0.0],
+            "normal": [0.0, 0.0, 1.0],
+            "rotation": [0.0, 0.0, 0.0],
+            "show_rotation_axes": True,
+            "show_translation_arrows": True,
+            "size": 100.0,
+            "clipping_enabled": False,
+            "keep_side": "positive",
+        }
+        self.plane_actor = None
+        self.plane_normal_actor = None
+        self.plane_axis_actors = []
+        self._vtk_clipping_plane = None
+        self.plane_interaction_handler = None
+        self.plane_widget = None
+        self.plane_representation = None
+        self.plane_orientation_widget = None
+        self.plane_orientation_representation = None
+        self.plane_translation_handles = []
         self.roi_interaction_controller = Roi3DInteractionController(self)
         self.add_axes_indicator()
         self.annotation_interactor_style.AddObserver(
@@ -434,13 +463,23 @@ class VtkVolumeRenderer:
         return True
 
     def clear_volumes(self, *, render: bool = True) -> None:
+        if self.plane_widget is not None:
+            self.plane_widget.SetEnabled(0)
+        if self.plane_orientation_widget is not None:
+            self.plane_orientation_widget.SetEnabled(0)
+        for record in self.plane_translation_handles:
+            record["widget"].SetEnabled(0)
         self.renderer.RemoveAllViewProps()
         self.add_axes_indicator()
         self.volumes = []
+        self.plane_actor = None
+        self.plane_normal_actor = None
         self.annotation_point_actors = {}
         self.annotation_box_actors = {}
         self.annotation_handle_actors = {}
         self.annotation_actor_map = {}
+        self._rebuild_plane_actor()
+        self._sync_plane_widget()
         if render:
             self.render()
 
@@ -664,6 +703,487 @@ class VtkVolumeRenderer:
             camera.SetParallelScale(float(snapshot["parallel_scale"]))
         self.renderer.ResetCameraClippingRange()
         self.render()
+
+    @staticmethod
+    def _plane_vector(value, fallback: tuple[float, float, float]) -> list[float]:
+        try:
+            vector = [float(item) for item in value]
+        except (TypeError, ValueError):
+            return list(fallback)
+        if len(vector) != 3 or not np.isfinite(vector).all():
+            return list(fallback)
+        return vector
+
+    def default_plane_state(self) -> dict[str, object]:
+        """Return a plane centered on the currently rendered volume bounds."""
+        center = [0.0, 0.0, 0.0]
+        size = 100.0
+        bounds = []
+        for volume in self.volumes:
+            if self._volume_is_visible(volume):
+                bounds.append(self._volume_bounds(volume))
+        if not bounds:
+            bounds = [self._volume_bounds(volume) for volume in self.volumes]
+        if bounds:
+            mins = np.array([min(item[axis] for item in bounds) for axis in (0, 2, 4)])
+            maxs = np.array([max(item[axis] for item in bounds) for axis in (1, 3, 5)])
+            center = [float(value) for value in (mins + maxs) * 0.5]
+            size = max(1.0, float(np.max(maxs - mins)))
+        return {
+            "enabled": False,
+            "visible": False,
+            "center": center,
+            "normal": [0.0, 0.0, 1.0],
+            "rotation": [0.0, 0.0, 0.0],
+            "show_rotation_axes": True,
+            "show_translation_arrows": True,
+            "size": size,
+            "clipping_enabled": False,
+            "keep_side": "positive",
+        }
+
+    def set_plane_state(self, state: dict[str, object] | None, *, render: bool = True) -> None:
+        """Update the viewport plane and optional mapper clipping planes."""
+        incoming = state if isinstance(state, dict) else {}
+        center = self._plane_vector(incoming.get("center", (0.0, 0.0, 0.0)), (0.0, 0.0, 0.0))
+        rotation = self._plane_vector(
+            incoming.get("rotation", (0.0, 0.0, 0.0)), (0.0, 0.0, 0.0)
+        )
+        if "rotation" in incoming:
+            normal = self._normal_from_plane_rotation(rotation)
+        else:
+            normal = self._plane_vector(incoming.get("normal", (0.0, 0.0, 1.0)), (0.0, 0.0, 1.0))
+            rotation = list(self._plane_orientation_from_normal(normal))
+        norm = float(np.linalg.norm(normal))
+        if norm <= 1e-8:
+            normal = [0.0, 0.0, 1.0]
+        else:
+            normal = [float(value / norm) for value in normal]
+        try:
+            size = max(0.1, float(incoming.get("size", 100.0)))
+        except (TypeError, ValueError):
+            size = 100.0
+        self.plane_state = {
+            "enabled": bool(incoming.get("enabled", incoming.get("visible", False))),
+            "visible": bool(incoming.get("visible", incoming.get("enabled", False))),
+            "center": center,
+            "normal": normal,
+            "rotation": rotation,
+            "show_rotation_axes": bool(
+                incoming.get("show_rotation_axes", incoming.get("show_axes", True))
+            ),
+            "show_translation_arrows": bool(
+                incoming.get(
+                    "show_translation_arrows", incoming.get("show_axes", True)
+                )
+            ),
+            "size": size,
+            "clipping_enabled": bool(incoming.get("clipping_enabled", False)),
+            "keep_side": "negative" if incoming.get("keep_side") == "negative" else "positive",
+        }
+        self._rebuild_plane_actor()
+        self._sync_plane_widget()
+        self._update_mapper_clipping()
+        if render:
+            self.render()
+
+    def _remove_plane_actors(self) -> None:
+        if self.plane_actor is not None:
+            self.plane_overlay_renderer.RemoveActor(self.plane_actor)
+        if self.plane_normal_actor is not None:
+            self.plane_overlay_renderer.RemoveActor(self.plane_normal_actor)
+        for actor in self.plane_axis_actors:
+            self.plane_overlay_renderer.RemoveActor(actor)
+        self.plane_actor = None
+        self.plane_normal_actor = None
+        self.plane_axis_actors = []
+
+    def _rebuild_plane_actor(self) -> None:
+        from vtkmodules.vtkCommonCore import vtkPoints
+        from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolyData
+        from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper
+
+        self._remove_plane_actors()
+        state = self.plane_state
+        center = np.asarray(state["center"], dtype=float)
+        normal = np.asarray(state["normal"], dtype=float)
+        size = float(state["size"])
+        # Pick a stable in-plane basis, matching the intuitive Slicer plane view.
+        reference = np.array((0.0, 1.0, 0.0))
+        if abs(float(np.dot(reference, normal))) > 0.9:
+            reference = np.array((1.0, 0.0, 0.0))
+        axis_u = np.cross(normal, reference)
+        axis_u /= max(float(np.linalg.norm(axis_u)), 1e-8)
+        axis_v = np.cross(normal, axis_u)
+        axis_v /= max(float(np.linalg.norm(axis_v)), 1e-8)
+        half = size * 0.5
+        corners = np.array(
+            [
+                center - half * axis_u - half * axis_v,
+                center + half * axis_u - half * axis_v,
+                center + half * axis_u + half * axis_v,
+                center - half * axis_u + half * axis_v,
+            ],
+            dtype=float,
+        )
+        points = vtkPoints()
+        for point in corners:
+            points.InsertNextPoint(*[float(value) for value in point])
+        polygon = vtkCellArray()
+        polygon.InsertNextCell(4)
+        for index in range(4):
+            polygon.InsertCellPoint(index)
+        poly_data = vtkPolyData()
+        poly_data.SetPoints(points)
+        poly_data.SetPolys(polygon)
+        mapper = vtkPolyDataMapper()
+        mapper.SetInputData(poly_data)
+        actor = vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(1.0, 0.65, 0.15)
+        actor.GetProperty().SetOpacity(0.20)
+        actor.GetProperty().SetEdgeVisibility(1)
+        actor.GetProperty().SetEdgeColor(1.0, 0.85, 0.25)
+        actor.GetProperty().SetLineWidth(2.0)
+        actor.SetVisibility(1 if state["enabled"] and state["visible"] else 0)
+        self.plane_overlay_renderer.AddActor(actor)
+        self.plane_actor = actor
+
+    def set_plane_interaction_handler(self, handler) -> None:
+        """Receive plane states produced by direct manipulation in the 3D view."""
+        self.plane_interaction_handler = handler
+        self._ensure_plane_widget()
+        self._sync_plane_widget()
+
+    def _ensure_plane_widget(self) -> None:
+        if self.plane_widget is not None:
+            return
+        from vtkmodules.vtkInteractionWidgets import (
+            vtkHandleWidget,
+            vtkOrientationRepresentation,
+            vtkOrientationWidget,
+            vtkPointHandleRepresentation3D,
+        )
+
+        representation = vtkPointHandleRepresentation3D()
+        representation.SetHandleSize(12.0)
+        representation.GetProperty().SetColor(1.0, 0.85, 0.20)
+        representation.GetSelectedProperty().SetColor(1.0, 1.0, 1.0)
+
+        widget = vtkHandleWidget()
+        widget.SetInteractor(self.interactor)
+        widget.SetCurrentRenderer(self.plane_overlay_renderer)
+        widget.SetRepresentation(representation)
+        widget.AddObserver("InteractionEvent", self._on_plane_widget_interaction)
+        widget.AddObserver("EndInteractionEvent", self._on_plane_widget_interaction)
+        self.plane_representation = representation
+        self.plane_widget = widget
+
+        orientation_representation = vtkOrientationRepresentation()
+        orientation_representation.SetPlaceFactor(0.7)
+        orientation_representation.ShowArrowsOff()
+        orientation_representation.SetHandleSize(8.0)
+        orientation_widget = vtkOrientationWidget()
+        orientation_widget.SetInteractor(self.interactor)
+        orientation_widget.SetCurrentRenderer(self.plane_overlay_renderer)
+        orientation_widget.SetRepresentation(orientation_representation)
+        orientation_widget.AddObserver(
+            "InteractionEvent", self._on_plane_orientation_interaction
+        )
+        orientation_widget.AddObserver(
+            "EndInteractionEvent", self._on_plane_orientation_interaction
+        )
+        self.plane_orientation_representation = orientation_representation
+        self.plane_orientation_widget = orientation_widget
+        self._ensure_plane_translation_handles()
+
+    def _plane_translation_directions(self) -> list[np.ndarray]:
+        from vtkmodules.vtkCommonTransforms import vtkTransform
+
+        rotation = self.plane_state["rotation"]
+        transform = vtkTransform()
+        transform.RotateZ(float(rotation[2]))
+        transform.RotateX(float(rotation[0]))
+        transform.RotateY(float(rotation[1]))
+        return [
+            np.asarray(transform.TransformNormal(*direction), dtype=float)
+            for direction in (
+                (1.0, 0.0, 0.0), (-1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0), (0.0, -1.0, 0.0),
+                (0.0, 0.0, 1.0), (0.0, 0.0, -1.0),
+            )
+        ]
+
+    def _ensure_plane_translation_handles(self) -> None:
+        if self.plane_translation_handles:
+            return
+        from vtkmodules.vtkInteractionWidgets import (
+            vtkHandleWidget,
+            vtkPolygonalHandleRepresentation3D,
+        )
+
+        colors = (
+            (0.95, 0.20, 0.20), (0.65, 0.10, 0.10),
+            (0.20, 0.95, 0.20), (0.10, 0.65, 0.10),
+            (0.25, 0.45, 1.00), (0.10, 0.25, 0.70),
+        )
+        for index, color in enumerate(colors):
+            representation = vtkPolygonalHandleRepresentation3D()
+            representation.GetProperty().SetColor(*color)
+            representation.GetSelectedProperty().SetColor(1.0, 1.0, 1.0)
+            widget = vtkHandleWidget()
+            widget.SetInteractor(self.interactor)
+            widget.SetCurrentRenderer(self.plane_overlay_renderer)
+            widget.SetRepresentation(representation)
+            record = {
+                "widget": widget,
+                "representation": representation,
+                "index": index,
+                "start_center": None,
+                "start_position": None,
+                "axis": None,
+            }
+            widget.AddObserver(
+                "StartInteractionEvent",
+                lambda _obj, _event, item=record: self._start_plane_arrow_drag(item),
+            )
+            widget.AddObserver(
+                "InteractionEvent",
+                lambda _obj, _event, item=record: self._drag_plane_arrow(item),
+            )
+            widget.AddObserver(
+                "EndInteractionEvent",
+                lambda _obj, _event, item=record: self._end_plane_arrow_drag(item),
+            )
+            self.plane_translation_handles.append(record)
+
+    @staticmethod
+    def _plane_arrow_polydata(direction: np.ndarray, length: float):
+        from vtkmodules.vtkCommonDataModel import vtkPolyData
+        from vtkmodules.vtkCommonTransforms import vtkTransform
+        from vtkmodules.vtkFiltersGeneral import vtkTransformPolyDataFilter
+        from vtkmodules.vtkFiltersSources import vtkArrowSource
+
+        source_direction = np.asarray((1.0, 0.0, 0.0), dtype=float)
+        direction = np.asarray(direction, dtype=float)
+        direction /= max(float(np.linalg.norm(direction)), 1e-8)
+        dot = float(np.clip(np.dot(source_direction, direction), -1.0, 1.0))
+        rotation_axis = np.cross(source_direction, direction)
+        rotation_axis_norm = float(np.linalg.norm(rotation_axis))
+        transform = vtkTransform()
+        transform.PostMultiply()
+        transform.Scale(length, length, length)
+        if rotation_axis_norm <= 1e-8:
+            if dot < 0.0:
+                transform.RotateWXYZ(180.0, 0.0, 1.0, 0.0)
+        else:
+            rotation_axis /= rotation_axis_norm
+            transform.RotateWXYZ(
+                float(np.degrees(np.arccos(dot))), *rotation_axis
+            )
+        arrow = vtkArrowSource()
+        arrow.SetTipResolution(24)
+        arrow.SetShaftResolution(24)
+        transformed = vtkTransformPolyDataFilter()
+        transformed.SetTransform(transform)
+        transformed.SetInputConnection(arrow.GetOutputPort())
+        transformed.Update()
+        result = vtkPolyData()
+        result.DeepCopy(transformed.GetOutput())
+        return result
+
+    def _sync_plane_translation_handles(self) -> None:
+        if not self.plane_translation_handles:
+            return
+        center = np.asarray(self.plane_state["center"], dtype=float)
+        distance = max(1.0, float(self.plane_state["size"]) * 0.35)
+        directions = self._plane_translation_directions()
+        enabled = bool(
+            self.plane_state["enabled"]
+            and self.plane_state["show_translation_arrows"]
+        )
+        for record, direction in zip(self.plane_translation_handles, directions):
+            direction /= max(float(np.linalg.norm(direction)), 1e-8)
+            record["representation"].SetHandle(
+                self._plane_arrow_polydata(direction, distance)
+            )
+            record["representation"].SetWorldPosition(center)
+            record["widget"].SetEnabled(1 if enabled else 0)
+
+    def _start_plane_arrow_drag(self, record) -> None:
+        directions = self._plane_translation_directions()
+        axis = directions[int(record["index"])]
+        axis /= max(float(np.linalg.norm(axis)), 1e-8)
+        record["axis"] = axis
+        record["start_center"] = np.asarray(self.plane_state["center"], dtype=float)
+        record["start_position"] = np.asarray(
+            record["representation"].GetWorldPosition(), dtype=float
+        )
+
+    def _drag_plane_arrow(self, record) -> None:
+        if record["start_center"] is None or record["axis"] is None:
+            self._start_plane_arrow_drag(record)
+        current = np.asarray(record["representation"].GetWorldPosition(), dtype=float)
+        delta = current - record["start_position"]
+        axis = record["axis"]
+        center = record["start_center"] + axis * float(np.dot(delta, axis))
+        self.plane_state = {**self.plane_state, "center": [float(v) for v in center]}
+        if self.plane_representation is not None:
+            self.plane_representation.SetWorldPosition(self.plane_state["center"])
+        if self.plane_orientation_representation is not None:
+            self.plane_orientation_representation.PlaceWidget(
+                self._plane_widget_bounds()
+            )
+            self.plane_orientation_representation.SetOrientation(
+                self.plane_state["rotation"]
+            )
+        self._rebuild_plane_actor()
+        self._sync_plane_translation_handles()
+        self._update_mapper_clipping()
+        if callable(self.plane_interaction_handler):
+            self.plane_interaction_handler(dict(self.plane_state))
+        self.render()
+
+    def _end_plane_arrow_drag(self, record) -> None:
+        self._drag_plane_arrow(record)
+        record["start_center"] = None
+        record["start_position"] = None
+        record["axis"] = None
+
+    def _plane_widget_bounds(self) -> tuple[float, float, float, float, float, float]:
+        center = np.asarray(self.plane_state["center"], dtype=float)
+        half = max(0.05, float(self.plane_state["size"]) * 0.5)
+        return (
+            float(center[0] - half), float(center[0] + half),
+            float(center[1] - half), float(center[1] + half),
+            float(center[2] - half), float(center[2] + half),
+        )
+
+    def _sync_plane_widget(self) -> None:
+        self._ensure_plane_widget()
+        representation = self.plane_representation
+        widget = self.plane_widget
+        if representation is None or widget is None:
+            return
+        representation.SetWorldPosition(self.plane_state["center"])
+        widget.SetEnabled(1 if self.plane_state["enabled"] else 0)
+        orientation_representation = self.plane_orientation_representation
+        orientation_widget = self.plane_orientation_widget
+        if orientation_representation is not None and orientation_widget is not None:
+            orientation_representation.PlaceWidget(self._plane_widget_bounds())
+            orientation_representation.SetOrientation(self.plane_state["rotation"])
+            orientation_widget.SetEnabled(
+                1
+                if self.plane_state["enabled"]
+                and self.plane_state["show_rotation_axes"]
+                else 0
+            )
+        self._sync_plane_translation_handles()
+
+    @staticmethod
+    def _plane_orientation_from_normal(normal) -> tuple[float, float, float]:
+        from vtkmodules.vtkCommonTransforms import vtkTransform
+
+        direction = np.asarray(normal, dtype=float)
+        direction /= max(float(np.linalg.norm(direction)), 1e-8)
+        base = np.asarray((0.0, 0.0, 1.0), dtype=float)
+        dot = float(np.clip(np.dot(base, direction), -1.0, 1.0))
+        axis = np.cross(base, direction)
+        axis_norm = float(np.linalg.norm(axis))
+        transform = vtkTransform()
+        if axis_norm <= 1e-8:
+            if dot < 0.0:
+                transform.RotateWXYZ(180.0, 1.0, 0.0, 0.0)
+        else:
+            axis /= axis_norm
+            transform.RotateWXYZ(
+                float(np.degrees(np.arccos(dot))),
+                float(axis[0]), float(axis[1]), float(axis[2]),
+            )
+        return tuple(float(value) for value in transform.GetOrientation())
+
+    @staticmethod
+    def _normal_from_plane_rotation(rotation) -> list[float]:
+        from vtkmodules.vtkCommonTransforms import vtkTransform
+
+        transform = vtkTransform()
+        transform.RotateZ(float(rotation[2]))
+        transform.RotateX(float(rotation[0]))
+        transform.RotateY(float(rotation[1]))
+        normal = np.asarray(transform.TransformNormal(0.0, 0.0, 1.0), dtype=float)
+        normal /= max(float(np.linalg.norm(normal)), 1e-8)
+        return [float(value) for value in normal]
+
+    def _on_plane_widget_interaction(self, _obj, _event) -> None:
+        representation = self.plane_representation
+        if representation is None:
+            return
+        center = [float(value) for value in representation.GetWorldPosition()]
+        self.plane_state = {
+            **self.plane_state,
+            "center": center,
+        }
+        if self.plane_orientation_representation is not None:
+            self.plane_orientation_representation.PlaceWidget(
+                self._plane_widget_bounds()
+            )
+            self.plane_orientation_representation.SetOrientation(
+                self.plane_state["rotation"]
+            )
+        self._rebuild_plane_actor()
+        self._sync_plane_translation_handles()
+        self._update_mapper_clipping()
+        if callable(self.plane_interaction_handler):
+            self.plane_interaction_handler(dict(self.plane_state))
+        self.render()
+
+    def _on_plane_orientation_interaction(self, _obj, _event) -> None:
+        representation = self.plane_orientation_representation
+        if representation is None:
+            return
+        # vtkOrientationRepresentation.GetOrientation() is exposed as a raw
+        # pointer by some Windows VTK Python builds.  The scalar accessors are
+        # stable Python floats across those builds.
+        rotation = [
+            float(representation.GetOrientationX()),
+            float(representation.GetOrientationY()),
+            float(representation.GetOrientationZ()),
+        ]
+        normal = self._normal_from_plane_rotation(rotation)
+        self.plane_state = {
+            **self.plane_state,
+            "normal": normal,
+            "rotation": rotation,
+        }
+        self._rebuild_plane_actor()
+        self._sync_plane_translation_handles()
+        self._update_mapper_clipping()
+        if callable(self.plane_interaction_handler):
+            self.plane_interaction_handler(dict(self.plane_state))
+        self.render()
+
+    def _update_mapper_clipping(self) -> None:
+        from vtkmodules.vtkCommonDataModel import vtkPlane
+
+        state = self.plane_state
+        if self._vtk_clipping_plane is None:
+            self._vtk_clipping_plane = vtkPlane()
+        normal = np.asarray(state["normal"], dtype=float)
+        if state["keep_side"] == "negative":
+            normal = -normal
+        self._vtk_clipping_plane.SetOrigin(*[float(value) for value in state["center"]])
+        self._vtk_clipping_plane.SetNormal(*[float(value) for value in normal])
+        for volume in self.volumes:
+            mapper = volume.get("mapper")
+            if mapper is None:
+                continue
+            remove = getattr(mapper, "RemoveAllClippingPlanes", None)
+            if callable(remove):
+                remove()
+            if state["enabled"] and state["clipping_enabled"]:
+                add = getattr(mapper, "AddClippingPlane", None)
+                if callable(add):
+                    add(self._vtk_clipping_plane)
 
     def store_initial_camera(self) -> None:
         from vtkmodules.vtkRenderingCore import vtkCamera
@@ -1295,14 +1815,24 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         return True
 
     def clear_volumes(self, *, render: bool = True) -> None:
+        if self.plane_widget is not None:
+            self.plane_widget.SetEnabled(0)
+        if self.plane_orientation_widget is not None:
+            self.plane_orientation_widget.SetEnabled(0)
+        for record in self.plane_translation_handles:
+            record["widget"].SetEnabled(0)
         self.renderer.RemoveAllViewProps()
         self.add_axes_indicator()
         self._reset_multi_volume_backend()
         self.volumes = []
+        self.plane_actor = None
+        self.plane_normal_actor = None
         self.annotation_point_actors = {}
         self.annotation_box_actors = {}
         self.annotation_handle_actors = {}
         self.annotation_actor_map = {}
+        self._rebuild_plane_actor()
+        self._sync_plane_widget()
         if render:
             self.render()
 
