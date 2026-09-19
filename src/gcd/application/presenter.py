@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from inspect import signature
 from pathlib import Path
 from uuid import uuid4
@@ -60,6 +61,8 @@ class MainWindowPresenter:
         self._organ_request_id = ""
         self._organ_preview_request_id = ""
         self._organ_result_stale = False
+        self._autoshot_camera_snapshot: dict[str, object] | None = None
+        self._autoshot_running = False
         self.data_store.subscribe(self._on_store_event)
         self.perturbation_preview = PerturbationPreviewAdapter(
             view=self.view,
@@ -206,6 +209,30 @@ class MainWindowPresenter:
         self.view.roi_plugin_button.clicked.connect(
             lambda: self.view.set_active_plugin("roi")
         )
+        self.view.plane_plugin_button.clicked.connect(
+            lambda: self.view.set_active_plugin("plane")
+        )
+        self.view.plane_plugin_panel.state_changed.connect(
+            self.on_plane_state_changed
+        )
+        self.view.plane_reset_button.clicked.connect(self.on_plane_reset_requested)
+        self.view.plane_import_button.clicked.connect(self.on_plane_import_requested)
+        self.view.plane_export_button.clicked.connect(self.on_plane_export_requested)
+        self.view.workspace.plane_state_changed.connect(
+            self.on_plane_interaction_changed
+        )
+        self.view.autoshot_plugin_button.clicked.connect(
+            lambda: self.view.set_active_plugin("autoshot")
+        )
+        self.view.autoshot_import_camera_button.clicked.connect(
+            self.on_autoshot_import_camera_requested
+        )
+        self.view.autoshot_refresh_button.clicked.connect(
+            self.refresh_autoshot_panel
+        )
+        self.view.autoshot_start_button.clicked.connect(
+            self.on_autoshot_start_requested
+        )
         self.view.roi_mode_combo.currentIndexChanged.connect(self.on_roi_mode_changed)
         self.view.roi_point_size_slider.valueChanged.connect(
             self.on_roi_point_size_slider_changed
@@ -276,6 +303,8 @@ class MainWindowPresenter:
         self.view.workspace.set_workspace_payload(renderable_items=[])
         self.view.set_overlay_status_message("")
         self._sync_transfer_editor()
+        self.refresh_plane_panel()
+        self.refresh_autoshot_panel()
 
     def on_model_changed(self, _index: int) -> None:
         path = self.view.selected_model_path()
@@ -309,6 +338,7 @@ class MainWindowPresenter:
         self.view.set_rotation_running(True)
 
     def _on_store_event(self, event: WorkspaceEvent) -> None:
+        self.refresh_autoshot_panel()
         if event.name == "dataset_added":
             self._sync_selected_dataset_ids()
             self._sync_dataset_controls()
@@ -1303,12 +1333,7 @@ class MainWindowPresenter:
                 return
             with open(path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
-            snapshot = {
-                "position": tuple(float(v) for v in payload["position"]),
-                "focal_point": tuple(float(v) for v in payload["focal_point"]),
-                "view_up": tuple(float(v) for v in payload["view_up"]),
-                "parallel_scale": float(payload.get("parallel_scale", 1.0)),
-            }
+            snapshot = self._camera_snapshot_from_payload(payload)
             self.view.renderer.apply_camera_state(snapshot)
         except Exception as exc:
             self.error_store.save(exc, context="import_camera")
@@ -1342,6 +1367,161 @@ class MainWindowPresenter:
             self.view.renderer.save_screenshot(file_name)
         except Exception as exc:
             self.error_store.save(exc, context="save_screenshot")
+
+    @staticmethod
+    def _camera_snapshot_from_payload(payload: object) -> dict[str, object]:
+        """Parse the flat camera JSON used by Camera import/export.
+
+        Accepting a top-level ``camera`` object also keeps AutoShot compatible
+        with camera files wrapped by external tools without changing the
+        existing flat format.
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("Camera JSON must contain an object")
+        camera = payload.get("camera", payload)
+        if not isinstance(camera, dict):
+            raise ValueError("Camera JSON camera entry must contain an object")
+
+        def vector(name: str) -> tuple[float, float, float]:
+            values = camera.get(name)
+            if not isinstance(values, (list, tuple)) or len(values) != 3:
+                raise ValueError(f"Camera JSON field '{name}' must contain 3 values")
+            return tuple(float(value) for value in values)
+
+        parallel_scale = float(camera.get("parallel_scale", 1.0))
+        if parallel_scale <= 0:
+            raise ValueError("Camera parallel_scale must be positive")
+        return {
+            "position": vector("position"),
+            "focal_point": vector("focal_point"),
+            "view_up": vector("view_up"),
+            "parallel_scale": parallel_scale,
+        }
+
+    def refresh_autoshot_panel(self) -> None:
+        panel = getattr(self.view, "autoshot_plugin_panel", None)
+        if panel is None:
+            return
+        panel.set_volume_items(self.data_store.volume_list_items())
+
+    def on_autoshot_import_camera_requested(self) -> None:
+        try:
+            path = self.view.choose_camera_import_file()
+            if not path:
+                return
+            with open(path, "r", encoding="utf-8") as handle:
+                self._autoshot_camera_snapshot = self._camera_snapshot_from_payload(
+                    json.load(handle)
+                )
+            self.view.autoshot_plugin_panel.set_camera_status(
+                f"Loaded camera: {Path(path).name}"
+            )
+            self.view.autoshot_plugin_panel.set_status("Camera ready for AutoShot")
+        except Exception as exc:
+            self.view.autoshot_plugin_panel.set_status(f"Camera import failed: {exc}")
+            self.error_store.save(exc, context="autoshot_import_camera")
+
+    @staticmethod
+    def _safe_autoshot_stem(prefix: str, item_name: str, index: int) -> str:
+        raw = f"{prefix}_{index:03d}_{item_name}"
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._")
+        return safe[:180] or f"autoshot_{index:03d}"
+
+    @staticmethod
+    def _unique_autoshot_path(directory: Path, stem: str, allow_overwrite: bool) -> Path:
+        candidate = directory / f"{stem}.png"
+        if allow_overwrite or not candidate.exists():
+            return candidate
+        suffix = 2
+        while True:
+            candidate = directory / f"{stem}_{suffix}.png"
+            if not candidate.exists():
+                return candidate
+            suffix += 1
+
+    def on_autoshot_start_requested(self) -> None:
+        if self._autoshot_running:
+            return
+        panel = self.view.autoshot_plugin_panel
+        selected_ids = [
+            volume_id
+            for volume_id in panel.checked_volume_ids()
+            if volume_id in self.data_store.volumes
+        ]
+        if not selected_ids:
+            panel.set_status("Select at least one loaded data item.")
+            return
+        output_text = panel.output_directory()
+        if not output_text:
+            output_text = self.view.choose_autoshot_output_directory()
+            if not output_text:
+                return
+            panel.output_directory_edit.setText(output_text)
+        output_directory = Path(output_text).expanduser()
+        if not output_directory.exists() or not output_directory.is_dir():
+            panel.set_status("Output folder does not exist.")
+            return
+
+        original_visibility = dict(self.data_store.volume_visibility)
+        original_camera = self.view.workspace.capture_camera_state()
+        was_rotating = bool(self.view.renderer.rotating)
+        self._autoshot_running = True
+        panel.set_running(True)
+        panel.set_status(f"Capturing {len(selected_ids)} item(s)…")
+        self.view.renderer.stop_rotation()
+        self.view.set_rotation_running(False)
+        self.view.workspace.set_camera_interaction_enabled(False)
+        captured = 0
+        try:
+            if self._autoshot_camera_snapshot is not None:
+                self.view.workspace.apply_camera_state(self._autoshot_camera_snapshot)
+            names = {
+                volume_id: self.data_store.volume_display_name(volume_id)
+                for volume_id in selected_ids
+            }
+            for index, volume_id in enumerate(selected_ids, start=1):
+                # Explicitly hide all data, then show exactly this item.
+                for current_id in self.data_store.volume_order:
+                    self.data_store.set_volume_visibility(
+                        current_id, current_id == volume_id
+                    )
+                self.view.workspace.render()
+                stem = self._safe_autoshot_stem(
+                    panel.filename_prefix(), names[volume_id], index
+                )
+                output_path = self._unique_autoshot_path(
+                    output_directory, stem, panel.allow_overwrite()
+                )
+                self.view.workspace.save_screenshot(str(output_path.with_suffix("")))
+                captured += 1
+                self.data_store.set_volume_visibility(volume_id, False)
+                self.view.workspace.render()
+                panel.set_status(f"Captured {captured}/{len(selected_ids)}: {output_path.name}")
+            panel.set_status(f"AutoShot complete: {captured} PNG file(s)")
+        except Exception as exc:
+            panel.set_status(f"AutoShot failed after {captured} item(s): {exc}")
+            self.error_store.save(exc, context="autoshot")
+        finally:
+            # Restore both application state and renderer state even when a
+            # screenshot or camera operation raises an exception.
+            try:
+                for volume_id, visible in original_visibility.items():
+                    if volume_id in self.data_store.volumes:
+                        self.data_store.set_volume_visibility(volume_id, visible)
+                self.view.workspace.render()
+            except Exception as exc:
+                self.error_store.save(exc, context="autoshot_restore_visibility")
+            try:
+                if original_camera is not None:
+                    self.view.workspace.apply_camera_state(original_camera)
+            except Exception as exc:
+                self.error_store.save(exc, context="autoshot_restore_camera")
+            self.view.workspace.set_camera_interaction_enabled(True)
+            if was_rotating:
+                self.view.renderer.start_rotation()
+                self.view.set_rotation_running(True)
+            self._autoshot_running = False
+            panel.set_running(False)
 
     def on_record_video_requested(self) -> None:
         try:

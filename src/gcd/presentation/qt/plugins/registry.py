@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from PyQt6.QtWidgets import QWidget
 
 from .camera_controls import CameraControlsPluginPanel
+from .autoshot import AutoShotPluginPanel
 from .gradcam import GradCamPluginPanel
 from .perturbation import PerturbationPluginPanel
+from .plane import PlanePluginPanel
 from .roi_annotation import RoiAnnotationPluginPanel
 from .transfer_volume import TransferVolumePluginPanel
 
@@ -59,5 +61,19 @@ DEFAULT_PLUGIN_DEFINITIONS: tuple[PluginDefinition, ...] = (
         "ROI",
         RoiAnnotationPluginPanel,
         "roi",
+    ),
+    PluginDefinition(
+        "plane",
+        "Plane Editor",
+        "Plane",
+        PlanePluginPanel,
+        "standard",
+    ),
+    PluginDefinition(
+        "autoshot",
+        "AutoShot",
+        "AutoShot",
+        AutoShotPluginPanel,
+        "standard",
     ),
 )

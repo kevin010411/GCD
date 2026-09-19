@@ -373,6 +373,26 @@ class MainWindowView(QMainWindow):
         self.import_camera_button = self.camera_plugin_panel.import_camera_button
         self.export_camera_button = self.camera_plugin_panel.export_camera_button
 
+        self.plane_plugin_panel = self.plugin_panels["plane"]
+        self.plane_enabled_check = self.plane_plugin_panel.enabled_check
+        self.plane_center_spins = self.plane_plugin_panel.center_spins
+        self.plane_rotation_spins = self.plane_plugin_panel.rotation_spins
+        self.plane_normal_spins = self.plane_rotation_spins
+        self.plane_size_spin = self.plane_plugin_panel.size_spin
+        self.plane_clipping_check = self.plane_plugin_panel.clipping_check
+        self.plane_keep_side_combo = self.plane_plugin_panel.keep_side_combo
+        self.plane_reset_button = self.plane_plugin_panel.reset_button
+        self.plane_import_button = self.plane_plugin_panel.import_button
+        self.plane_export_button = self.plane_plugin_panel.export_button
+
+        self.autoshot_plugin_panel = self.plugin_panels["autoshot"]
+        self.autoshot_plugin_button = self.plugin_buttons["autoshot"]
+        self.autoshot_import_camera_button = (
+            self.autoshot_plugin_panel.import_camera_button
+        )
+        self.autoshot_refresh_button = self.autoshot_plugin_panel.refresh_button
+        self.autoshot_start_button = self.autoshot_plugin_panel.start_button
+
     def _add_plugin_tab(self, plugin_id: str, widget: QWidget) -> None:
         index = self.plugin_stack.addWidget(widget)
         setattr(self, f"{plugin_id}_plugin_index", index)
@@ -684,6 +704,9 @@ class MainWindowView(QMainWindow):
             self, "Export Camera", "camera.json", "JSON Files (*.json)"
         )
         return file_name
+
+    def choose_autoshot_output_directory(self) -> str:
+        return QFileDialog.getExistingDirectory(self, "Choose AutoShot output folder")
 
     def choose_annotation_import_file(self) -> str:
         file_name, _ = QFileDialog.getOpenFileName(
