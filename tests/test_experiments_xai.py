@@ -28,6 +28,63 @@ from src.gcd.domain import OrganMaskRecord
 
 
 class ExperimentsXaiTests(unittest.TestCase):
+    def test_experiment_scorecam_uses_requested_gui_layer_and_fixed_target(self):
+        from experiments.xai.attribution import compute_attribution
+
+        class _Config(dict):
+            inference = SimpleNamespace(roi_size=(2, 2, 2))
+
+        class _Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.decoder_1 = torch.nn.Conv3d(2, 2, 1, bias=False)
+                self.decoder_2 = torch.nn.Conv3d(1, 2, 1, bias=False)
+                with torch.no_grad():
+                    self.decoder_2.weight[:, 0, 0, 0, 0] = torch.tensor([1.0, -1.0])
+                    self.decoder_1.weight.zero_()
+                    self.decoder_1.weight[1, 0, 0, 0, 0] = 1.0
+                self.xai_layer_targets = {
+                    "decoder 1": "decoder_1",
+                    "decoder 2": "decoder_2",
+                }
+                self.calls = 0
+
+            def forward(self, value):
+                self.calls += 1
+                return self.decoder_1(self.decoder_2(value))
+
+        model = _Model()
+        batch = torch.arange(8, dtype=torch.float32).reshape(1, 1, 2, 2, 2) / 7
+        attribution, metadata = compute_attribution(
+            batch, model, model, "scorecam", 1, None,
+            _Config(default_layer="decoder 1", xai={}),
+            layer="decoder 2", return_metadata=True,
+        )
+
+        diagnostics = metadata["scorecam_diagnostics"]
+        self.assertEqual(diagnostics["layer"], "decoder 2")
+        self.assertEqual(diagnostics["feature_count"], 2)
+        self.assertEqual(model.calls, 1 + diagnostics["masked_forwards"])
+        self.assertEqual(tuple(attribution.shape), (2, 2, 2))
+        self.assertTrue(torch.isfinite(attribution).all())
+
+        model.calls = 0
+        tiled, tiled_metadata = compute_attribution(
+            batch, model, model, "scorecam", 1, None,
+            _Config(default_layer="decoder 1", xai={}),
+            layer="decoder 2", return_metadata=True,
+            method_params={"_ui_tiled": True},
+        )
+        tiled_diagnostics = tiled_metadata["scorecam_diagnostics"]
+        self.assertEqual(tiled_diagnostics["pipeline"], "ui_tiled")
+        self.assertEqual(tiled_diagnostics["tile_count"], 1)
+        self.assertEqual(
+            model.calls,
+            2 * tiled_diagnostics["tile_count"] + tiled_diagnostics["masked_forwards"],
+        )
+        self.assertEqual(tuple(tiled.shape), (2, 2, 2))
+        self.assertTrue(torch.isfinite(tiled).all())
+
     def test_mmengine_builds_xai_strategy_graph(self):
         cfg = {
             "XaiMethods": [dict(

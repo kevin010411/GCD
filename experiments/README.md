@@ -70,8 +70,25 @@ patient0016/
 效能評測指標包含延遲、吞吐量、參數數量、參數／檢查點大小、預測結果大小，
 以及各類別的體素數量。只有在提供真實標註影像時，才會包含 Dice／IoU。
 `xai` 區段包含目標類別、歸因結果路徑、各自獨立設定的擾動曲線，以及 AUC 值。
-梯度歸因會以設定的推論 ROI 解析度進行評估，再重新取樣至原始預處理影像的形狀，
+一般梯度歸因會以設定的推論 ROI 解析度進行評估，再重新取樣至原始預處理影像的形狀，
 使大型 CT 掃描的 3D 記憶體用量維持在可控範圍內。
+若要檢查與 UI 相同的 Score-CAM 滑窗流程，可執行：
+
+```powershell
+uv run python -m experiments.predict data/chgh/patient0016.nii.gz `
+  --config experiments/configs/scorecam_unet3d_audit.py `
+  --output output/scorecam_unet3d_ui_tiled_patient0016
+```
+
+此設定使用 UNet3D、`decoder 2`、class 1 與 UI 的 tile 收集及拼接程式；
+`metrics.json` 的 `scorecam_diagnostics` 會記錄 tile 數、mask 後推論次數、
+有效 feature 數及熱圖強度分布。這個流程仍須在實際資料上檢查熱圖與目標類別的位置關係。
+Score-CAM 的 `predicted_target_mask` 先以 Gaussian 滑窗融合取得完整影像預測，
+再把固定目標 mask 切到各 tile；activation 先經 ReLU，熱圖也用同一 Gaussian 權重拼接。
+UNet3D 的 `decoder 1` 是最後的 class logits，不能作為 Score-CAM 的中間 feature map；
+UI 和實驗流程會明確拒絕這個選層，請使用 `decoder 2` 或其他中間層。
+Score-CAM 的 softmax 是針對每次遮罩推論得到的 feature 分數，
+tile 熱圖再做重疊加權拼接；在已合成的單通道熱圖上做 softmax 不會修復此問題。
 
 XAI 在 `experiments/configs/predict.py` 中設定。`XaiMethods`、`XaiMetrics`
 及 `XaiAnswer` 會透過 MMEngine registry 建立為實例。各方法遵循共用的解釋策略；
