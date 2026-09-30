@@ -149,6 +149,36 @@ class _FakeRunnerEngine(_FakeEngine):
 
 
 class WorkflowServiceTests(unittest.TestCase):
+    def test_result_keeps_all_layer_choices_and_requested_class(self) -> None:
+        class _SelectedLayerEngine(_FakeEngine):
+            def prepare_xai_inputs(self, method=None, objective_id=None, method_params=None):
+                super().prepare_xai_inputs(method, objective_id, method_params)
+                self.layers = {"layer-b": 4}
+                self.available_layer_names = ("layer-a", "layer-b")
+
+            def compute_cam(self, *, layer, n1, n2, method=None, method_params=None):
+                self.compute_cam_calls.append((layer, n1, n2, method, method_params))
+                return "layer-b"
+
+        engine = _SelectedLayerEngine()
+        result = WorkflowService(engine).compute_xai(
+            engine.dataset_input(),
+            XaiComputeRequest(
+                target_class=2,
+                layer="layer-b",
+                n1=0,
+                n2=4,
+                method="scorecam",
+                result_name="sample_scorecam_class2",
+            ),
+        )
+
+        self.assertEqual(result.layer_names, ("layer-a", "layer-b"))
+        self.assertEqual(result.selected_layer, "layer-b")
+        self.assertEqual(result.feature_size, 4)
+        self.assertEqual(engine.target_class, 2)
+        self.assertEqual(result.volume.plugin_metadata["target_class"], 2)
+
     def test_gradient_result_includes_prediction_volume_for_data_plugin(self) -> None:
         engine = _FakeEngine()
         engine.model_output = np.array([[[0, 1], [2, 1]]], dtype=np.int16)

@@ -621,6 +621,33 @@ class _FakeErrorStore:
 
 
 class PresenterMethodTests(unittest.TestCase):
+    def test_scorecam_new_layer_uses_all_features_and_selected_class(self) -> None:
+        view = _FakeView()
+        view._selected_grad_dataset = "dataset-1"
+        view._selected_method = "scorecam"
+        view._selected_layer = "decoder 2"
+        view._selected_class = 3
+        view._feature_range = (0, 4)
+        presenter = MainWindowPresenter.__new__(MainWindowPresenter)
+        presenter.view = view
+        presenter.data_store = SimpleNamespace(datasets={
+            "dataset-1": SimpleNamespace(
+                name="sample", selected_layer="decoder 1", feature_size=4
+            )
+        })
+        captured = []
+        presenter._run_dataset_method = lambda dataset_id, **kwargs: captured.append(
+            (dataset_id, kwargs)
+        )
+
+        presenter.on_xai_run_requested("gradient")
+
+        self.assertEqual(captured[0][0], "dataset-1")
+        self.assertEqual(captured[0][1]["method"], "scorecam")
+        self.assertEqual(captured[0][1]["layer"], "decoder 2")
+        self.assertEqual(captured[0][1]["target_class"], 3)
+        self.assertEqual((captured[0][1]["n1"], captured[0][1]["n2"]), (0, 999))
+
     def test_total_segmentator_volumes_are_rendered_as_one_batch(self) -> None:
         view = _FakeView()
         workflow = _FakeWorkflow()

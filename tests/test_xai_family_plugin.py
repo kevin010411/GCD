@@ -157,6 +157,47 @@ class XaiFamilyPluginPanelTests(unittest.TestCase):
         self.assertTrue(panel.layer_combo.isEnabled())
         self.assertTrue(panel.feature_widget.isEnabled())
 
+    def test_scorecam_layer_and_class_remain_editable_after_result_refresh(self) -> None:
+        panel = XaiFamilyPluginPanel("gradient", "Gradient XAI", "Run gradients.")
+        options = [{
+            "id": "scorecam",
+            "name": "Score-CAM",
+            "uses_layer_controls": True,
+            "uses_objective": True,
+            "parameters": [],
+        }]
+        panel.set_method_options(options, "scorecam")
+        panel.set_layer_options(["encoder 1", "decoder 1"], "decoder 1", 128)
+        panel.class_spinbox.setValue(2)
+        panel.layer_combo.setCurrentText("encoder 1")
+
+        self.assertTrue(panel.layer_combo.isEnabled())
+        self.assertTrue(panel.class_spinbox.isEnabled())
+        self.assertEqual(panel.selected_layer(), "encoder 1")
+        self.assertEqual(panel.selected_class(), 2)
+
+    def test_scorecam_defaults_to_decoder_2_without_overriding_explicit_choice(self) -> None:
+        panel = XaiFamilyPluginPanel("gradient", "Gradient XAI", "Run gradients.")
+        options = [
+            {"id": "gradcam", "name": "Grad-CAM", "uses_layer_controls": True},
+            {"id": "scorecam", "name": "Score-CAM", "uses_layer_controls": True},
+        ]
+        panel.set_method_options(options, "gradcam")
+        panel.set_layer_options(["decoder 1", "decoder 2"], "decoder 1", 4)
+
+        panel.method_combo.setCurrentIndex(panel.method_combo.findData("scorecam"))
+        self.assertEqual(panel.selected_layer(), "decoder 2")
+        self.assertFalse(panel.feature_widget.isEnabled())
+
+        panel.layer_combo.setCurrentText("decoder 1")
+        panel.set_method_options(options, "scorecam")
+        panel.set_layer_options(["decoder 1", "decoder 2"], "decoder 1", 4)
+        self.assertEqual(panel.selected_layer(), "decoder 1")
+        self.assertEqual(panel.feature_range(), (0, 4))
+
+        panel.set_layer_options(["decoder 1", "decoder 2"], "decoder 1", 0)
+        self.assertEqual(panel.selected_layer(), "decoder 2")
+
 
 if __name__ == "__main__":
     unittest.main()

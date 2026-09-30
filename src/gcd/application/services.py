@@ -528,9 +528,14 @@ class WorkflowService:
     ) -> XaiComputeResult:
         self.engine.load_dataset_input(dataset_input)
         self.engine.set_target_class(request.target_class)
-        preparation_params = request.method_params
+        preparation_params = dict(request.method_params or {})
+        resolver = getattr(self.engine, "_resolve_cam_method", None)
+        method_uses_layers = bool(
+            callable(resolver) and resolver(request.method).uses_layer_controls
+        )
+        if request.layer and method_uses_layers:
+            preparation_params["_selected_layer"] = request.layer
         if request.method == "scorecam":
-            preparation_params = dict(request.method_params or {})
             preparation_params.update(
                 {
                     "_selected_layer": request.layer or "",
@@ -538,6 +543,8 @@ class WorkflowService:
                     "_feature_stop": int(request.n2),
                 }
             )
+        if not preparation_params:
+            preparation_params = None
         self.engine.prepare_xai_inputs(
             method=request.method,
             objective_id=request.objective_id,
@@ -609,7 +616,10 @@ class WorkflowService:
             )
         return XaiComputeResult(
             dataset_input=self.engine.dataset_input(),
-            layer_names=tuple(self.engine.layers.keys()),
+            layer_names=tuple(
+                getattr(self.engine, "available_layer_names", ())
+                or self.engine.layers.keys()
+            ),
             selected_layer=selected_layer,
             method_options=tuple(method_options),
             selected_method=self.engine.active_method_id,
@@ -665,7 +675,10 @@ class WorkflowService:
             [self.engine.volume_data], method="minmax"
         )
         return {
-            "layer_names": list(self.engine.layers.keys()),
+            "layer_names": list(
+                getattr(self.engine, "available_layer_names", ())
+                or self.engine.layers.keys()
+            ),
             "selected_layer": selected_layer,
             "method_options": self.list_cam_methods(),
             "selected_method": self.engine.active_method_id,

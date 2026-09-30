@@ -43,6 +43,8 @@ class XaiFamilyPluginPanel(PluginPanel):
         self._method_options_by_id: dict[str, dict[str, object]] = {}
         self._parameter_widgets: dict[str, QWidget] = {}
         self._feature_size = 0
+        self._previous_method_id = ""
+        self._scorecam_layer_choice_pending = False
         self._show_progress = bool(show_progress)
         self._show_preview_controls = bool(show_preview_controls)
 
@@ -196,9 +198,22 @@ class XaiFamilyPluginPanel(PluginPanel):
         self.layer_combo.clear()
         self.layer_combo.addItems(layer_names)
         self.layer_combo.setCurrentText(selected)
+        choose_decoder_2 = self._scorecam_layer_choice_pending or (
+            self.selected_method() == "scorecam" and int(feature_size) <= 0
+        )
+        if choose_decoder_2 and selected == "decoder 1":
+            index = self.layer_combo.findText("decoder 2")
+            if index >= 0:
+                self.layer_combo.setCurrentIndex(index)
+        if layer_names:
+            self._scorecam_layer_choice_pending = False
         self.layer_combo.blockSignals(False)
-        self._feature_size = max(0, int(feature_size))
-        self.feature_widget.set_size(feature_size)
+        # The supplied count belongs to `selected`, not a layer chosen here.
+        displayed_feature_size = (
+            feature_size if self.layer_combo.currentText() == selected else 0
+        )
+        self._feature_size = max(0, int(displayed_feature_size))
+        self.feature_widget.set_size(displayed_feature_size)
         self._sync_capability_controls()
 
     def selected_dataset(self) -> str:
@@ -288,6 +303,21 @@ class XaiFamilyPluginPanel(PluginPanel):
         return self._method_options_by_id.get(method_id, {})
 
     def _on_method_changed(self, *_args) -> None:
+        method_id = self.selected_method()
+        if method_id == "scorecam" and self._previous_method_id != "scorecam":
+            if self.layer_combo.currentText() == "decoder 1":
+                index = self.layer_combo.findText("decoder 2")
+                if index >= 0:
+                    self.layer_combo.setCurrentIndex(index)
+                    self._feature_size = 0
+                    self.feature_widget.set_size(0)
+                else:
+                    self._scorecam_layer_choice_pending = True
+            elif not self.layer_combo.count():
+                self._scorecam_layer_choice_pending = True
+        elif method_id != "scorecam":
+            self._scorecam_layer_choice_pending = False
+        self._previous_method_id = method_id
         self._rebuild_parameter_controls()
         self._sync_capability_controls()
 

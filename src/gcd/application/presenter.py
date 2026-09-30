@@ -714,7 +714,11 @@ class MainWindowPresenter:
             if uses_layer_controls
             else (0, 1)
         )
-        if uses_layer_controls and (int(dataset.feature_size or 0) <= 0 or n2 <= n1):
+        if uses_layer_controls and (
+            layer != dataset.selected_layer
+            or int(dataset.feature_size or 0) <= 0
+            or n2 <= n1
+        ):
             n1, n2 = 0, 999
         method_params = self._selected_xai_method_params(family_id)
         if family_id == "perturbation":
