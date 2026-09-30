@@ -97,6 +97,7 @@ class XaiMethod(ABC):
     execution_scope = "tile"
     result_kind = "saliency"
     custom_ui = ""
+    requires_input_grad = False
 
     def parameter_schema(self) -> Sequence[XaiParameterSpec]:
         return ()

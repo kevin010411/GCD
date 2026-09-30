@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from ..methods.cam_methods import CamMethod, XaiLayerSelection
 from ..tiling.tile_strategy import LegacyFourTileStrategy, TilePlan
+from ..tiling.scorecam_blend import gaussian_importance_map
 
 if TYPE_CHECKING:
     import torch
@@ -75,18 +76,23 @@ class XaiCamRunner:
 
         n2 = min(int(request.n2), int(layers[selected_layer]))
         shape = list(request.img1[0].shape)
-        cam = torch.zeros(shape, dtype=torch.float32)
-        coverage = torch.zeros(shape, dtype=torch.float32)
-        if not isinstance(patches[0].get("pred"), torch.Tensor):
-            raise TypeError("CAM patch payload 缺少 pred tensor。")
-        pred_shape = list(patches[0]["pred"].shape)[:2] + shape
-        model_out = torch.zeros(pred_shape, dtype=torch.float32)
         tile_plan = request.tile_plan or LegacyFourTileStrategy().plan(
             input_shape=request.img1[0].shape,
             patch_size=request.size,
             stride=request.stride,
         )
         legacy_blending = tile_plan.strategy_id == LegacyFourTileStrategy.id
+
+        cam = torch.zeros(shape, dtype=torch.float32)
+        # Legacy blending applies its weights directly to each tile, so a
+        # full-volume coverage counter would never be read.
+        coverage = (
+            None if legacy_blending else torch.zeros(shape, dtype=torch.float32)
+        )
+        if not isinstance(patches[0].get("pred"), torch.Tensor):
+            raise TypeError("CAM patch payload 缺少 pred tensor。")
+        pred_shape = list(patches[0]["pred"].shape)[:2] + shape
+        model_out = torch.zeros(pred_shape, dtype=torch.float32)
         for index, region in enumerate(tile_plan.regions):
             q = method.build_tile_cam(
                 patches[index],
@@ -108,25 +114,30 @@ class XaiCamRunner:
 
             if legacy_blending:
                 self._apply_tile_blend(q, p1, index, request.size, request.stride)
+            elif method.id == "scorecam":
+                weight = gaussian_importance_map(region.size).unsqueeze(0).unsqueeze(0)
+                q *= weight
+                p1 *= weight
 
             xs, ys, zs = region.slices
 
             cam[xs, ys, zs] += q[0, 0]
             model_out[:, :, xs, ys, zs] += p1
-            if not legacy_blending:
-                coverage[xs, ys, zs] += 1
+            if coverage is not None:
+                coverage[xs, ys, zs] += weight[0, 0] if method.id == "scorecam" else 1
 
-        if not legacy_blending:
-            coverage = torch.clamp_min(coverage, 1)
+        if coverage is not None:
+            coverage.clamp_min_(1e-12 if method.id == "scorecam" else 1)
             cam /= coverage
             model_out /= coverage.unsqueeze(0).unsqueeze(0)
+            del coverage
 
         perturb_signal_max = None
         if method.family == "perturbation":
-            cam = torch.abs(cam)
+            cam.abs_()
             perturb_signal_max = torch.max(cam)
         else:
-            cam = torch.maximum(cam, torch.tensor(0))
+            cam.clamp_min_(0)
         cam -= torch.min(cam)
         maximum = torch.max(cam)
         if maximum > 0:
@@ -138,12 +149,27 @@ class XaiCamRunner:
         ):
             cam = torch.ones_like(cam)
 
+        prediction_dtype = self._prediction_dtype(model_out.shape[1])
+        model_output = torch.argmax(model_out, dim=1)[0].to(prediction_dtype)
+        del model_out
+
         return XaiCamRunResult(
             selected_layer=selected_layer,
             layers=layers,
             cam=cam.permute(*request.permute),
-            model_output=torch.argmax(model_out, dim=1)[0].permute(*request.permute),
+            model_output=model_output.permute(*request.permute),
         )
+
+    @staticmethod
+    def _prediction_dtype(class_count: int):
+        """Return the smallest signed/unsigned dtype that can hold class IDs."""
+        import torch
+
+        if class_count <= 256:
+            return torch.uint8
+        if class_count <= 32_768:
+            return torch.int16
+        return torch.int32
 
     @staticmethod
     def _apply_tile_blend(

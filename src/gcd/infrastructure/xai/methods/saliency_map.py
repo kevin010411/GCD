@@ -19,6 +19,7 @@ class SaliencyMapMethod(XaiMethod):
     family = "gradient"
     uses_layer_controls = False
     uses_objective = True
+    requires_input_grad = True
 
     def __init__(self, objective: Callable[[torch.Tensor, int], torch.Tensor]) -> None:
         self._objective = objective

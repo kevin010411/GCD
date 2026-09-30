@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..methods.cam_methods import CamMethod, CamPatchContext
 from ..runtime.layer_hooks import XaiLayerHookManager
+from .scorecam_blend import gaussian_importance_map
 from .tile_strategy import TilePlan, TileRegion
 
 if TYPE_CHECKING:
@@ -37,6 +38,7 @@ class TileCollectionResult:
     layers: dict[str, int]
     model_output: torch.Tensor
     tile_plan: TilePlan
+    available_layer_names: tuple[str, ...]
 
 
 class _NullContext:
@@ -53,11 +55,21 @@ class TileCollector:
 
         method_params = dict(request.method_params or {})
         img2 = request.model_input.unsqueeze(0).to(request.device)
-        if request.method.family == "gradient":
+        if bool(getattr(request.method, "requires_input_grad", False)):
             img2.requires_grad_()
+        global_target_mask = (
+            self._scorecam_global_target_mask(request, img2)
+            if request.method.id == "scorecam"
+            and method_params.get("_objective_id") == "predicted_target_mask"
+            else None
+        )
 
+        selected_layer = str(method_params.get("_selected_layer", "") or "")
         hook_manager = (
-            XaiLayerHookManager(request.model)
+            XaiLayerHookManager(
+                request.model,
+                selected_layers=(selected_layer,) if selected_layer else None,
+            )
             if request.method.uses_layer_controls
             else None
         )
@@ -90,8 +102,9 @@ class TileCollector:
                     region.slices[1],
                     region.slices[2],
                 ]
-                if request.method.family == "gradient":
-                    tile_input.retain_grad()
+                if request.method.family == "gradient" and request.method.id != "scorecam":
+                    if bool(getattr(request.method, "requires_input_grad", False)):
+                        tile_input.retain_grad()
                     logits = request.model(tile_input)
                 else:
                     with torch.no_grad():
@@ -109,6 +122,10 @@ class TileCollector:
                     progress_units=progress_units,
                     full_input=img2[0].detach(),
                 )
+                if global_target_mask is not None:
+                    tile_method_params["_fixed_target_mask"] = global_target_mask[
+                        region.slices[0], region.slices[1], region.slices[2]
+                    ].unsqueeze(0)
                 if request.pause_waiter is not None:
                     request.pause_waiter(request.method, tile_method_params)
                 patches.append(
@@ -138,7 +155,37 @@ class TileCollector:
             layers=layers,
             model_output=logits.detach().to("cpu"),
             tile_plan=request.tile_plan,
+            available_layer_names=(
+                hook_manager.available_layer_names if hook_manager is not None else ("input",)
+            ),
         )
+
+    @staticmethod
+    def _scorecam_global_target_mask(request: TileCollectionRequest, img2):
+        """Predict the whole volume before scoring channels in any window."""
+        import torch
+
+        blended_logits = None
+        with torch.no_grad():
+            for region in request.tile_plan.regions:
+                tile_input = img2[
+                    ..., region.slices[0], region.slices[1], region.slices[2]
+                ]
+                logits = request.model(tile_input).detach().to("cpu", dtype=torch.float32)
+                if blended_logits is None:
+                    blended_logits = torch.zeros(
+                        (1, logits.size(1), *request.tile_plan.input_shape),
+                        dtype=torch.float32,
+                    )
+                weight = gaussian_importance_map(region.size)
+                blended_logits[
+                    ..., region.slices[0], region.slices[1], region.slices[2]
+                ] += logits * weight
+        if blended_logits is None:
+            raise RuntimeError("Score-CAM 沒有可用的 tile 產生完整預測。")
+        # The same strictly positive importance sum divides every class, so
+        # argmax does not need the normalization volume.
+        return blended_logits.argmax(dim=1)[0] == request.target_class
 
     @staticmethod
     def _tile_method_params(
@@ -184,4 +231,6 @@ def _layer_channel_counts(patch_payload: dict[str, object]) -> dict[str, int]:
         activation = layer_payload.get("activation")
         if isinstance(activation, torch.Tensor):
             counts[str(name)] = int(activation.size(1))
+        elif "feature_count" in layer_payload:
+            counts[str(name)] = int(layer_payload["feature_count"])
     return counts

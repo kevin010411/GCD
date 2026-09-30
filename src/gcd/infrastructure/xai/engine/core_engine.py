@@ -77,6 +77,8 @@ class GradCamEngine:
         self.file_name = ""
         self.patch: list[dict[str, object]] = []
         self.tile_plan = None
+        self._patch_payload_released = False
+        self._retain_patch_payload = False
         self.target_class = 1
         self.active_objective_id = "predicted_target_mask"
         self.xai_cache_key = ""
@@ -247,14 +249,21 @@ class GradCamEngine:
         return self.xai_method_registry.available_methods(family)
 
     def dataset_input(self) -> DatasetInput:
+        """Return a lightweight snapshot of the selected dataset.
+
+        Image buffers are immutable inputs from the engine's perspective.  Keeping
+        their references here avoids duplicating a complete CT volume whenever a
+        dataset is added to, or selected from, the workspace.  Mutable, small
+        metadata is still copied so a caller can safely update its local state.
+        """
         return DatasetInput(
-            img0=deepcopy(self.img0),
+            img0=self.img0,
             img1=(
-                deepcopy(self.img1)
+                self.img1
                 if self.origin_img is None and getattr(self, "img1", None) is not None
                 else None
             ),
-            origin_img=deepcopy(self.origin_img),
+            origin_img=self.origin_img,
             origin_meta=deepcopy(self.origin_meta),
             origin_shape=deepcopy(self.origin_shape),
             img1_spacing=deepcopy(self.img1_spacing),
@@ -267,18 +276,26 @@ class GradCamEngine:
                 self, "active_objective_id", "predicted_target_mask"
             ),
             xai_cache_key=self.xai_cache_key,
-            raw_display_data=deepcopy(self.volume_data),
+            raw_display_data=self.volume_data,
             raw_spacing=deepcopy(self.display_metadata.get("spacing", self.img1_spacing)),
             raw_display_metadata=deepcopy(self.display_metadata),
         )
 
     def load_dataset_input(self, dataset_input: DatasetInput) -> None:
+        """Load a dataset snapshot without copying immutable image buffers.
+
+        ``DatasetInput`` owns its metadata values but deliberately shares the
+        underlying image buffers.  Engine code must therefore treat ``img0``,
+        ``img1``, ``origin_img``, and ``volume_data`` as read-only.  Operations
+        that need a writable image must allocate their own output tensor instead
+        of modifying one of these references in place.
+        """
         self.cam = None
         self.volume_data = None
-        self.img0 = deepcopy(dataset_input.img0)
+        self.img0 = dataset_input.img0
         self.img1 = None
         self.model_input = None
-        self.origin_img = deepcopy(dataset_input.origin_img)
+        self.origin_img = dataset_input.origin_img
         self.origin_meta = deepcopy(dataset_input.origin_meta)
         self.origin_shape = deepcopy(dataset_input.origin_shape)
         self.img1_spacing = deepcopy(dataset_input.img1_spacing)
@@ -290,6 +307,8 @@ class GradCamEngine:
         self.file_name = str(dataset_input.file_name)
         self.patch = []
         self.tile_plan = None
+        self._patch_payload_released = False
+        self._retain_patch_payload = False
         self.target_class = int(dataset_input.target_class)
         self.active_method_id = str(dataset_input.active_method_id)
         self.active_objective_id = str(
@@ -297,9 +316,9 @@ class GradCamEngine:
         )
         self.model_output = None
         self.xai_cache_key = str(dataset_input.xai_cache_key)
-        self.volume_data = deepcopy(dataset_input.raw_display_data)
+        self.volume_data = dataset_input.raw_display_data
         if self.volume_data is None and dataset_input.img1 is not None:
-            self.img1 = deepcopy(dataset_input.img1)
+            self.img1 = dataset_input.img1
             self.volume_data = self.img1[0].permute(*self.PERMUTE)
 
     def _resolve_cam_method(self, method: str | None) -> CamMethod:
@@ -489,6 +508,8 @@ class GradCamEngine:
             self.model_output = None
             self.patch = []
             self.tile_plan = None
+            self._patch_payload_released = False
+            self._retain_patch_payload = False
             self.layers = loaded.default_layers
             self.xai_cache_key = ""
 
@@ -502,7 +523,7 @@ class GradCamEngine:
                 getattr(self, "display_metadata", self._default_display_metadata())
             )
             return []
-        with _timer("資料前處理"):
+        with _timer("資料前處理", track_memory=True):
             result = self._model_input_service().preprocess(
                 img0=getattr(self, "img0", None),
                 origin_img=getattr(self, "origin_img", None),
@@ -536,21 +557,43 @@ class GradCamEngine:
         selected_objective_id, objective = self._resolve_objective(
             objective_id, cam_method.family
         )
+        method_params = dict(method_params or {})
+        if cam_method.id == "scorecam":
+            method_params["_objective_id"] = selected_objective_id
         self.active_method_id = cam_method.id
         self.active_objective_id = selected_objective_id
         self.patch = []
         self.tile_plan = None
+        self._patch_payload_released = False
+        # Re-running a different layer from retained patch tensors is a legacy
+        # workflow.  It remains available as an explicit opt-in, but the normal
+        # UI path prepares and runs one request at a time and releases the large
+        # activation/gradient payload immediately after aggregation.
+        self._retain_patch_payload = bool(
+            (method_params or {}).get("_retain_patch_payload", False)
+        )
 
-        with _timer("載入模型"):
+        with _timer("載入模型", track_memory=True):
             runtime = self._model_runtime_service().load(self.cfg)
 
         track_gpu = getattr(runtime.device, "type", "") == "cuda"
-        with _timer("模型推論", track_gpu=track_gpu, device=str(runtime.device)):
-            tile_strategy = self._tile_strategy_service().resolve(method_params or {})
+        with _timer(
+            "模型推論",
+            track_gpu=track_gpu,
+            track_memory=True,
+            device=str(runtime.device),
+        ):
+            tile_params = dict(method_params or {})
+            tile_stride = int(self.STRIDE)
+            if cam_method.id == "scorecam":
+                tile_params.setdefault("tile_strategy", "sliding_window")
+                if tile_params["tile_strategy"] == "sliding_window":
+                    tile_stride = min(tile_stride, max(1, int(self.SIZE) * 3 // 4))
+            tile_strategy = self._tile_strategy_service().resolve(tile_params)
             tile_plan = tile_strategy.plan(
                 input_shape=tuple(int(v) for v in self.img1[0].shape),
                 patch_size=int(self.SIZE),
-                stride=int(self.STRIDE),
+                stride=tile_stride,
             )
             perturb_reference_volume = self._perturb_reference_volume(
                 method_params or {}, runtime.device
@@ -578,6 +621,7 @@ class GradCamEngine:
             )
             self.patch = collection.patches
             self.layers = collection.layers
+            self.available_layer_names = collection.available_layer_names
             self.model_output = collection.model_output
             self.tile_plan = collection.tile_plan
             del runtime
@@ -660,6 +704,19 @@ class GradCamEngine:
             return None
         return tuple(int(v) for v in self.img1[0].permute(*self.PERMUTE).shape)
 
+    def _release_patch_payload(self) -> None:
+        """Drop per-tile XAI tensors once their full-volume results exist.
+
+        Each entry may retain activation and gradient tensors for every tile and
+        configured layer.  ``cam`` and ``model_output`` are the only artifacts
+        needed after a normal run, so retaining this list would keep a much
+        larger CPU allocation alive.  ``tile_plan`` is only used for that same
+        aggregation and is released with it.
+        """
+        self.patch = []
+        self.tile_plan = None
+        self._patch_payload_released = True
+
     def run_xai_method(
         self,
         layer: str | None = None,
@@ -676,6 +733,11 @@ class GradCamEngine:
                 "目前的 CAM patch 資料與指定 method 不一致，請重新載入輸入資料後再計算。"
             )
         if not self.patch:
+            if getattr(self, "_patch_payload_released", False):
+                raise RuntimeError(
+                    "前一次 XAI 計算已釋放 patch 資料以節省記憶體；"
+                    "請先重新執行 prepare_xai_inputs。"
+                )
             raise RuntimeError("尚未準備 XAI patch 資料，請先執行 prepare_xai_inputs。")
         if any(
             not isinstance(item, dict) or item.get("method") != cam_method.id
@@ -684,7 +746,7 @@ class GradCamEngine:
             raise ValueError("目前的 CAM patch payload 與指定 method 不一致。")
         self.active_method_id = cam_method.id
 
-        with _timer(f"method={cam_method.id} 計算 XAI CAM"):
+        with _timer(f"method={cam_method.id} 計算 XAI CAM", track_memory=True):
             result = self._xai_runner().run(
                 XaiCamRunRequest(
                     method=cam_method,
@@ -709,6 +771,9 @@ class GradCamEngine:
             if getattr(self, "volume_data", None) is None:
                 self.volume_data = self.img1[0].permute(*self.PERMUTE)
             self.model_output = result.model_output
+
+        if not getattr(self, "_retain_patch_payload", False):
+            self._release_patch_payload()
 
         if self.save_dir:
             os.makedirs(self.save_dir, exist_ok=True)

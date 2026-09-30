@@ -1,12 +1,15 @@
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import torch
 
+from src.gcd.domain import DatasetInput
 from src.gcd.infrastructure.xai.methods.cam_methods import (
     GradCamMethod,
     PerturbationOcclusionMethod,
     SaliencyMapMethod,
+    ScoreCamMethod,
     XResCamMethod,
 )
 from src.gcd.infrastructure.xai.engine.core_engine import GradCamEngine
@@ -134,6 +137,42 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         self.assertEqual(selected, "layer-a")
         self.assertGreaterEqual(float(engine.cam.min()), 0.0)
         self.assertLessEqual(float(engine.cam.max()), 1.0)
+        self.assertEqual(engine.patch, [])
+        self.assertIsNone(engine.tile_plan)
+
+    def test_compute_cam_can_retain_patch_payload_when_explicitly_requested(self) -> None:
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine._logger = lambda _message: None
+        engine.cam_methods = {"gradcam": GradCamMethod(GradCamEngine._gradcam_objective)}
+        engine.active_method_id = "gradcam"
+        engine.file_name = "sample.nii.gz"
+        engine.cfg = {"default_layer": "layer-a"}
+        engine.layers = {"layer-a": 1}
+        engine.SIZE = 2
+        engine.STRIDE = 0
+        engine.PERMUTE = (0, 1, 2)
+        engine.img1 = torch.ones((1, 2, 2, 2), dtype=torch.float32)
+        engine.save_dir = None
+        engine._retain_patch_payload = True
+        pred = torch.tensor([[[[[0.1]]], [[[0.9]]]]], dtype=torch.float32)
+        tile_payload = {
+            "method": "gradcam",
+            "pred": pred,
+            "layers": {
+                "layer-a": {
+                    "activation": torch.ones((1, 1, 1, 1, 1), dtype=torch.float32),
+                    "gradient": torch.full(
+                        (1, 1, 1, 1, 1), 2.0, dtype=torch.float32
+                    ),
+                }
+            },
+        }
+        engine.patch = [tile_payload, tile_payload, tile_payload, tile_payload]
+        engine.tile_plan = None
+
+        engine.compute_cam(method="gradcam")
+
+        self.assertEqual(len(engine.patch), 4)
 
     def test_compute_cam_keeps_perturbation_negative_score_changes_visible(self) -> None:
         engine = GradCamEngine.__new__(GradCamEngine)
@@ -384,6 +423,54 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         self.assertTrue(all(item["method"] == "saliency_map" for item in engine.patch))
         self.assertTrue(all("input_gradient" in item for item in engine.patch))
 
+    def test_scorecam_defaults_to_full_sliding_window(self) -> None:
+        class _Cfg:
+            model = object()
+            ckpt = "checkpoint.pt"
+
+        class _Model(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.feature = torch.nn.Conv3d(1, 1, kernel_size=1)
+                self.xai_layer_targets = {"feature": "feature"}
+
+            def load_state_dict(self, _state_dict, strict=False):
+                return [], []
+
+            def forward(self, value):
+                feature = self.feature(value)
+                return torch.cat([torch.zeros_like(feature), feature], dim=1)
+
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine._logger = lambda _message: None
+        engine.error_store = None
+        engine.cfg = _Cfg()
+        engine.cam_methods = {
+            "scorecam": ScoreCamMethod(GradCamEngine._target_logit_sum_objective)
+        }
+        engine.file_name = "sample.nii.gz"
+        engine.img1 = torch.ones((1, 20, 8, 8), dtype=torch.float32)
+        engine.SIZE = 8
+        engine.STRIDE = 7
+        engine.target_class = 1
+
+        with (
+            patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=_Model()),
+            patch("src.gcd.infrastructure.xai.runtime.model_runtime_loader.os.path.exists", return_value=True),
+            patch("torch.load", return_value={}),
+        ):
+            engine.prepare_xai_inputs(
+                method="scorecam",
+                method_params={"_selected_layer": "feature", "_feature_stop": 1},
+            )
+
+        self.assertEqual(engine.tile_plan.strategy_id, "sliding_window")
+        self.assertEqual(len(engine.patch), 3)
+        self.assertEqual(
+            [region.origin[0] for region in engine.tile_plan.regions], [0, 6, 12]
+        )
+        self.assertEqual(engine.tile_plan.regions[-1].slices[0].stop, 20)
+
     def test_prepare_xai_inputs_collects_layers_with_forward_hooks(self) -> None:
         class _Cfg:
             model = object()
@@ -490,6 +577,74 @@ class CoreEngineCamMethodTests(unittest.TestCase):
         self.assertFalse(hasattr(state, "patch"))
         self.assertFalse(hasattr(state, "model_output"))
         self.assertIsNotNone(state.img1)
+
+    def test_dataset_input_shares_volume_buffers_but_copies_metadata(self) -> None:
+        engine = GradCamEngine.__new__(GradCamEngine)
+        img0 = torch.ones((1, 2, 2, 2), dtype=torch.float32)
+        origin_img = torch.zeros((2, 2, 2), dtype=torch.float32)
+        display_volume = np.ones((2, 2, 2), dtype=np.float32)
+        engine.img0 = img0
+        engine.img1 = None
+        engine.origin_img = origin_img
+        engine.origin_meta = {"nested": {"value": 1}}
+        engine.origin_shape = (1, 2, 2, 2)
+        engine.img1_spacing = (1.0, 1.0, 1.0)
+        engine.display_metadata = {
+            "spacing": (1.0, 1.0, 1.0),
+            "nested": {"value": 1},
+        }
+        engine.layers = {"layer-a": 1}
+        engine.file_name = "sample.nii.gz"
+        engine.target_class = 1
+        engine.active_method_id = "gradcam"
+        engine.active_objective_id = "predicted_target_mask"
+        engine.xai_cache_key = ""
+        engine.volume_data = display_volume
+
+        state = engine.dataset_input()
+
+        self.assertIs(state.img0, img0)
+        self.assertIs(state.origin_img, origin_img)
+        self.assertIs(state.raw_display_data, display_volume)
+        engine.origin_meta["nested"]["value"] = 2
+        engine.display_metadata["nested"]["value"] = 2
+        self.assertEqual(state.origin_meta["nested"]["value"], 1)
+        self.assertEqual(state.display_metadata["nested"]["value"], 1)
+
+    def test_load_dataset_input_shares_volume_buffers_but_copies_metadata(self) -> None:
+        img0 = torch.ones((1, 2, 2, 2), dtype=torch.float32)
+        origin_img = torch.zeros((2, 2, 2), dtype=torch.float32)
+        display_volume = np.ones((2, 2, 2), dtype=np.float32)
+        input_state = DatasetInput(
+            img0=img0,
+            img1=None,
+            origin_img=origin_img,
+            origin_meta={"nested": {"value": 1}},
+            origin_shape=(1, 2, 2, 2),
+            img1_spacing=(1.0, 1.0, 1.0),
+            display_metadata={"spacing": (1.0, 1.0, 1.0), "nested": {"value": 1}},
+            layers={"layer-a": 1},
+            file_name="sample.nii.gz",
+            target_class=1,
+            active_method_id="gradcam",
+            raw_display_data=display_volume,
+            raw_display_metadata={
+                "spacing": (1.0, 1.0, 1.0),
+                "nested": {"value": 1},
+            },
+        )
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine.PERMUTE = (0, 1, 2)
+
+        engine.load_dataset_input(input_state)
+
+        self.assertIs(engine.img0, img0)
+        self.assertIs(engine.origin_img, origin_img)
+        self.assertIs(engine.volume_data, display_volume)
+        engine.origin_meta["nested"]["value"] = 2
+        engine.display_metadata["nested"]["value"] = 2
+        self.assertEqual(input_state.origin_meta["nested"]["value"], 1)
+        self.assertEqual(input_state.raw_display_metadata["nested"]["value"], 1)
 
 
 if __name__ == "__main__":

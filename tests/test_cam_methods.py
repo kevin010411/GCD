@@ -48,8 +48,129 @@ class GradCamMethodTests(unittest.TestCase):
         actual = method.build_tile_cam(payload, "layer-a", 0, 2, (2, 2, 2))
 
         self.assertEqual(payload["method"], "scorecam")
-        self.assertTrue(torch.allclose(payload["scores"], torch.tensor([4.0, 4.0])))
+        self.assertTrue(torch.allclose(payload["scores"], torch.tensor([0.5, 0.5])))
         self.assertTrue(torch.allclose(actual, torch.full_like(actual, 0.5)))
+        self.assertNotIn("activation", payload["layers"]["layer-a"])
+
+    def test_scorecam_ignores_constant_maps_and_rectifies_each_tile(self) -> None:
+        class _ToyModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def forward(self, value):
+                self.calls += 1
+                return torch.cat([torch.zeros_like(value), value], dim=1)
+
+        model = _ToyModel()
+        image = torch.ones((1, 1, 2, 2, 2))
+        activation = torch.full((1, 2, 2, 2, 2), 20.0)
+        activation[:, 1] = -1.0
+        activation[:, 1, 0, 0, 0] = 1.0
+        method = ScoreCamMethod(GradCamEngine._target_logit_sum_objective)
+        payload = method.collect_patch_data(CamPatchContext(
+            input_tensor=image,
+            logits=model(image),
+            layers_by_name={"layer-a": activation},
+            target_class=1,
+            objective=GradCamEngine._target_logit_sum_objective,
+            model=model,
+            method_params={"_retain_patch_payload": True},
+        ))
+
+        self.assertEqual(model.calls, 2)  # original plus one nonconstant mask
+        self.assertEqual(payload["valid_channels"].tolist(), [False, True])
+        expected = activation[:, 1:2].clamp_min(0)
+        self.assertTrue(torch.equal(payload["cam"], expected))
+        self.assertTrue(torch.equal(
+            method.build_tile_cam(payload, "layer-a", 0, 2, (2, 2, 2)), expected
+        ))
+        self.assertTrue(torch.equal(
+            method.build_tile_cam(payload, "layer-a", 0, 1, (2, 2, 2)),
+            torch.zeros_like(expected),
+        ))
+
+    def test_scorecam_scores_fixed_original_prediction_region(self) -> None:
+        class _ToyModel(torch.nn.Module):
+            def forward(self, value):
+                bias = torch.full_like(value, -0.5)
+                bias[..., 0, 0, 0] = 1.0
+                target = 0.5 - value + bias
+                return torch.cat([torch.zeros_like(target), target], dim=1)
+
+        model = _ToyModel()
+        image = torch.ones((1, 1, 2, 2, 2))
+        activation = torch.zeros((1, 2, 2, 2, 2))
+        activation[0, 0, 0, 0, 0] = 1
+        activation[0, 1] = 1 - activation[0, 0]
+        method = ScoreCamMethod(GradCamEngine._predicted_target_mask_objective)
+        payload = method.collect_patch_data(CamPatchContext(
+            input_tensor=image,
+            logits=model(image),
+            layers_by_name={"layer-a": activation},
+            target_class=1,
+            objective=GradCamEngine._predicted_target_mask_objective,
+            model=model,
+            method_params={"_objective_id": "predicted_target_mask"},
+        ))
+
+        self.assertTrue(torch.allclose(payload["scores"], torch.tensor([0.5, 1.5])))
+        self.assertTrue(payload["target_present"])
+
+    def test_scorecam_skips_tiles_without_target_prediction(self) -> None:
+        class _ToyModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def forward(self, value):
+                self.calls += 1
+                return torch.cat([torch.ones_like(value), torch.zeros_like(value)], dim=1)
+
+        model = _ToyModel()
+        image = torch.ones((1, 1, 2, 2, 2))
+        logits = model(image)
+        method = ScoreCamMethod(GradCamEngine._predicted_target_mask_objective)
+        payload = method.collect_patch_data(CamPatchContext(
+            input_tensor=image,
+            logits=logits,
+            layers_by_name={"layer-a": torch.ones((1, 2, 2, 2, 2))},
+            target_class=1,
+            objective=GradCamEngine._predicted_target_mask_objective,
+            model=model,
+            method_params={"_objective_id": "predicted_target_mask"},
+        ))
+
+        self.assertFalse(payload["target_present"])
+        self.assertEqual(model.calls, 1)
+        self.assertEqual(float(payload["cam"].abs().sum()), 0.0)
+
+    def test_scorecam_channel_scores_follow_selected_class(self) -> None:
+        class _ToyModel(torch.nn.Module):
+            def forward(self, value):
+                return torch.cat([value, 1 - value], dim=1)
+
+        model = _ToyModel()
+        image = torch.ones((1, 1, 2, 2, 2))
+        activation = torch.zeros((1, 2, 2, 2, 2))
+        activation[0, 0, 0, 0, 0] = 1
+        activation[0, 1] = 1 - activation[0, 0]
+        method = ScoreCamMethod(GradCamEngine._target_logit_sum_objective)
+        scores = []
+        for target_class in (0, 1):
+            payload = method.collect_patch_data(CamPatchContext(
+                input_tensor=image,
+                logits=model(image),
+                layers_by_name={"layer-a": activation},
+                target_class=target_class,
+                objective=GradCamEngine._target_logit_sum_objective,
+                model=model,
+                method_params={"_objective_id": "target_logit_sum"},
+            ))
+            scores.append(payload["scores"])
+
+        self.assertTrue(torch.allclose(scores[0], torch.tensor([0.125, 0.875])))
+        self.assertTrue(torch.allclose(scores[1], torch.tensor([0.875, 0.125])))
 
     def test_collect_patch_data_keeps_method_pred_and_layer_tensors(self) -> None:
         layer = torch.randn((1, 2, 2, 2, 2), requires_grad=True)

@@ -9,11 +9,22 @@ if TYPE_CHECKING:
 
 
 class XaiLayerHookManager:
-    def __init__(self, model: nn.Module) -> None:
+    def __init__(
+        self,
+        model: nn.Module,
+        selected_layers: tuple[str, ...] | None = None,
+    ) -> None:
         self.model = model
         self._handles = []
         self._layers: dict[str, torch.Tensor] = {}
-        self._targets = self._validate_targets(model)
+        targets = self._validate_targets(model)
+        self._available_layer_names = tuple(targets)
+        if selected_layers:
+            missing = [name for name in selected_layers if name not in targets]
+            if missing:
+                raise ValueError("指定的 XAI layer 不存在: " + ", ".join(missing))
+            targets = {name: targets[name] for name in selected_layers}
+        self._targets = targets
 
     @staticmethod
     def _validate_targets(model: nn.Module) -> dict[str, str]:
@@ -37,6 +48,10 @@ class XaiLayerHookManager:
     @property
     def layer_names(self) -> tuple[str, ...]:
         return tuple(self._targets.keys())
+
+    @property
+    def available_layer_names(self) -> tuple[str, ...]:
+        return self._available_layer_names
 
     def __enter__(self) -> XaiLayerHookManager:
         for name, path in self._targets.items():
