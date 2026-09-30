@@ -50,17 +50,39 @@ def _apply_vtk_direction(volume, origin, metadata: dict[str, object]) -> np.ndar
 
 
 def _build_vtk_image_data(data, spacing, origin, metadata: dict[str, object]):
-    from vtkmodules.vtkCommonCore import VTK_FLOAT
     from vtkmodules.vtkCommonDataModel import vtkImageData
     from vtkmodules.util import numpy_support
 
     if hasattr(data, "detach"):
-        np_array = np.ascontiguousarray(data.detach().cpu().numpy())
+        source_array = data.detach().cpu().numpy()
     else:
-        np_array = np.ascontiguousarray(np.array(data))
+        # ``asarray`` deliberately avoids the unconditional copy that ``array``
+        # made for already-NumPy inputs.  VTK can then share the same buffer.
+        source_array = np.asarray(data)
+
+    # GPU volume rendering supports these scalar types across the image and
+    # label volumes used by GCD.  In particular, do not expand uint8/uint16
+    # segmentation labels to float32.  Float64 and unsupported NumPy dtypes
+    # are normalized to float32 because the VTK GPU mapper's float64 support
+    # is inconsistent across drivers.
+    supported_dtypes = {
+        np.dtype(np.float32),
+        np.dtype(np.uint8),
+        np.dtype(np.uint16),
+        np.dtype(np.int16),
+    }
+    target_dtype = (
+        source_array.dtype
+        if source_array.dtype in supported_dtypes
+        else np.float32
+    )
+    np_array = np.ascontiguousarray(source_array, dtype=target_dtype)
+    vtk_source = np_array.reshape(-1)
 
     vtk_array = numpy_support.numpy_to_vtk(
-        np_array.ravel(order="C"), deep=True, array_type=VTK_FLOAT
+        vtk_source,
+        deep=False,
+        array_type=numpy_support.get_vtk_array_type(np_array.dtype),
     )
     image_data = vtkImageData()
     dims = (int(np_array.shape[2]), int(np_array.shape[1]), int(np_array.shape[0]))
@@ -70,6 +92,10 @@ def _build_vtk_image_data(data, spacing, origin, metadata: dict[str, object]):
     image_data.SetSpacing(*vtk_spacing)
     image_data.SetOrigin(*vtk_origin)
     image_data.GetPointData().SetScalars(vtk_array)
+    # ``numpy_to_vtk(..., deep=False)`` does not own ``vtk_source``.  Keep a
+    # Python reference on the vtkImageData as an additional lifetime guard;
+    # renderer volume records also retain the 3-D backing array.
+    image_data._numpy_backing_array = vtk_source
     return np_array, image_data, vtk_spacing, vtk_origin
 
 
@@ -268,6 +294,8 @@ class VtkVolumeRenderer:
         self.render_window.AddRenderer(self.plane_overlay_renderer)
         self.interactor = self.render_window.GetInteractor()
         self.camera_interactor_style = vtkInteractorStyleTrackballCamera()
+        # Use volume bounds when camera interaction updates the clipping range.
+        self.camera_interactor_style.SetDefaultRenderer(self.renderer)
         self.annotation_interactor_style = vtkInteractorStyleUser()
         self.disabled_camera_interactor_style = vtkInteractorStyleUser()
         self.camera_interaction_enabled = True
@@ -403,6 +431,7 @@ class VtkVolumeRenderer:
         self.volumes.append(
             {
                 "image": image_data,
+                "numpy_backing": np_array,
                 "mapper": mapper,
                 "volume": volume,
                 "prop": prop,
@@ -444,6 +473,7 @@ class VtkVolumeRenderer:
             data, spacing, (0.0, 0.0, 0.0), metadata
         )
         volume_item["image"] = image_data
+        volume_item["numpy_backing"] = np_array
         volume_item["mapper"].SetInputData(image_data)
         vtk_direction = _apply_vtk_direction(
             volume_item["volume"], vtk_origin, metadata
@@ -1747,6 +1777,7 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
         self.volumes.append(
             {
                 "image": image_data,
+                "numpy_backing": np_array,
                 "mapper": self.multi_mapper,
                 "volume": child_volume,
                 "prop": prop,
@@ -1791,6 +1822,7 @@ class StandardMultiVolumeRenderer(VtkVolumeRenderer):
             data, spacing, (0.0, 0.0, 0.0), metadata
         )
         volume_item["image"] = image_data
+        volume_item["numpy_backing"] = np_array
         render_port = volume_item.get("render_port")
         if render_port is None:
             return False
