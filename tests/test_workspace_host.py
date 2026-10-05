@@ -28,6 +28,9 @@ class _FakeRenderer:
     def render(self) -> None:
         self.render_calls += 1
 
+    def set_plane_state(self, state, **kwargs) -> None:
+        self.plane_state = state
+
     def capture_camera_state(self):
         return {"position": (9.0, 9.0, 9.0)}
 
@@ -87,6 +90,7 @@ class WorkspaceHostTests(unittest.TestCase):
         host._scene_initialized = initialized
         host._scene_signature = scene_signature
         host._visible_volume_count = previous_count
+        host._plane_state = {}
         host.apply_shared_calls = 0
         host.sync_camera_calls = 0
 

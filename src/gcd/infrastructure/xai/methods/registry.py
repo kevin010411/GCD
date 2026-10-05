@@ -14,7 +14,7 @@ from .perturb_occlusion import (
 from .saliency_map import SaliencyMapMethod
 from .scorecam import ScoreCamMethod
 from .organ_occlusion import OrganOcclusionMethod
-from .xrescam import XResCamMethod
+from .xrescam import XResCamMethod, HiResCamMethod, LayerCamMethod
 
 if TYPE_CHECKING:
     import torch
@@ -34,6 +34,8 @@ class XaiMethodRegistry:
                 GradCamMethod(objective),
                 ScoreCamMethod(objective),
                 XResCamMethod(objective),
+                HiResCamMethod(objective),
+                LayerCamMethod(objective),
                 GradCAMTestMethod(),
                 SaliencyMapMethod(objective),
                 PerturbationOcclusionMethod(),

@@ -1,21 +1,20 @@
 import unittest
 
 from src.gcd.infrastructure.xai.tiling.tile_strategy import (
-    LegacyFourTileStrategy,
     SlidingWindowTileStrategy,
     TileStrategyResolver,
 )
 
 
 class TileStrategyTests(unittest.TestCase):
-    def test_legacy_four_tile_matches_existing_origins(self) -> None:
-        plan = LegacyFourTileStrategy().plan(
+    def test_sliding_window_matches_grid_origins(self) -> None:
+        plan = SlidingWindowTileStrategy().plan(
             input_shape=(4, 4, 2),
             patch_size=2,
             stride=2,
         )
 
-        self.assertEqual(plan.strategy_id, "legacy_four_tile")
+        self.assertEqual(plan.strategy_id, "sliding_window")
         self.assertEqual(
             [region.origin for region in plan.regions],
             [(0, 0, 0), (0, 2, 0), (2, 0, 0), (2, 2, 0)],
@@ -64,10 +63,13 @@ class TileStrategyTests(unittest.TestCase):
         self.assertEqual(plan.regions[0].origin, (0, 0, 0))
         self.assertEqual(plan.regions[0].size, (2, 2, 2))
 
-    def test_resolver_defaults_to_legacy_and_accepts_sliding_window(self) -> None:
+    def test_resolver_defaults_to_sliding_window(self) -> None:
         resolver = TileStrategyResolver()
 
-        self.assertIsInstance(resolver.resolve({}), LegacyFourTileStrategy)
+        self.assertIsInstance(resolver.resolve({}), SlidingWindowTileStrategy)
+        for obsolete in ("legacy", "legacy_four_tile"):
+            with self.assertRaises(ValueError):
+                resolver.resolve({"tile_strategy": obsolete})
         self.assertIsInstance(
             resolver.resolve({"tile_strategy": "sliding_window"}),
             SlidingWindowTileStrategy,

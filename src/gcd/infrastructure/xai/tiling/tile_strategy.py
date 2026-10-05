@@ -20,42 +20,6 @@ class TilePlan:
     strategy_id: str
 
 
-class LegacyFourTileStrategy:
-    id = "legacy_four_tile"
-
-    def plan(
-        self,
-        *,
-        input_shape: Sequence[int],
-        patch_size: int | Sequence[int],
-        stride: int | Sequence[int],
-    ) -> TilePlan:
-        shape = _shape3(input_shape)
-        size = _patch3(patch_size)
-        stride3 = _stride3(stride)
-        x0, y0, z0 = (
-            (shape[0] - (stride3[0] + size[0])) // 2,
-            (shape[1] - (stride3[1] + size[1])) // 2,
-            (shape[2] - size[2]) // 2,
-        )
-        offsets = [
-            (0, 0, 0),
-            (0, stride3[1], 0),
-            (stride3[0], 0, 0),
-            (stride3[0], stride3[1], 0),
-        ]
-        regions = []
-        for index, (dx, dy, dz) in enumerate(offsets):
-            origin = (int(x0 + dx), int(y0 + dy), int(z0 + dz))
-            regions.append(_region(index, origin, size, shape))
-        return TilePlan(
-            regions=tuple(regions),
-            input_shape=shape,
-            patch_size=size,
-            strategy_id=self.id,
-        )
-
-
 class SlidingWindowTileStrategy:
     id = "sliding_window"
 
@@ -89,14 +53,11 @@ class SlidingWindowTileStrategy:
 class TileStrategyResolver:
     def __init__(self) -> None:
         self._strategies = {
-            LegacyFourTileStrategy.id: LegacyFourTileStrategy(),
             SlidingWindowTileStrategy.id: SlidingWindowTileStrategy(),
         }
 
     def resolve(self, method_params: Mapping[str, object] | None = None):
-        strategy_id = str((method_params or {}).get("tile_strategy") or LegacyFourTileStrategy.id)
-        if strategy_id == "legacy":
-            strategy_id = LegacyFourTileStrategy.id
+        strategy_id = str((method_params or {}).get("tile_strategy") or SlidingWindowTileStrategy.id)
         if strategy_id not in self._strategies:
             raise ValueError(
                 f"未知 tile_strategy '{strategy_id}'，可用策略: {', '.join(self._strategies)}"

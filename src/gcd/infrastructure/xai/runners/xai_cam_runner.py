@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..methods.cam_methods import CamMethod, XaiLayerSelection
-from ..tiling.tile_strategy import LegacyFourTileStrategy, TilePlan
-from ..tiling.scorecam_blend import gaussian_importance_map
+from ..tiling.tile_strategy import SlidingWindowTileStrategy, TilePlan
+from ..tiling.scorecam_blend import tile_importance_map
 
 if TYPE_CHECKING:
     import torch
@@ -76,19 +76,14 @@ class XaiCamRunner:
 
         n2 = min(int(request.n2), int(layers[selected_layer]))
         shape = list(request.img1[0].shape)
-        tile_plan = request.tile_plan or LegacyFourTileStrategy().plan(
+        tile_plan = request.tile_plan or SlidingWindowTileStrategy().plan(
             input_shape=request.img1[0].shape,
             patch_size=request.size,
             stride=request.stride,
         )
-        legacy_blending = tile_plan.strategy_id == LegacyFourTileStrategy.id
 
         cam = torch.zeros(shape, dtype=torch.float32)
-        # Legacy blending applies its weights directly to each tile, so a
-        # full-volume coverage counter would never be read.
-        coverage = (
-            None if legacy_blending else torch.zeros(shape, dtype=torch.float32)
-        )
+        coverage = torch.zeros(shape, dtype=torch.float32)
         if not isinstance(patches[0].get("pred"), torch.Tensor):
             raise TypeError("CAM patch payload 缺少 pred tensor。")
         pred_shape = list(patches[0]["pred"].shape)[:2] + shape
@@ -112,22 +107,21 @@ class XaiCamRunner:
                 p1, size=region.size, mode="trilinear"
             )
 
-            if legacy_blending:
-                self._apply_tile_blend(q, p1, index, request.size, request.stride)
-            elif method.id == "scorecam":
-                weight = gaussian_importance_map(region.size).unsqueeze(0).unsqueeze(0)
-                q *= weight
-                p1 *= weight
+            weight = tile_importance_map(
+                region.size, request.method_params or {}, default_mode="constant",
+            ).unsqueeze(0).unsqueeze(0)
+            q *= weight
+            p1 *= weight
 
             xs, ys, zs = region.slices
 
             cam[xs, ys, zs] += q[0, 0]
             model_out[:, :, xs, ys, zs] += p1
             if coverage is not None:
-                coverage[xs, ys, zs] += weight[0, 0] if method.id == "scorecam" else 1
+                coverage[xs, ys, zs] += weight[0, 0]
 
         if coverage is not None:
-            coverage.clamp_min_(1e-12 if method.id == "scorecam" else 1)
+            coverage.clamp_min_(1e-12)
             cam /= coverage
             model_out /= coverage.unsqueeze(0).unsqueeze(0)
             del coverage
@@ -140,7 +134,9 @@ class XaiCamRunner:
             cam.clamp_min_(0)
         cam -= torch.min(cam)
         maximum = torch.max(cam)
-        if maximum > 0:
+        minimum_signal = (torch.finfo(torch.float32).eps
+                          if method.id in {"gradcam", "hirescam", "xrescam", "layercam", "scorecam"} else 0)
+        if maximum > minimum_signal:
             cam /= maximum
         elif (
             method.family == "perturbation"
@@ -148,6 +144,8 @@ class XaiCamRunner:
             and perturb_signal_max > 0
         ):
             cam = torch.ones_like(cam)
+        else:
+            cam.zero_()
 
         prediction_dtype = self._prediction_dtype(model_out.shape[1])
         model_output = torch.argmax(model_out, dim=1)[0].to(prediction_dtype)
@@ -170,29 +168,3 @@ class XaiCamRunner:
         if class_count <= 32_768:
             return torch.int16
         return torch.int32
-
-    @staticmethod
-    def _apply_tile_blend(
-        q: torch.Tensor, p1: torch.Tensor, index: int, size: int, stride: int
-    ) -> None:
-        overlap = size - stride
-        if index in (0, 1):
-            for i in range(overlap):
-                weight = (overlap - i) / overlap
-                q[0, 0, stride + i, :, :] *= weight
-                p1[0, 0, stride + i, :, :] *= weight
-        if index in (2, 3):
-            for i in range(overlap):
-                weight = i / overlap
-                q[0, 0, i, :, :] *= weight
-                p1[0, 0, i, :, :] *= weight
-        if index in (0, 2):
-            for i in range(overlap):
-                weight = (overlap - i) / overlap
-                q[0, 0, :, stride + i, :] *= weight
-                p1[0, 0, :, stride + i, :] *= weight
-        if index in (1, 3):
-            for i in range(overlap):
-                weight = i / overlap
-                q[0, 0, :, i, :] *= weight
-                p1[0, 0, :, i, :] *= weight

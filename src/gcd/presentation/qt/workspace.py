@@ -188,38 +188,23 @@ def _sample_slice_with_affine(
     world_grid: np.ndarray,
     inverse_affine: np.ndarray,
 ) -> np.ndarray:
-    import torch
-    import torch.nn.functional as F
+    from scipy.ndimage import map_coordinates
 
     homogeneous = world_grid.reshape(-1, 4)
     sample_voxels = homogeneous @ inverse_affine.T
     sample_voxels = sample_voxels[:, :3].reshape(*world_grid.shape[:2], 3)
 
-    depth, height, width = volume.shape
-    x = sample_voxels[..., 2]
-    y = sample_voxels[..., 1]
-    z = sample_voxels[..., 0]
-
-    def _norm(values: np.ndarray, size: int) -> np.ndarray:
-        if size <= 1:
-            return np.zeros_like(values, dtype=np.float32)
-        return ((values / float(size - 1)) * 2.0 - 1.0).astype(np.float32)
-
-    grid = np.stack([_norm(x, width), _norm(y, height), _norm(z, depth)], axis=-1)
-    grid_tensor = torch.from_numpy(grid).unsqueeze(0).unsqueeze(1)
-    volume_tensor = (
-        torch.from_numpy(volume.astype(np.float32, copy=False))
-        .unsqueeze(0)
-        .unsqueeze(0)
+    # Sample just this plane. Converting a non-float volume to a torch tensor
+    # previously copied the whole 3D buffer on every slider movement.
+    return map_coordinates(
+        volume,
+        np.moveaxis(sample_voxels, -1, 0),
+        output=np.float32,
+        order=1,
+        mode="grid-constant",
+        cval=0.0,
+        prefilter=False,
     )
-    sampled = F.grid_sample(
-        volume_tensor,
-        grid_tensor,
-        mode="bilinear",
-        padding_mode="zeros",
-        align_corners=True,
-    )
-    return sampled[0, 0, 0].detach().cpu().numpy()
 
 
 def _resample_item_slice_to_base(
@@ -835,14 +820,18 @@ class SliceViewWidget(QWidget):
         if self._building:
             return
         if self.index_spinbox.value() != value:
+            self._building = True
             self.index_spinbox.setValue(value)
+            self._building = False
         self.changed.emit(self.viewer_id, "slice_index", value)
 
     def _on_spinbox_changed(self, value: int) -> None:
         if self._building:
             return
         if self.index_slider.value() != value:
+            self._building = True
             self.index_slider.setValue(value)
+            self._building = False
         self.changed.emit(self.viewer_id, "slice_index", value)
 
     def _on_link_toggled(self, checked: bool) -> None:
@@ -895,6 +884,11 @@ class ViewerWorkspace(QWidget):
         self.layout_root_widget: QWidget | None = None
         self._renderer = None
         self.vtk_widget = None
+        self._pending_slice_viewers: set[str] = set()
+        self._slice_refresh_timer = QTimer(self)
+        self._slice_refresh_timer.setSingleShot(True)
+        self._slice_refresh_timer.setInterval(16)
+        self._slice_refresh_timer.timeout.connect(self._flush_slice_refresh)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1166,6 +1160,12 @@ class ViewerWorkspace(QWidget):
                 {
                     **item,
                     "data": _as_numpy(item.get("data")),
+                    "slice_color_map": (
+                        _color_map_from_transfer_function(
+                            item["transfer_function"], item["data_range"]
+                        )
+                        if item.get("source") == "xai" else None
+                    ),
                 }
             )
         self.payload = ViewerPayload(renderable_items=normalized_items)
@@ -1174,14 +1174,19 @@ class ViewerWorkspace(QWidget):
         self.refresh_slice_views()
         self._refresh_renderer_annotations()
 
-    def refresh_slice_views(self) -> None:
+    def refresh_slice_views(
+        self, viewer_ids: set[str] | None = None, *, refresh_3d: bool = True
+    ) -> None:
+        if viewer_ids is None:
+            self._slice_refresh_timer.stop()
+            self._pending_slice_viewers.clear()
+            self.overlay_status_messages = []
         mode = (
             self.state.annotations.mode
             if self.enable_annotations
             else AnnotationMode.OFF
         )
         point_size = self.state.annotations.point_size
-        self.overlay_status_messages = []
         visible_base_items = [
             item
             for item in self.payload.renderable_items
@@ -1202,6 +1207,8 @@ class ViewerWorkspace(QWidget):
         )
         self._normalize_slot_states()
         for viewer_id, widget in self.slice_widgets.items():
+            if viewer_ids is not None and viewer_id not in viewer_ids:
+                continue
             slot_id = self.viewer_to_slot.get(viewer_id)
             if slot_id is None:
                 self.tile_widgets[viewer_id].hide()
@@ -1241,9 +1248,7 @@ class ViewerWorkspace(QWidget):
                     xai_slices.append(
                         (
                             xai_slice,
-                            _color_map_from_transfer_function(
-                                item["transfer_function"], item["data_range"]
-                            ),
+                            item["slice_color_map"],
                         )
                     )
             widget.set_image(_blend_slice_image(volume_slice, xai_slices, state))
@@ -1274,9 +1279,16 @@ class ViewerWorkspace(QWidget):
                 f"{state.orientation.value.title()} Slice"
             )
             self.tile_widgets[viewer_id].show()
-        self.tile_widgets["viewer-3d"].set_title(self.volume_view_title)
-        self._refresh_renderer_annotations()
-        self._refresh_3d_view()
+        if refresh_3d:
+            self.tile_widgets["viewer-3d"].set_title(self.volume_view_title)
+            self._refresh_renderer_annotations()
+            self._refresh_3d_view()
+
+    def _flush_slice_refresh(self) -> None:
+        viewer_ids = set(self._pending_slice_viewers)
+        self._pending_slice_viewers.clear()
+        if viewer_ids:
+            self.refresh_slice_views(viewer_ids, refresh_3d=False)
 
     def set_slice_orientation(
         self,
@@ -1301,18 +1313,23 @@ class ViewerWorkspace(QWidget):
             layout_states[slot_id] = self._copy_slice_state(state, slot_id)
         self.refresh_slice_views()
 
-    def set_slice_index(self, viewer_id: str, index: int) -> None:
+    def set_slice_index(self, viewer_id: str, index: int, *, deferred: bool = False) -> None:
         slot_id, state = self._slot_state_for_viewer(viewer_id)
         if slot_id is None or state is None:
             return
-        state.slice_index = clamp_slice_index(
+        next_index = clamp_slice_index(
             state.orientation, index, self.state.volume_shape
         )
+        if next_index == state.slice_index:
+            return
+        state.slice_index = next_index
+        changed_viewers = {viewer_id}
         if self.state.global_slice_link_mode and state.is_linked:
             for other_viewer_id, other_state in self.viewer_slice_states.items():
                 if other_viewer_id == viewer_id or not other_state.is_linked:
                     continue
                 if other_state.orientation == state.orientation:
+                    changed_viewers.add(other_viewer_id)
                     other_state.slice_index = clamp_slice_index(
                         other_state.orientation,
                         state.slice_index,
@@ -1331,7 +1348,12 @@ class ViewerWorkspace(QWidget):
         )
         if slot_id in layout_states:
             layout_states[slot_id] = self._copy_slice_state(state, slot_id)
-        self.refresh_slice_views()
+        if deferred:
+            self._pending_slice_viewers.update(changed_viewers)
+            if not self._slice_refresh_timer.isActive():
+                self._slice_refresh_timer.start()
+        else:
+            self.refresh_slice_views(changed_viewers, refresh_3d=False)
 
     def _on_slice_widget_changed(self, viewer_id: str, field: str, value) -> None:
         slot_id, state = self._slot_state_for_viewer(viewer_id)
@@ -1341,7 +1363,7 @@ class ViewerWorkspace(QWidget):
             self.set_slice_orientation(viewer_id, value)
             return
         if field == "slice_index":
-            self.set_slice_index(viewer_id, value)
+            self.set_slice_index(viewer_id, value, deferred=True)
             return
         if field == "is_linked":
             state.is_linked = bool(value)

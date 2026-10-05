@@ -27,6 +27,7 @@ from ..presentation.qt.workspace_models import (
     SliceOrientation,
 )
 from ..infrastructure.volume_loading import VolumeLoadingService
+from ..infrastructure.model_catalog import load_model_catalog
 from ..infrastructure.organ_occlusion import (
     TotalSegmentatorOrganService,
     apply_organ_occlusion,
@@ -350,15 +351,8 @@ class WorkflowService:
             "shape": tuple(int(v) for v in data.shape),
         }
 
-    def list_model_configs(self) -> list[dict[str, str]]:
-        root = Path("src/config/model")
-        if not root.exists():
-            return []
-        return [
-            {"name": path.stem, "path": str(path)}
-            for path in sorted(root.glob("*.py"))
-            if path.is_file() and path.name != "__init__.py"
-        ]
+    def list_model_configs(self) -> list[dict[str, Any]]:
+        return load_model_catalog()
 
     def set_config(self, config_path: str) -> None:
         self.engine.set_config(config_path)
@@ -582,8 +576,14 @@ class WorkflowService:
             family = getattr(self.engine._resolve_cam_method(request.method), "family", family)
         method_options = self.list_xai_methods(family)
         objective_options = self.engine.available_objectives(family)
+        model_key = self.engine.model_identity() if hasattr(self.engine, "model_identity") else ""
+        model_name = str(
+            (request.method_params or {}).get("model_name")
+            or Path(str(getattr(self.engine.cfg, "filename", "model"))).stem
+        )
+        dataset_name = Path(dataset_input.file_name).name.removesuffix(".nii.gz").removesuffix(".nii")
         prediction_volume = None
-        if family == "gradient" and getattr(self.engine, "model_output", None) is not None:
+        if getattr(self.engine, "model_output", None) is not None:
             model_output = self.engine.model_output
             display_prediction = (
                 self.engine.prediction_to_raw_display_space(model_output)
@@ -594,12 +594,12 @@ class WorkflowService:
             prediction_volume = VolumeRecord(
                 id="",
                 dataset_id="",
-                display_name=f"{request.result_name}_prediction",
+                display_name=f"{dataset_name}_{model_name}_prediction",
                 source="prediction",
-                method_id=f"{request.method}:prediction",
+                method_id="model_prediction",
                 data=display_prediction,
                 data_range=prediction_range,
-                transfer_function=TransferFunction.base_preset(),
+                transfer_function=TransferFunction.label_preset(),
                 spacing=display_spacing,
                 metadata=display_metadata,
                 shape=tuple(int(v) for v in display_prediction.shape),
@@ -608,9 +608,9 @@ class WorkflowService:
                 source_spacing=display_spacing,
                 source_affine=display_metadata.get("affine"),
                 plugin_metadata={
-                    "model_name": (request.method_params or {}).get("model_name"),
-                    "target_class": request.target_class,
-                    "xai_method": request.method,
+                    "model_name": model_name,
+                    "model_key": model_key,
+                    "config_path": str(getattr(self.engine.cfg, "filename", "")),
                     "data_kind": "class_prediction",
                 },
             )
@@ -652,6 +652,7 @@ class WorkflowService:
             ),
             volume_data_range=volume_data_range,
             prediction_volume=prediction_volume,
+            model_key=model_key,
         )
 
     def compute_cam(

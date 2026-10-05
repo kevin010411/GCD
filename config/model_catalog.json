@@ -1,0 +1,246 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "xai_hw_acdc",
+      "name": "xai_hw ACDC UNet3D",
+      "config": "model/xai_hw_acdc.py",
+      "family": "UNet 3D",
+      "output_classes": 4,
+      "tags": ["ACDC", "xai_hw"],
+      "enabled": true
+    },
+    {
+      "id": "cotr",
+      "name": "cotr",
+      "config": "model/cotr.py",
+      "family": "CoTr",
+      "output_classes": 2,
+      "tags": [],
+      "enabled": true
+    },
+    {
+      "id": "inception_resblock",
+      "name": "inception_resblock",
+      "config": "model/inception_resblock.py",
+      "family": "Inception",
+      "output_classes": 4,
+      "tags": [],
+      "enabled": true
+    },
+    {
+      "id": "inception_resca",
+      "name": "inception_resca",
+      "config": "model/inception_resca.py",
+      "family": "Inception",
+      "output_classes": 4,
+      "tags": [],
+      "enabled": true
+    },
+    {
+      "id": "inceptionWT_resblock",
+      "name": "inceptionWT_resblock",
+      "config": "model/inceptionWT_resblock.py",
+      "family": "Inception WT",
+      "output_classes": 4,
+      "tags": [],
+      "enabled": true
+    },
+    {
+      "id": "inceptionWT_resca",
+      "name": "inceptionWT_resca",
+      "config": "model/inceptionWT_resca.py",
+      "family": "Inception WT",
+      "output_classes": 4,
+      "tags": [],
+      "enabled": true
+    },
+    {
+      "id": "nn_unetr",
+      "name": "nn_unetr",
+      "config": "model/nn_unetr.py",
+      "family": "DynUNet",
+      "output_classes": 4,
+      "tags": [],
+      "enabled": true
+    },
+    {
+      "id": "nn_unetr_mmwhs",
+      "name": "nn_unetr_mmwhs",
+      "config": "model/nn_unetr_mmwhs.py",
+      "family": "DynUNet",
+      "output_classes": 8,
+      "tags": [
+        "mmwhs"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "swin_unetr",
+      "name": "swin_unetr",
+      "config": "model/swin_unetr.py",
+      "family": "Swin UNETR",
+      "output_classes": 4,
+      "tags": [],
+      "enabled": true
+    },
+    {
+      "id": "swin_unetr_mmwhs",
+      "name": "swin_unetr_mmwhs",
+      "config": "model/swin_unetr_mmwhs.py",
+      "family": "Swin UNETR",
+      "output_classes": 8,
+      "tags": [
+        "mmwhs"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "unet_3d",
+      "name": "unet_3d",
+      "config": "model/unet_3d.py",
+      "family": "UNet 3D",
+      "output_classes": 4,
+      "tags": [],
+      "enabled": true
+    },
+    {
+      "id": "unet_3d_mmwhs",
+      "name": "unet_3d_mmwhs",
+      "config": "model/unet_3d_mmwhs.py",
+      "family": "UNet 3D",
+      "output_classes": 8,
+      "tags": [
+        "mmwhs"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "unet_3d_ring",
+      "name": "unet_3d_ring",
+      "config": "model/unet_3d_ring.py",
+      "family": "UNet 3D",
+      "output_classes": 4,
+      "tags": [
+        "ring"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "unet_irc",
+      "name": "unet_irc",
+      "config": "model/unet_irc.py",
+      "family": "UNet IRC",
+      "output_classes": 4,
+      "tags": [],
+      "enabled": true
+    },
+    {
+      "id": "unet_irc_mmwhs",
+      "name": "unet_irc_mmwhs",
+      "config": "model/unet_irc_mmwhs.py",
+      "family": "UNet IRC",
+      "output_classes": 8,
+      "tags": [
+        "mmwhs"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "unet_irc_nocbam",
+      "name": "unet_irc_nocbam",
+      "config": "model/unet_irc_nocbam.py",
+      "family": "UNet IRC",
+      "output_classes": 4,
+      "tags": [
+        "nocbam"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "unet_irc_nocbam_11x3",
+      "name": "unet_irc_nocbam_11x3",
+      "config": "model/unet_irc_nocbam_11x3.py",
+      "family": "UNet IRC",
+      "output_classes": 4,
+      "tags": [
+        "nocbam",
+        "11x3"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "unet_irc_nocbam_13x5",
+      "name": "unet_irc_nocbam_13x5",
+      "config": "model/unet_irc_nocbam_13x5.py",
+      "family": "UNet IRC",
+      "output_classes": 4,
+      "tags": [
+        "nocbam",
+        "13x5"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "unet_irc_nocbam_9x5",
+      "name": "unet_irc_nocbam_9x5",
+      "config": "model/unet_irc_nocbam_9x5.py",
+      "family": "UNet IRC",
+      "output_classes": 4,
+      "tags": [
+        "nocbam",
+        "9x5"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "unetcnx",
+      "name": "unetcnx",
+      "config": "model/unetcnx.py",
+      "family": "UNetCNX",
+      "output_classes": 4,
+      "tags": [],
+      "enabled": true
+    },
+    {
+      "id": "unetcnx_mmwhs",
+      "name": "unetcnx_mmwhs",
+      "config": "model/unetcnx_mmwhs.py",
+      "family": "UNetCNX",
+      "output_classes": 8,
+      "tags": [
+        "mmwhs"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "unetr",
+      "name": "unetr",
+      "config": "model/unetr.py",
+      "family": "UNETR",
+      "output_classes": 4,
+      "tags": [],
+      "enabled": true
+    },
+    {
+      "id": "unetr_mmwhs",
+      "name": "unetr_mmwhs",
+      "config": "model/unetr_mmwhs.py",
+      "family": "UNETR",
+      "output_classes": 8,
+      "tags": [
+        "mmwhs"
+      ],
+      "enabled": true
+    },
+    {
+      "id": "wisnet",
+      "name": "wisnet",
+      "config": "model/wisnet.py",
+      "family": "UNet IRC",
+      "output_classes": 4,
+      "tags": [],
+      "enabled": true
+    }
+  ]
+}

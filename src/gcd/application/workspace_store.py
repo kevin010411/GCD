@@ -251,7 +251,7 @@ class WorkspaceDataStore:
         if isinstance(result, XaiComputeResult):
             compute_result = result
             source_volume = compute_result.volume
-            volume_id = self.create_prediction_volume_id(
+            volume_id = self.create_xai_volume_id(
                 dataset_id, source_volume.method_id
             )
             volume = replace(
@@ -281,7 +281,7 @@ class WorkspaceDataStore:
             compute_result = None
             item_payload = result["renderable_item"]
             method_id = str(item_payload["method_id"])
-            volume_id = self.create_prediction_volume_id(dataset_id, method_id)
+            volume_id = self.create_xai_volume_id(dataset_id, method_id)
             volume = VolumeRecord(
                 id=volume_id,
                 dataset_id=dataset_id,
@@ -319,6 +319,7 @@ class WorkspaceDataStore:
                 layer_names=compute_result.layer_names,
                 selected_layer=compute_result.selected_layer,
                 feature_size=compute_result.feature_size,
+                model_key=compute_result.model_key,
             )
         elif isinstance(result, dict) and isinstance(
             result.get("dataset_input"), DatasetInput
@@ -334,15 +335,27 @@ class WorkspaceDataStore:
         extra_volumes: list[VolumeRecord] = []
         if compute_result is not None and compute_result.prediction_volume is not None:
             source_prediction = compute_result.prediction_volume
-            prediction_id = self.create_prediction_volume_id(
-                dataset_id, source_prediction.method_id
+            model_key = str(
+                (source_prediction.plugin_metadata or {}).get("model_key")
+                or compute_result.model_key
+                or source_prediction.method_id
             )
+            prediction_id = self.create_prediction_volume_id(
+                dataset_id, model_key
+            )
+            existing_prediction = self.volumes.get(prediction_id)
             prediction = replace(
                 source_prediction,
                 id=prediction_id,
                 dataset_id=dataset_id,
-                display_name=self.unique_volume_display_name(
-                    source_prediction.display_name
+                display_name=(
+                    existing_prediction.display_name if existing_prediction
+                    else self.unique_volume_display_name(source_prediction.display_name)
+                ),
+                visible=(existing_prediction.visible if existing_prediction else source_prediction.visible),
+                transfer_function=(
+                    existing_prediction.transfer_function if existing_prediction
+                    else source_prediction.transfer_function
                 ),
                 metadata={
                     **source_prediction.metadata,
@@ -373,7 +386,6 @@ class WorkspaceDataStore:
                 self.selection, volume_order=(*self.selection.volume_order, volume.id)
             )
         self.selection = replace(self.selection, selected_volume_id=volume.id)
-        self._emit(VolumeUpserted(volume.id, dataset_id))
         for extra_volume in extra_volumes:
             self.volumes[extra_volume.id] = extra_volume
             if extra_volume.id not in self.selection.volume_order:
@@ -381,10 +393,14 @@ class WorkspaceDataStore:
                     self.selection,
                     volume_order=(*self.selection.volume_order, extra_volume.id),
                 )
-            self._emit(VolumeUpserted(extra_volume.id, dataset_id))
+        # Publish a complete result so subscribers render CAM and prediction once.
+        self._emit(VolumeUpserted(volume.id, dataset_id))
         return volume.id
 
-    def create_prediction_volume_id(self, dataset_id: str, method_id: str) -> str:
+    def create_prediction_volume_id(self, dataset_id: str, model_key: str) -> str:
+        return f"{dataset_id}:prediction:{model_key}"
+
+    def create_xai_volume_id(self, dataset_id: str, method_id: str) -> str:
         return f"{dataset_id}:{method_id}:{uuid4().hex[:6]}"
 
     def upsert_named_volume(

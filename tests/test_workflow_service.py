@@ -198,15 +198,33 @@ class WorkflowServiceTests(unittest.TestCase):
 
         self.assertIsNotNone(result.prediction_volume)
         self.assertEqual(result.prediction_volume.source, "prediction")
-        self.assertEqual(result.prediction_volume.method_id, "gradcam:prediction")
+        self.assertEqual(result.prediction_volume.method_id, "model_prediction")
         self.assertEqual(
             result.prediction_volume.display_name,
-            "sample_model_gradcam_prediction",
+            "sample_model_prediction",
         )
         np.testing.assert_array_equal(
             result.prediction_volume.data,
             np.array([[[0, 1], [2, 1]]], dtype=np.int16),
         )
+
+    def test_prediction_name_and_identity_do_not_depend_on_xai_request(self) -> None:
+        engine = _FakeEngine()
+        engine.model_output = np.array([[[0, 1], [2, 1]]], dtype=np.int16)
+        engine.model_identity = lambda: "architecture-and-checkpoint"
+        service = WorkflowService(engine)
+        for method, target_class, layer in (
+            ("gradcam", 1, "layer-a"),
+            ("saliency_map", 2, "input"),
+            ("perturb_occlusion", 3, "input"),
+        ):
+            result = service.compute_xai(
+                engine.dataset_input(),
+                XaiComputeRequest(target_class, layer, 0, 8, method, f"heatmap_{method}_{target_class}", method_params={"model_name": "unet"}),
+            )
+            self.assertEqual(result.prediction_volume.display_name, "sample_unet_prediction")
+            self.assertEqual(result.prediction_volume.plugin_metadata["model_key"], "architecture-and-checkpoint")
+            self.assertEqual(result.prediction_volume.method_id, "model_prediction")
 
     def test_compute_cam_returns_separate_transfer_defaults_and_ranges(self) -> None:
         service = WorkflowService(_FakeEngine())

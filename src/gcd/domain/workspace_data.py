@@ -40,6 +40,7 @@ class DatasetRecord:
     base_shape: tuple[int, ...]
     base_spacing: tuple[float, float, float]
     display_metadata: dict[str, object]
+    model_key: str = ""
 
     def __getitem__(self, key: str) -> object:
         aliases = {
@@ -142,6 +143,7 @@ class XaiComputeResult:
     volume: VolumeRecord
     volume_data_range: DataRange
     prediction_volume: VolumeRecord | None = None
+    model_key: str = ""
 
 
 @dataclass(frozen=True)

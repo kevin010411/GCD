@@ -37,6 +37,21 @@ class _ErrorStore:
 
 
 class ModelRuntimeLoaderTests(unittest.TestCase):
+    def test_explicit_cpu_device_and_dataparallel_keys_match_benchmark(self) -> None:
+        model = _Model()
+        cfg = _Cfg()
+        cfg.inference = {"device": "cpu"}
+        loader = ModelRuntimeLoader(build_model=lambda _cfg: model)
+        with (
+            patch("src.gcd.infrastructure.xai.runtime.model_runtime_loader.os.path.exists", return_value=True),
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.load", return_value={"state_dict": {"module.weight": torch.ones(1)}}),
+            patch.object(model, "load_state_dict", wraps=model.load_state_dict) as load,
+        ):
+            runtime = loader.load(cfg)
+        self.assertEqual(str(runtime.device), "cpu")
+        self.assertEqual(list(load.call_args.args[0]), ["weight"])
+
     def test_load_builds_model_loads_checkpoint_and_sets_eval(self) -> None:
         model = _Model()
         loader = ModelRuntimeLoader(build_model=lambda _cfg: model)

@@ -8,7 +8,6 @@ from src.gcd.infrastructure.xai.tiling.tile_collector import (
     TileCollector,
 )
 from src.gcd.infrastructure.xai.tiling.tile_strategy import (
-    LegacyFourTileStrategy,
     SlidingWindowTileStrategy,
 )
 
@@ -118,7 +117,7 @@ class TileCollectorTests(unittest.TestCase):
             def forward(self, value):
                 return self.head(self.feature(value))
 
-        plan = LegacyFourTileStrategy().plan(
+        plan = SlidingWindowTileStrategy().plan(
             input_shape=(2, 2, 2), patch_size=2, stride=0
         )
         for layer, expected_count in (("decoder 2", 3),):
@@ -141,14 +140,14 @@ class TileCollectorTests(unittest.TestCase):
                 self.assertEqual(result.patches[0]["cam"].shape[1], 1)
                 self.assertNotIn("activation", result.patches[0]["layers"][layer])
 
-    def test_scorecam_rejects_final_class_logits_as_features(self) -> None:
+    def test_scorecam_accepts_final_class_logits_as_spatial_masks(self) -> None:
         class _OutputModel(torch.nn.Module):
             def __init__(self) -> None:
                 super().__init__()
                 self.head = torch.nn.Conv3d(1, 2, kernel_size=1)
                 with torch.no_grad():
-                    self.head.weight[:, 0, 0, 0, 0] = torch.tensor([-1.0, 0.1])
-                    self.head.bias[:] = torch.tensor([-10.0, -5.0])
+                    self.head.weight[:, 0, 0, 0, 0] = torch.tensor([-1.0, 1.0])
+                    self.head.bias[:] = torch.tensor([0.0, 1.0])
                 self.xai_layer_targets = {"decoder 1": "head"}
                 self.forward_count = 0
 
@@ -161,21 +160,23 @@ class TileCollectorTests(unittest.TestCase):
         plan = SlidingWindowTileStrategy().plan(
             input_shape=(3, 2, 2), patch_size=2, stride=1
         )
-        with self.assertRaisesRegex(ValueError, "最後的 class logits"):
-            TileCollector().collect(TileCollectionRequest(
-                model=model,
-                device=torch.device("cpu"),
-                model_input=image,
-                method=ScoreCamMethod(lambda logits, target: logits[0, target].sum()),
-                objective=lambda logits, target: logits[0, target].sum(),
-                target_class=1,
-                tile_plan=plan,
-                method_params={
-                    "_selected_layer": "decoder 1",
-                    "_objective_id": "predicted_target_mask",
-                },
-            ))
-        self.assertEqual(model.forward_count, len(plan.regions) + 1)
+        result = TileCollector().collect(TileCollectionRequest(
+            model=model,
+            device=torch.device("cpu"),
+            model_input=image,
+            method=ScoreCamMethod(lambda logits, target: logits[0, target].sum()),
+            objective=lambda logits, target: logits[0, target].sum(),
+            target_class=1,
+            tile_plan=plan,
+            method_params={
+                "_selected_layer": "decoder 1",
+                "_objective_id": "predicted_target_mask",
+            },
+        ))
+        self.assertEqual(result.layers, {"decoder 1": 2})
+        self.assertTrue(all(torch.isfinite(patch["cam"]).all() for patch in result.patches))
+        self.assertTrue(any(float(patch["cam"].max()) > 0 for patch in result.patches))
+        self.assertGreater(model.forward_count, 2 * len(plan.regions))
 
     def test_gradient_method_collects_layer_payloads_with_hooks(self) -> None:
         class _Model(torch.nn.Module):
@@ -189,7 +190,7 @@ class TileCollectorTests(unittest.TestCase):
                 return self.head(self.feature(value))
 
         model = _Model()
-        plan = LegacyFourTileStrategy().plan(
+        plan = SlidingWindowTileStrategy().plan(
             input_shape=(2, 2, 2),
             patch_size=2,
             stride=0,
@@ -207,7 +208,7 @@ class TileCollectorTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(len(result.patches), 4)
+        self.assertEqual(len(result.patches), len(plan.regions))
         self.assertEqual(result.layers, {"feature": 2})
         self.assertTrue(all("feature" in patch["layers"] for patch in result.patches))
         self.assertFalse(result.patches[0]["pred"].requires_grad)
@@ -225,7 +226,7 @@ class TileCollectorTests(unittest.TestCase):
             def forward(self, value):
                 return self.head(self.second(self.first(value)))
 
-        plan = LegacyFourTileStrategy().plan(
+        plan = SlidingWindowTileStrategy().plan(
             input_shape=(2, 2, 2), patch_size=2, stride=0
         )
         result = TileCollector().collect(
@@ -275,7 +276,7 @@ class TileCollectorTests(unittest.TestCase):
 
         progress = []
         method = _Method()
-        plan = LegacyFourTileStrategy().plan(
+        plan = SlidingWindowTileStrategy().plan(
             input_shape=(4, 4, 2),
             patch_size=2,
             stride=2,

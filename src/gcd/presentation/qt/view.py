@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 from .plugins import DEFAULT_PLUGIN_DEFINITIONS, PluginDefinition
 from .styles import CLASSIC_STYLESHEET, DARK_STYLESHEET
 from .workspace import WorkspaceHost
+from .model_selector import ModelSelectorCombo
 
 
 class _ScrollFade(QWidget):
@@ -241,7 +242,7 @@ class MainWindowView(QMainWindow):
         layout.addLayout(title_layout, 1)
 
         layout.addWidget(QLabel("Model"))
-        self.model_combo = QComboBox(self)
+        self.model_combo = ModelSelectorCombo(self)
         self.model_combo.setObjectName("modelCombo")
         self.model_combo.setMinimumWidth(180)
         if self.model_combo.view() is not None:
@@ -427,12 +428,8 @@ class MainWindowView(QMainWindow):
         self.inspector_frame.setVisible(visible)
         self.inspector_toggle_button.setChecked(visible)
 
-    def set_model_options(self, options: list[dict[str, str]]) -> None:
-        self.model_combo.blockSignals(True)
-        self.model_combo.clear()
-        for option in options:
-            self.model_combo.addItem(option["name"], option["path"])
-        self.model_combo.blockSignals(False)
+    def set_model_options(self, options: list[dict[str, object]]) -> None:
+        self.model_combo.set_options(options)
 
     def set_layer_options(self, layer_names: list[str], selected: str) -> None:
         if "xai_family_panels" not in self.__dict__:

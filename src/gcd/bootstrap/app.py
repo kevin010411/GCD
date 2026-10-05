@@ -11,6 +11,7 @@ from ..application.services import (
 )
 from ..infrastructure.xai.engine.core_engine import GradCamEngine
 from ..infrastructure.error_store import ErrorStore
+from ..infrastructure.model_catalog import DEFAULT_MODEL_CATALOG
 from ..presentation.qt.background import QtBackgroundTaskRunner
 from ..presentation.qt.styles import STYLESHEET
 from ..presentation.qt.view import MainWindowView
@@ -23,7 +24,7 @@ def main(argv=None) -> None:
     view = MainWindowView()
     error_store = ErrorStore()
     workflow_service = WorkflowService(
-        GradCamEngine("src/config/model/unet_3d.py", error_store=error_store)
+        GradCamEngine(str(DEFAULT_MODEL_CATALOG.parent / "model" / "unet_3d.py"), error_store=error_store)
     )
     presenter = MainWindowPresenter(
         view=view,

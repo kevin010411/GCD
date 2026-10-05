@@ -18,7 +18,23 @@ class LayerGradientXaiMethod(XaiMethod):
         self._objective = objective
 
     def collect_patch_data(self, context: CamPatchContext) -> dict[str, object]:
-        loss = context.objective(context.logits, context.target_class)
+        import torch
+        params = context.method_params or {}
+        from ..cam_protocol import resolve_cam_protocol, target_score
+        protocol = resolve_cam_protocol(params.get("cam_protocol"))
+        if params.get("_objective_id") == "predicted_target_mask":
+            target = params.get("_fixed_target_mask")
+            target = (context.logits.detach().argmax(dim=1) == context.target_class
+                      if target is None else torch.as_tensor(target, device=context.logits.device, dtype=torch.bool))
+            # A prediction made under inference_mode cannot be saved by autograd.
+            target = target.clone()
+            values = context.logits[:, context.target_class]
+            if target.shape != values.shape:
+                raise ValueError("CAM 固定目標 mask 與 tile logits shape 不一致。")
+            # Keep a differentiable zero for empty targets: never average an empty tensor.
+            loss = target_score(context.logits, context.target_class, target, protocol["reduction"])
+        else:
+            loss = context.objective(context.logits, context.target_class)
         loss.backward()
         return {
             "method": self.id,

@@ -16,81 +16,53 @@ from src.gcd.infrastructure.xai.engine.core_engine import GradCamEngine
 
 
 class CoreEngineCamMethodTests(unittest.TestCase):
-    def test_model_layer_metadata_reads_nested_targets_without_forward(self) -> None:
-        class _Cfg:
-            model = object()
+    @staticmethod
+    def _metadata_model():
+        model = torch.nn.Sequential()
+        model.add_module("encoder", torch.nn.Conv3d(1, 3, 1))
+        model.add_module("decoder", torch.nn.Conv3d(3, 2, 1))
+        model.xai_layer_targets = {"encoder": "encoder", "decoder": "decoder"}
+        return model
 
-            def get(self, key, default=None):
-                return {"default_layer": "decoder"}.get(key, default)
-
-        class _Model(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.encoder = torch.nn.Sequential(torch.nn.Conv3d(1, 2, kernel_size=1))
-                self.decoder = torch.nn.Sequential(
-                    torch.nn.Identity(),
-                    torch.nn.Conv3d(2, 3, kernel_size=1),
-                )
-                self.xai_layer_targets = {
-                    "encoder": "encoder.0",
-                    "decoder": "decoder.1",
-                }
-
-            def forward(self, _value):
-                raise AssertionError("metadata lookup must not run forward")
-
+    def test_model_layer_metadata_discovers_channels_and_caches_only_metadata(self) -> None:
         engine = GradCamEngine.__new__(GradCamEngine)
-        engine.cfg = _Cfg()
-
-        with patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=_Model()):
+        engine.cfg = {"model": {"type": "test"}, "inference": {"roi_size": (2, 2, 2)}, "default_layer": "decoder"}
+        model = self._metadata_model()
+        with patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=model) as build:
             metadata = engine.model_layer_metadata()
-
+            self.assertEqual(engine.model_layer_metadata(), metadata)
+            build.assert_called_once_with(engine.cfg["model"])
         self.assertEqual(metadata["layer_names"], ["encoder", "decoder"])
         self.assertEqual(metadata["selected_layer"], "decoder")
-        self.assertEqual(metadata["feature_size"], 0)
+        self.assertEqual(metadata["feature_size"], 2)
+        self.assertEqual(metadata["feature_sizes"], {"encoder": 3, "decoder": 2})
+        self.assertTrue(all(not module._forward_hooks for module in model.modules()))
 
     def test_model_layer_metadata_falls_back_to_first_layer(self) -> None:
-        class _Cfg:
-            model = object()
-
-            def get(self, key, default=None):
-                return {"default_layer": "missing"}.get(key, default)
-
-        class _Model(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.encoder = torch.nn.Conv3d(1, 2, kernel_size=1)
-                self.xai_layer_targets = {"encoder": "encoder"}
-
         engine = GradCamEngine.__new__(GradCamEngine)
-        engine.cfg = _Cfg()
-
-        with patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=_Model()):
+        engine.cfg = {"model": {"type": "test"}, "inference": {"roi_size": (2, 2, 2)}, "default_layer": "missing"}
+        with patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=self._metadata_model()):
             metadata = engine.model_layer_metadata()
-
         self.assertEqual(metadata["selected_layer"], "encoder")
+        self.assertEqual(metadata["feature_size"], 3)
 
-    def test_model_layer_metadata_reports_missing_target_path(self) -> None:
-        class _Cfg:
-            model = object()
-
-            def get(self, key, default=None):
-                return {"default_layer": "decoder"}.get(key, default)
-
-        class _Model(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.encoder = torch.nn.Conv3d(1, 2, kernel_size=1)
-                self.xai_layer_targets = {"decoder": "decoder.0"}
-
+    def test_model_layer_metadata_validates_model_targets(self) -> None:
         engine = GradCamEngine.__new__(GradCamEngine)
-        engine.cfg = _Cfg()
+        engine.cfg = {"model": {"type": "test"}, "inference": {"roi_size": (2, 2, 2)}}
+        with patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=torch.nn.Identity()):
+            with self.assertRaisesRegex(RuntimeError, "xai_layer_targets"):
+                engine.model_layer_metadata()
 
-        with (
-            patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=_Model()),
-            self.assertRaisesRegex(RuntimeError, "decoder.*decoder\\.0"),
-        ):
-            engine.model_layer_metadata()
+    def test_layer_inspection_removes_hooks_after_forward_failure(self) -> None:
+        engine = GradCamEngine.__new__(GradCamEngine)
+        engine.cfg = {"model": {"type": "test"}, "inference": {"roi_size": (2, 2, 2)}}
+        model = self._metadata_model()
+        with patch("src.gcd.infrastructure.xai.engine.core_engine._build_model", return_value=model):
+            with patch.object(model, "forward", side_effect=RuntimeError("forward failed")):
+                with self.assertRaisesRegex(RuntimeError, "forward failed"):
+                    engine.model_layer_metadata()
+        self.assertTrue(all(not module._forward_hooks for module in model.modules()))
+        self.assertIsNone(getattr(engine, "_layer_metadata_cache", None))
 
     def test_unknown_method_falls_back_to_gradcam(self) -> None:
         logs = []

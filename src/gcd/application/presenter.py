@@ -50,6 +50,7 @@ class MainWindowPresenter:
         self.selected_perturbation_dataset_id = ""
         self.selected_perturbation_answer_volume_id = ""
         self.selected_xai_dataset_by_family = {"gradient": "", "perturbation": ""}
+        self._layer_choices: dict[tuple[str, str], str] = {}
         self._xai_is_running = False
         self._xai_running_family = ""
         self._perturb_preview_active = False
@@ -307,6 +308,8 @@ class MainWindowPresenter:
         self.refresh_autoshot_panel()
 
     def on_model_changed(self, _index: int) -> None:
+        if self._xai_is_running:
+            return
         path = self.view.selected_model_path()
         if path:
             self.workflow.set_config(path)
@@ -499,7 +502,7 @@ class MainWindowPresenter:
     def _set_xai_running(self, is_running: bool, family_id: str = "") -> None:
         self._xai_is_running = bool(is_running)
         self._xai_running_family = str(family_id) if is_running else ""
-        for name in ("gradcam_run_button", "perturbation_run_button"):
+        for name in ("gradcam_run_button", "perturbation_run_button", "model_combo", "open_file_button"):
             button = getattr(self.view, name, None)
             if button is not None and hasattr(button, "setEnabled"):
                 button.setEnabled(not self._xai_is_running)
@@ -516,8 +519,19 @@ class MainWindowPresenter:
         except TypeError:
             return self.workflow.list_objectives()
 
-    def on_layer_changed(self, _layer: str) -> None:
-        return
+    def on_layer_changed(self, layer: str) -> None:
+        dataset = self.datasets.get(self.selected_grad_dataset_id)
+        metadata = (
+            self.workflow.list_current_model_layers()
+            if hasattr(self.workflow, "list_current_model_layers") else {}
+        )
+        model_key = str(metadata.get("model_key", ""))
+        self._layer_choices[(self.selected_grad_dataset_id, model_key)] = layer
+        same_model = dataset is not None and dataset.model_key == model_key
+        size = int(metadata.get("feature_sizes", {}).get(layer, 0))
+        if same_model:
+            size = int(dataset.input_state.layers.get(layer, size))
+        self.view.set_feature_size(size)
 
     def on_feature_range_changed(self) -> None:
         return
@@ -718,6 +732,10 @@ class MainWindowPresenter:
             layer != dataset.selected_layer
             or int(dataset.feature_size or 0) <= 0
             or n2 <= n1
+            or (
+                hasattr(self.workflow, "list_current_model_layers")
+                and dataset.model_key != self.workflow.list_current_model_layers().get("model_key", "")
+            )
         ):
             n1, n2 = 0, 999
         method_params = self._selected_xai_method_params(family_id)
@@ -1130,6 +1148,7 @@ class MainWindowPresenter:
                 list(result.method_options),
                 result.selected_method,
             )
+        self._sync_xai_controls(family_id)
 
     def _sync_dataset_controls(self) -> None:
         options = self.data_store.dataset_options()
@@ -1175,25 +1194,40 @@ class MainWindowPresenter:
         elif family_id == "perturbation":
             selected_id = self.selected_perturbation_dataset_id
         dataset = self.datasets.get(selected_id)
-        if dataset is None:
-            if hasattr(self.view, "set_xai_layer_options"):
-                self.view.set_xai_layer_options(family_id, [], "", 0)
-            elif family_id == "gradient":
-                self.view.set_layer_options([], "")
-                self.view.set_feature_size(0)
-                self.on_method_changed(0)
-            return
+        metadata = (
+            self.workflow.list_current_model_layers()
+            if hasattr(self.workflow, "list_current_model_layers")
+            else {}
+        )
+        layer_names = list(metadata.get("layer_names", ()))
+        selected_layer = str(metadata.get("selected_layer", ""))
+        feature_sizes = metadata.get("feature_sizes", {})
+        feature_size = int(metadata.get("feature_size", 0) or 0)
+        model_key = str(metadata.get("model_key", ""))
+        same_model = dataset is not None and dataset.model_key == model_key
+        if same_model:
+            # Activations belong to a dataset and model; choices belong to config.
+            layer_names = layer_names or list(dataset.layer_names)
+            if dataset.selected_layer in layer_names:
+                selected_layer = dataset.selected_layer
+                feature_size = int(dataset.feature_size)
+        remembered = self._layer_choices.get((selected_id, model_key))
+        if family_id == "gradient" and remembered in layer_names:
+            selected_layer = remembered
+            feature_size = int(feature_sizes.get(remembered, 0))
+            if same_model:
+                feature_size = int(dataset.input_state.layers.get(remembered, feature_size))
         if hasattr(self.view, "set_xai_layer_options"):
             self.view.set_xai_layer_options(
                 family_id,
-                list(dataset.layer_names),
-                dataset.selected_layer,
-                int(dataset.feature_size),
+                layer_names,
+                selected_layer,
+                feature_size,
             )
             self.on_xai_method_changed(family_id)
         elif family_id == "gradient":
-            self.view.set_layer_options(list(dataset.layer_names), dataset.selected_layer)
-            self.view.set_feature_size(int(dataset.feature_size))
+            self.view.set_layer_options(layer_names, selected_layer)
+            self.view.set_feature_size(feature_size)
             self.on_method_changed(0)
 
     def _sync_selected_dataset_ids(self) -> None:

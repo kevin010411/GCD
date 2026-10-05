@@ -29,6 +29,8 @@ class ScoreCamMethod(XaiMethod):
             raise RuntimeError("Score-CAM 需要可執行的模型。")
 
         params = dict(context.method_params or {})
+        from ..cam_protocol import resolve_cam_protocol, target_score
+        protocol = resolve_cam_protocol(params.get("cam_protocol"))
         requested_layer = str(params.get("_selected_layer", "") or "")
         layer = (
             requested_layer
@@ -39,15 +41,9 @@ class ScoreCamMethod(XaiMethod):
             raise RuntimeError("目前沒有可用的 Score-CAM layer。")
 
         activation = context.layers_by_name[layer].detach()
-        if (
-            activation.shape == context.logits.shape
-            and activation.data_ptr() == context.logits.data_ptr()
-        ):
-            raise ValueError(
-                f"Score-CAM layer '{layer}' 是模型最後的 class logits，"
-                "不是中間 feature map；這會產生全零或誤導的熱圖。"
-                "請選擇 decoder 2 或其他中間層。"
-            )
+        # Output logits are also valid spatial masks for Score-CAM. They have
+        # only one channel per class, so report them as a distinct layer choice
+        # rather than rejecting the tensor solely because it is model output.
         activation = activation.relu()
         channel_count = int(activation.size(1))
         start = max(0, min(int(params.get("_feature_start", 0)), channel_count))
@@ -84,17 +80,21 @@ class ScoreCamMethod(XaiMethod):
                 minimum = flat.amin(dim=2, keepdim=True).view(mask.size(0), 1, 1, 1, 1)
                 maximum = flat.amax(dim=2, keepdim=True).view(mask.size(0), 1, 1, 1, 1)
                 mask_range = maximum - minimum
-                if not bool(torch.isfinite(mask_range).all()) or not bool((mask_range > 1e-12).all()):
+                constant = not bool((mask_range > 1e-12).all())
+                if not bool(torch.isfinite(mask_range).all()) or (
+                    constant and params.get("_objective_id") != "predicted_target_mask"
+                ):
                     # A constant feature produces an empty normalized mask and
                     # cannot provide spatial evidence for this class.
                     scores.append(torch.zeros((), dtype=torch.float32))
                     valid_channels.append(False)
                     continue
-                mask = (mask - minimum) / mask_range
+                # Fixed-target benchmark includes zero masks for constant channels.
+                mask = (mask - minimum) / mask_range.clamp_min(1e-8)
                 masked_logits = context.model(context.input_tensor.detach() * mask)
                 if fixed_target is not None:
                     target_logits = masked_logits[:, context.target_class]
-                    score = target_logits[fixed_target].mean()
+                    score = target_score(masked_logits, context.target_class, fixed_target, protocol["reduction"])
                 else:
                     score = context.objective(masked_logits, context.target_class)
                     score = score / masked_logits[0, 0].numel()

@@ -4,8 +4,13 @@ DARK_STYLESHEET = """
         font-size: 13px;
     }
 
-    QMainWindow, QWidget#centralwidget {
+    QMainWindow, QWidget#centralwidget, QDialog#modelSelectionDialog {
         background: #0C1118;
+    }
+
+    QDialog#modelSelectionDialog QTableWidget::item:selected {
+        background: #274765;
+        color: #F5F9FF;
     }
 
     QWidget#pluginPanel,
@@ -543,8 +548,13 @@ CLASSIC_STYLESHEET = """
         font-size: 13px;
     }
 
-    QMainWindow, QWidget#centralwidget {
+    QMainWindow, QWidget#centralwidget, QDialog#modelSelectionDialog {
         background: #F3F3F3;
+    }
+
+    QDialog#modelSelectionDialog QTableWidget::item:selected {
+        background: #E5F1FB;
+        color: #1F1F1F;
     }
 
     QLabel {

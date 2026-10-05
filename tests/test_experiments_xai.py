@@ -6,15 +6,15 @@ from types import SimpleNamespace
 import torch
 import numpy as np
 
-from experiments.xai import (
+from experiments.src.xai import (
     compute_organ_occlusion_attribution,
     insertion_deletion_metrics,
     normalize_attribution,
     normalize_signed_attribution,
     target_class_from_prediction,
 )
-from experiments.outputs import export_csv_files, export_faithfulness_plots
-from experiments.xai_design import (
+from experiments.src.outputs import export_csv_files, export_faithfulness_plots
+from experiments.src.xai_design import (
     FaithfulnessAnswerAggregator,
     OrganOcclusionXaiMethod,
     PredictionDiceScore,
@@ -23,13 +23,13 @@ from experiments.xai_design import (
     build_xai_metrics,
     OrganOccluder,
 )
-from experiments.runner import _xai_execution_enabled
+from experiments.src.runner import _xai_execution_enabled
 from src.gcd.domain import OrganMaskRecord
 
 
 class ExperimentsXaiTests(unittest.TestCase):
     def test_experiment_scorecam_uses_requested_gui_layer_and_fixed_target(self):
-        from experiments.xai.attribution import compute_attribution
+        from experiments.src.xai.attribution import compute_attribution
 
         class _Config(dict):
             inference = SimpleNamespace(roi_size=(2, 2, 2))
@@ -178,7 +178,7 @@ class ExperimentsXaiTests(unittest.TestCase):
             )
 
     def test_registry_wrapper_forwards_dataset_execution_scope(self):
-        from experiments.xai_design import RegistryXaiMethod
+        from experiments.src.xai_design import RegistryXaiMethod
 
         method = RegistryXaiMethod(id="legacy_organ", method="organ_occlusion")
         self.assertEqual(method.execution_scope, "dataset")

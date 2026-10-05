@@ -33,22 +33,25 @@ Grad-CAM Discoverer is a Python application for visualizing 3D medical imaging d
 
 ## Prerequisites
 
+- Windows 11 with PowerShell and uv installed.
+- Python 3.11 (the project version in `.python-version`; uv manages the environment).
 - A compatible GPU with CUDA support is recommended for faster processing.
 - NIfTI files (`.nii` or `.nii.gz`) for input data.
 - Pre-trained model checkpoint file (`unetcnx.pth`).
 
 ## Quick Start
 
-This project uses uv for dependency management.Make sure uv is installed before proceeding:https://docs.astral.sh/uv/
+Run this project natively on Windows 11 using PowerShell and uv. Install uv using the [official installation guide](https://docs.astral.sh/uv/getting-started/installation/).
 
-1. Sync project
-```bash
-uv sync
+1. Open PowerShell and sync dependencies from the project root (adjust the checkout path if needed):
+```powershell
+Set-Location D:\KevinFu\GCD
+uv sync --locked
 ```
 2. Load checkpoint by adjust config
-all config is under the ./src/config/model，for example unet_3d,can easily edit ckpt to change your checkpoint dir
+all config is under the ./config/model，for example unet_3d,can easily edit ckpt to change your checkpoint dir
 ```python
-_base_ = ["../base.py"]
+_base_ = ["../preprocessing/gcd.py"]
 
 model = dict(
     type="UNet",
@@ -61,33 +64,42 @@ ckpt = "checkpoint/3d_unet_60_20_20.pth"  # checkpoint
 default_layer = "decoder 1"  # default layer of CAM 
 ```
 3. Start 
-```bash
+```powershell
 uv run main.py
 ```
 
 
+## Shared configuration
+
+Model configs inherit `config/preprocessing/gcd.py` or `acdc.py` directly;
+`config/base.py` and top-level `size`, `stride`, `spacing`, `permute` are removed.
+Set `inference.roi_size` and `inference.overlap` for every tiled XAI method,
+`preprocessing.spacing` for resampling, and `display.permute` for display axes.
+Padding uses the configured ROI, not the old size-plus-stride four-tile canvas.
+`legacy` / `legacy_four_tile` strategies are unsupported and rejected. Results
+from the old four-tile/padding protocol require rerunning before comparison.
+
 ## Usage
 
-### Dataset inference CLI
+### Experiment CLI
 
-From the repository root, pass the dataset directory as the positional input:
+Only two public experiment entrypoints remain. Run them from the GCD root in Windows 11 PowerShell using uv:
 
 ```powershell
-uv run python -m experiments.predict data/chgh `
-  --config experiments/configs/predict.py `
-  --output output/chgh
+uv run python -m experiments.benchmark --help
+uv run python -m experiments.evaluate_metrics --help
 ```
 
-Input volumes such as `patient0001.nii.gz` are automatically paired with
-`patient0001_gt.nii.gz`. Each patient is written to a separate directory under
-`output/chgh`, and the dataset-level index is written to
-`output/chgh/dataset_summary.json`.
+Experiment implementation and batch configs are under `experiments/src/`;
+shared model/preprocessing configs remain under root `config/`.
+The old `experiments.predict` and `experiments.xai_benchmark` command paths
+are removed; use the two entrypoints above.
 
 For all experiment CLI options and output files, see
 [`experiments/README.md`](experiments/README.md).
 
 1. Run the application:
-   ```bash
+   ```powershell
    uv run main.py
    ```
 
@@ -104,7 +116,12 @@ For all experiment CLI options and output files, see
 
 ## Notes
 
-- The application assumes a model input size of 128x128x128 and specific spacing (`(0.7, 0.7, 1.0)`). Adjust these in `gcd_core.py` if needed.
+- GradCAM, HiResCAM (also available as the legacy XResCAM name), LayerCAM and ScoreCAM use full sliding-window coverage with the configured ROI, overlap and blending. The default predicted-target objective uses a fixed full-volume prediction mask; gradient CAMs differentiate the mean target logit, rectify each raw tile before fusion, and normalize only the final volume. Benchmark CAM formulas live in `src/gcd/infrastructure/xai/methods/benchmark_cam.py`.
+- Model input size, stride, spacing, and display axis order come from the selected `config/model/*.py` config.
+- Layer options are discovered by constructing the configured model and reading its `xai_layer_targets`; configs do not need a duplicate layer list. One evaluation-mode, inference-only forward using the configured window size measures each layer's output channels. Only names and channel counts are cached, and temporary hooks/model tensors are released. Checkpoint loading remains part of XAI execution, not layer inspection.
+- Switching datasets keeps the selected model's layers available. Remembered layer selections are scoped to the dataset and model, and feature counts from another model are discarded.
+- Each dataset has one prediction volume per model architecture and checkpoint revision, named `<dataset>_<model>_prediction`. Repeated XAI runs update that prediction while preserving its name, visibility, and transfer function. Each heatmap remains a separate volume. Different datasets or checkpoints retain their own predictions.
+- Slice dragging emits one change per slider/spinbox update, coalesces consecutive changes with a 16 ms timer, and refreshes only the changed slice and linked slices with the same orientation. It does not request extra 3D renders. Overlay affine sampling reads only the current plane, and overlay color maps are prepared when the workspace payload changes.
 - Video recording requires sufficient disk space and may take time depending on the rotation speed and number of frames.
 - Public datasets are available to test run. For example, https://www.kaggle.com/datasets/rajendrakpandey/mm-whs-2017-dataset-5-62-gb-158-files-ct-and-mr
 

@@ -33,7 +33,11 @@ class ModelRuntimeLoader:
     def load(self, cfg) -> ModelRuntime:
         import torch
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        getter = getattr(cfg, "get", None)
+        inference = getter("inference", {}) if callable(getter) else getattr(cfg, "inference", {})
+        configured_device = str(inference.get("device", "auto"))
+        device = torch.device(("cuda" if torch.cuda.is_available() else "cpu")
+                              if configured_device == "auto" else configured_device)
         model = self._build_model(cfg.model).to(device)
         checkpoint_path = str(cfg.ckpt)
         if not os.path.exists(checkpoint_path):
@@ -41,6 +45,8 @@ class ModelRuntimeLoader:
 
         pth = torch.load(checkpoint_path, map_location="cpu")
         state_dict = pth["state_dict"].copy() if "state_dict" in pth else pth.copy()
+        if state_dict and all(str(key).startswith("module.") for key in state_dict):
+            state_dict = {str(key).removeprefix("module."): value for key, value in state_dict.items()}
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing or unexpected:
             error_path = self._save_model_load_error(

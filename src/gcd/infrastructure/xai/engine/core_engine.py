@@ -11,7 +11,6 @@ from ..methods.cam_methods import (
     GradCamMethod,
     XaiMethodRegistry,
 )
-from ..runtime.layer_hooks import XaiLayerHookManager
 from ...model_input_preprocessor import (
     ModelInputPreprocessConfig,
     ModelInputPreprocessor,
@@ -104,10 +103,11 @@ class GradCamEngine:
             os.makedirs(self.save_dir, exist_ok=True)
 
     def _apply_config(self) -> None:
-        self.SIZE = self.cfg["size"]
-        self.STRIDE = self.cfg["stride"]
-        self.SPACING = self.cfg["spacing"]
-        self.PERMUTE = self.cfg["permute"]
+        window = tuple(self.cfg["inference"]["roi_size"])
+        self.SIZE = int(window[0])
+        self.STRIDE = max(1, int(self.SIZE * (1 - float(self.cfg["inference"].get("overlap", .25)))))
+        self.SPACING = self.cfg["preprocessing"]["spacing"]
+        self.PERMUTE = self.cfg.get("display", {}).get("permute", (1, 2, 0))
 
     def _log(self, message: str) -> None:
         self._logger(message)
@@ -123,6 +123,7 @@ class GradCamEngine:
         return ModelInputPreprocessConfig(
             size=int(self.SIZE),
             stride=int(self.STRIDE),
+            pipeline_config=self.cfg if self.cfg.get("preprocessing", {}).get("steps") else None,
             spacing=tuple(float(v) for v in self.SPACING),
             permute=tuple(int(v) for v in self.PERMUTE),
         )
@@ -133,6 +134,26 @@ class GradCamEngine:
             service = VolumeLoadingService()
             self.volume_loader = service
         return service
+
+    def _configured_tile_params(self, method_id, params):
+        from ..cam_protocol import resolve_cam_protocol
+        params = dict(params or {})
+        params["cam_protocol"] = resolve_cam_protocol(
+            params.get("cam_protocol", self._config_section("cam_protocol")))
+        inference = self._config_section("inference")
+        mode = inference.get("blend_mode", "constant")
+        sigma = inference.get("sigma_scale", 0.125)
+        params.setdefault("_blend_mode", mode)
+        params.setdefault("_sigma_scale", sigma)
+        params.setdefault("_sw_batch_size", inference.get("sw_batch_size", 1))
+        params.setdefault("_overlap", inference.get("overlap", 0.25))
+        params.setdefault("_padding_mode", inference.get("padding_mode", "constant"))
+        params.setdefault("_cval", inference.get("cval", 0.0))
+        return params
+
+    def _config_section(self, name):
+        getter = getattr(self.cfg, "get", None)
+        return getter(name, {}) if callable(getter) else getattr(self.cfg, name, {})
 
     def _model_input_service(self) -> ModelInputPreprocessor:
         service = getattr(self, "model_input_preprocessor", None)
@@ -193,12 +214,53 @@ class GradCamEngine:
     def set_config(self, config_path: str) -> None:
         self.cfg = _config_from_file(config_path)
         self._apply_config()
+        self._layer_metadata_cache = None
         self._log(f"已設定 Config 為: {config_path}")
 
     def model_layer_metadata(self) -> dict[str, object]:
-        model = _build_model(self.cfg.model)
-        hook_manager = XaiLayerHookManager(model)
-        layer_names = list(hook_manager.layer_names)
+        import torch
+        from ..runtime.layer_hooks import XaiLayerHookManager
+
+        # Discover channels from actual outputs, not duplicated cfg declarations.
+        # Cache only scalar metadata; no weights or activations survive inspection.
+        model_key = self.model_identity()
+        roi = tuple(int(v) for v in self.cfg.get("inference", {}).get(
+            "roi_size", (128,) * 3
+        ))
+        cache_key = (model_key, roi)
+        cached = getattr(self, "_layer_metadata_cache", None)
+        if cached is None or cached[0] != cache_key:
+            model = _build_model(self.cfg["model"])
+            targets = XaiLayerHookManager._validate_targets(model)
+            counts = {}
+            handles = []
+
+            def capture(name):
+                def hook(_module, _inputs, output):
+                    if not isinstance(output, torch.Tensor) or output.ndim < 2:
+                        raise TypeError(f"XAI layer '{name}' 必須輸出含 channel 維度的 Tensor。")
+                    counts[name] = int(output.shape[1])
+                return hook
+
+            try:
+                for name, path in targets.items():
+                    handles.append(model.get_submodule(path).register_forward_hook(capture(name)))
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                model.to(device).eval()
+                channels = int(self.cfg["model"].get("in_channels", 1))
+                with torch.inference_mode():
+                    model(torch.zeros((1, channels, *roi), device=device))
+                missing = set(targets) - counts.keys()
+                if missing:
+                    raise RuntimeError("XAI layer 未執行: " + ", ".join(sorted(missing)))
+                cached = (cache_key, tuple(targets), dict(counts))
+                self._layer_metadata_cache = cached
+            finally:
+                for handle in handles:
+                    handle.remove()
+                del model
+        layer_names = list(cached[1])
+        feature_sizes = dict(cached[2])
         default_layer = str(self.cfg.get("default_layer", "") or "")
         selected_layer = (
             default_layer
@@ -208,8 +270,15 @@ class GradCamEngine:
         return {
             "layer_names": layer_names,
             "selected_layer": selected_layer,
-            "feature_size": 0,
+            "feature_size": feature_sizes[selected_layer],
+            "feature_sizes": feature_sizes,
+            "model_key": model_key,
         }
+
+    def model_identity(self) -> str:
+        from ..runtime.model_identity import model_identity
+
+        return model_identity(self.cfg)
 
     def set_target_class(self, target_class: int) -> None:
         self.target_class = int(target_class)
@@ -557,8 +626,8 @@ class GradCamEngine:
         selected_objective_id, objective = self._resolve_objective(
             objective_id, cam_method.family
         )
-        method_params = dict(method_params or {})
-        if cam_method.id == "scorecam":
+        method_params = self._configured_tile_params(cam_method.id, method_params)
+        if cam_method.id in {"gradcam", "hirescam", "xrescam", "layercam", "scorecam"}:
             method_params["_objective_id"] = selected_objective_id
         self.active_method_id = cam_method.id
         self.active_objective_id = selected_objective_id
@@ -584,16 +653,14 @@ class GradCamEngine:
             device=str(runtime.device),
         ):
             tile_params = dict(method_params or {})
-            tile_stride = int(self.STRIDE)
-            if cam_method.id == "scorecam":
-                tile_params.setdefault("tile_strategy", "sliding_window")
-                if tile_params["tile_strategy"] == "sliding_window":
-                    tile_stride = min(tile_stride, max(1, int(self.SIZE) * 3 // 4))
+            inference_cfg = self._config_section("inference")
+            tile_params.setdefault("tile_strategy", inference_cfg.get("tile_strategy", "sliding_window"))
             tile_strategy = self._tile_strategy_service().resolve(tile_params)
+            window = tuple(inference_cfg.get("roi_size", (int(self.SIZE),) * 3))
+            tile_stride = tuple(max(1, int(v * (1 - float(inference_cfg.get("overlap", .25))))) for v in window)
             tile_plan = tile_strategy.plan(
                 input_shape=tuple(int(v) for v in self.img1[0].shape),
-                patch_size=int(self.SIZE),
-                stride=tile_stride,
+                patch_size=window, stride=tile_stride,
             )
             perturb_reference_volume = self._perturb_reference_volume(
                 method_params or {}, runtime.device
@@ -732,6 +799,7 @@ class GradCamEngine:
             raise ValueError(
                 "目前的 CAM patch 資料與指定 method 不一致，請重新載入輸入資料後再計算。"
             )
+        method_params = self._configured_tile_params(cam_method.id, method_params)
         if not self.patch:
             if getattr(self, "_patch_payload_released", False):
                 raise RuntimeError(

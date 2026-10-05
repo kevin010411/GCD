@@ -111,6 +111,8 @@ class _TransferEditor:
 class _Workspace:
     def __init__(self) -> None:
         self.annotations_changed = _Signal()
+        self.plane_state_changed = _Signal()
+        self.export_plane_state = lambda: {"plane": {}}
         self.payloads = []
         self._overlay_status = ""
         self.renderer = type(
@@ -262,6 +264,15 @@ class _FakeView:
         self.camera_plugin_button = _Control()
         self.perturbation_plugin_button = _Control()
         self.roi_plugin_button = _Control()
+        self.plane_plugin_button = _Control()
+        self.plane_plugin_panel = SimpleNamespace(state_changed=_Signal(), set_state=lambda state: None)
+        self.plane_reset_button = _Control()
+        self.plane_import_button = _Control()
+        self.plane_export_button = _Control()
+        self.autoshot_plugin_button = _Control()
+        self.autoshot_import_camera_button = _Control()
+        self.autoshot_refresh_button = _Control()
+        self.autoshot_start_button = _Control()
         self.roi_mode_combo = _Control()
         self.roi_point_size_slider = _Control()
         self.roi_point_size_spinbox = _Control()
@@ -280,7 +291,7 @@ class _FakeView:
         self._selected_objective = "predicted_target_mask"
         self._selected_layer = "layer-a"
         self._feature_range = (0, 8)
-        self._selected_model_path = "src/config/model/unet.py"
+        self._selected_model_path = "config/model/unet.py"
         self.method_options_calls = []
         self.objective_options_calls = []
         self.grad_dataset_options_calls = []
@@ -621,6 +632,24 @@ class _FakeErrorStore:
 
 
 class PresenterMethodTests(unittest.TestCase):
+    def test_uncomputed_layer_selection_uses_discovered_feature_counts(self) -> None:
+        view, workflow = _FakeView(), _FakeWorkflow()
+        workflow.model_layer_metadata.update(
+            feature_size=4,
+            feature_sizes={"encoder 1": 8, "decoder 1": 4},
+            model_key="current-model",
+        )
+        presenter = MainWindowPresenter(
+            view, workflow, object(), object(), _FakeTaskRunner(), _FakeErrorStore()
+        )
+        presenter._sync_xai_controls("gradient")
+        self.assertEqual(view.feature_size_calls[-1], (4,))
+        presenter.on_layer_changed("encoder 1")
+        self.assertEqual(view.feature_size_calls[-1], (8,))
+        presenter._sync_xai_controls("gradient")
+        self.assertEqual(view.layer_options_calls[-1][1], "encoder 1")
+        self.assertEqual(view.feature_size_calls[-1], (8,))
+
     def test_scorecam_new_layer_uses_all_features_and_selected_class(self) -> None:
         view = _FakeView()
         view._selected_grad_dataset = "dataset-1"
@@ -692,7 +721,7 @@ class PresenterMethodTests(unittest.TestCase):
 
         presenter.on_model_changed(0)
 
-        self.assertEqual(workflow.set_config_calls, ["src/config/model/unet.py"])
+        self.assertEqual(workflow.set_config_calls, ["config/model/unet.py"])
         self.assertEqual(
             view.layer_options_calls[-1],
             (["encoder 1", "decoder 1"], "decoder 1"),
@@ -703,7 +732,7 @@ class PresenterMethodTests(unittest.TestCase):
         view = _FakeView()
         workflow = _FakeWorkflow()
         workflow.model_configs = [
-            {"name": "unet", "path": "src/config/model/unet.py"},
+            {"name": "unet", "path": "config/model/unet.py"},
         ]
         presenter = MainWindowPresenter(
             view,
@@ -716,7 +745,7 @@ class PresenterMethodTests(unittest.TestCase):
 
         presenter.initialize()
 
-        self.assertEqual(workflow.set_config_calls, ["src/config/model/unet.py"])
+        self.assertEqual(workflow.set_config_calls, ["config/model/unet.py"])
         self.assertEqual(
             view.layer_options_calls[-1],
             (["encoder 1", "decoder 1"], "decoder 1"),

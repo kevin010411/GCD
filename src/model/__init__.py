@@ -1,4 +1,5 @@
 from .unet import Unet
+from .monai_unet import MonaiUNet
 from .unetcnx import UNETCNX_A1
 from .cotr.ResTranUnet import Cotr
 from .swin_unter import SwinTransformer

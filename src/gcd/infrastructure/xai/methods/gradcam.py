@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 from .base import XaiLayerSelection
 from .layer_gradient import LayerGradientXaiMethod
+from .benchmark_cam import raw_gradient_cam
 
 
 class GradCamMethod(LayerGradientXaiMethod):
@@ -22,6 +23,7 @@ class GradCamMethod(LayerGradientXaiMethod):
         activation, gradient = self._layer_tensors(patch_payload, selection.layer)
         activation = activation[:, selection.n1 : selection.n2, ...]
         gradient = gradient[:, selection.n1 : selection.n2, ...]
-        weights = torch.mean(gradient, dim=(2, 3, 4), keepdim=True)
-        gradcam = torch.sum(activation * weights, dim=1, keepdim=True)
-        return F.interpolate(gradcam, size=selection.output_size, mode="trilinear")
+        from ..cam_protocol import resolve_cam_protocol
+        protocol = resolve_cam_protocol(method_params.get("cam_protocol"))
+        gradcam = raw_gradient_cam(activation, gradient, "gradcam", rectify=protocol["relu_stage"] == "per_tile")
+        return F.interpolate(gradcam, size=selection.output_size, mode="trilinear", align_corners=False)

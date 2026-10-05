@@ -8,7 +8,6 @@ from src.gcd.infrastructure.xai.methods.cam_methods import (
     ScoreCamMethod,
 )
 from src.gcd.infrastructure.xai.tiling.tile_strategy import (
-    LegacyFourTileStrategy,
     SlidingWindowTileStrategy,
 )
 from src.gcd.infrastructure.xai.runners.xai_cam_runner import (
@@ -44,6 +43,7 @@ class XaiCamRunnerTests(unittest.TestCase):
             permute=(0, 1, 2),
             default_layer="feature",
             tile_plan=plan,
+            method_params={"_blend_mode": "gaussian"},
         ))
 
         axis_weight = gaussian_importance_map((3, 3, 3))[:, 1, 1]
@@ -94,8 +94,8 @@ class XaiCamRunnerTests(unittest.TestCase):
         self.assertAlmostEqual(float(result.cam[2, 0, 0]), 1.0)
         self.assertEqual(result.model_output.dtype, torch.uint8)
 
-    def test_legacy_strategy_does_not_allocate_unused_coverage_volume(self) -> None:
-        plan = LegacyFourTileStrategy().plan(
+    def test_sliding_strategy_allocates_coverage_volume(self) -> None:
+        plan = SlidingWindowTileStrategy().plan(
             input_shape=(4, 4, 2),
             patch_size=2,
             stride=1,
@@ -131,7 +131,7 @@ class XaiCamRunnerTests(unittest.TestCase):
             for call in zeroes.call_args_list
             if call.args and list(call.args[0]) == volume_shape
         ]
-        self.assertEqual(len(full_volume_allocations), 1)
+        self.assertEqual(len(full_volume_allocations), 2)
 
     def test_prediction_uses_int16_when_class_ids_exceed_uint8(self) -> None:
         plan = SlidingWindowTileStrategy().plan(

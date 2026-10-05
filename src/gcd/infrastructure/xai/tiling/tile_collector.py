@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..methods.cam_methods import CamMethod, CamPatchContext
 from ..runtime.layer_hooks import XaiLayerHookManager
-from .scorecam_blend import gaussian_importance_map
+from .scorecam_blend import tile_importance_map
 from .tile_strategy import TilePlan, TileRegion
 
 if TYPE_CHECKING:
@@ -54,16 +54,12 @@ class TileCollector:
         import torch
 
         method_params = dict(request.method_params or {})
+        from ..cam_protocol import resolve_cam_protocol
+        protocol = resolve_cam_protocol(method_params.get("cam_protocol"))
+        method_params["cam_protocol"] = protocol
         img2 = request.model_input.unsqueeze(0).to(request.device)
         if bool(getattr(request.method, "requires_input_grad", False)):
             img2.requires_grad_()
-        global_target_mask = (
-            self._scorecam_global_target_mask(request, img2)
-            if request.method.id == "scorecam"
-            and method_params.get("_objective_id") == "predicted_target_mask"
-            else None
-        )
-
         selected_layer = str(method_params.get("_selected_layer", "") or "")
         hook_manager = (
             XaiLayerHookManager(
@@ -71,6 +67,14 @@ class TileCollector:
                 selected_layers=(selected_layer,) if selected_layer else None,
             )
             if request.method.uses_layer_controls
+            else None
+        )
+        # Validate target paths before running any model inference.
+        global_target_mask = (
+            self._scorecam_global_target_mask(request, img2)
+            if request.method.id in {"scorecam", "gradcam", "hirescam", "xrescam", "layercam"}
+            and method_params.get("_objective_id") == "predicted_target_mask"
+            and protocol["target_region"] == "full_prediction"
             else None
         )
         patches: list[dict[str, object]] = []
@@ -162,8 +166,27 @@ class TileCollector:
 
     @staticmethod
     def _scorecam_global_target_mask(request: TileCollectionRequest, img2):
-        """Predict the whole volume before scoring channels in any window."""
+        """Fixed full-volume prediction target shared by all benchmark CAMs."""
         import torch
+
+        params = request.method_params or {}
+        if "_sw_batch_size" in params:
+            from monai.inferers import SlidingWindowInferer
+            inferer = SlidingWindowInferer(
+                roi_size=request.tile_plan.regions[0].size,
+                sw_batch_size=int(params["_sw_batch_size"]),
+                overlap=float(params.get("_overlap", .25)),
+                mode=params.get("_blend_mode", "gaussian"),
+                sigma_scale=params.get("_sigma_scale", .125),
+                padding_mode=params.get("_padding_mode", "constant"),
+                cval=float(params.get("_cval", 0.0)),
+                sw_device=request.device, device=request.device,
+            )
+            with torch.inference_mode():
+                logits = inferer(inputs=img2.detach(), network=request.model)
+                if isinstance(logits, (tuple, list)):
+                    logits = logits[0]
+                return (logits.argmax(dim=1)[0] == request.target_class).to("cpu")
 
         blended_logits = None
         with torch.no_grad():
@@ -177,7 +200,7 @@ class TileCollector:
                         (1, logits.size(1), *request.tile_plan.input_shape),
                         dtype=torch.float32,
                     )
-                weight = gaussian_importance_map(region.size)
+                weight = tile_importance_map(region.size, request.method_params or {})
                 blended_logits[
                     ..., region.slices[0], region.slices[1], region.slices[2]
                 ] += logits * weight
